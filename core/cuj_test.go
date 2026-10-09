@@ -3165,3 +3165,17 @@ func TestCUJ_PR1_PreviewRecallAfterQueuedAnswers(t *testing.T) {
 		t.Fatal(calls)
 	}
 }
+
+// First restored turn: three followups, temporary steering fallback, FIFO
+// recovery and reaction feedback, including a timer-originated first turn.
+func TestCUJ_ST2_RestoredFirstTurnSteeringRecovers(t *testing.T) {
+	for _, timerFirst := range []bool{false, true} {
+		for _, eventRetry := range []bool{false, true} {
+			t.Run(fmt.Sprintf("timer=%v/event=%v", timerFirst, eventRetry), func(t *testing.T) { cc27ResumedJourney(t, timerFirst, eventRetry) })
+		}
+	}
+}
+
+func TestCUJ_ST3_RestoredImageThenTextSteering(t *testing.T) {
+	cc27ImageJourney(t)
+}

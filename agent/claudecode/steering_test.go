@@ -107,7 +107,7 @@ func TestClaudeSteer_CompactionAndAttachmentFallback(t *testing.T) {
 	if (<-cs.events).Done {
 		t.Fatal("compaction terminal")
 	}
-	if ok, err := cs.Steer("image", "", []core.ImageAttachment{{Data: []byte("x")}}, nil); ok || err != nil {
+	if ok, err := cs.Steer("file", "", nil, []core.FileAttachment{{Data: []byte("x")}}); ok || err != nil {
 		t.Fatal("attachment should queue")
 	}
 	finish(cs, a["uuid"])
@@ -264,5 +264,88 @@ func TestClaudeSteer_PartialWriteQueuesSameFrameExactlyOnce(t *testing.T) {
 	case <-ch:
 		t.Fatal("duplicate input")
 	default:
+	}
+}
+
+func TestClaudeSteer_InlineImagesAndTextOnce(t *testing.T) {
+	cs, ch := steerFixture(t)
+	if err := cs.Send("first", "m1", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	first := takeInput(t, ch)
+	receipt, err := cs.SteerAsync("look at this", "m2", []core.ImageAttachment{{Data: []byte("png-data")}, {Data: []byte("jpeg-data"), MimeType: "image/jpeg"}}, nil)
+	if err != nil || receipt == nil {
+		t.Fatalf("image steer: %v %v", receipt, err)
+	}
+	frame := takeInput(t, ch)
+	parts := frame["message"].(map[string]any)["content"].([]any)
+	for i, want := range []string{"cG5nLWRhdGE=", "anBlZy1kYXRh"} {
+		part := parts[i].(map[string]any)
+		source := part["source"].(map[string]any)
+		mime := []string{"image/png", "image/jpeg"}[i]
+		if part["type"] != "image" || source["type"] != "base64" || source["media_type"] != mime || source["data"] != want {
+			t.Fatalf("image[%d]=%v", i, part)
+		}
+	}
+	if parts[2].(map[string]any)["text"] != "look at this" {
+		t.Fatal(parts)
+	}
+	if frame["uuid"] == first["uuid"] {
+		t.Fatal("reused UUID")
+	}
+	finish(cs, first["uuid"])
+	if ev := <-cs.events; ev.Done {
+		t.Fatal("image lost at native result boundary")
+	}
+	ack(cs, frame)
+	select {
+	case <-receipt.Ack:
+	default:
+		t.Fatal("image replay not acknowledged")
+	}
+	finish(cs, frame["uuid"])
+	if ev := <-cs.events; !ev.Done {
+		t.Fatal("image did not finish")
+	}
+	if len(ch) != 0 {
+		t.Fatal("duplicate image frame")
+	}
+}
+
+func TestClaudeSteer_PartialImageWriteQueuesSameUUID(t *testing.T) {
+	cs, ch := steerFixture(t)
+	cs.workDir = t.TempDir()
+	if err := cs.Send("first", "m1", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	first := takeInput(t, ch)
+	cs.stdin = &shortOncePipe{File: cs.stdin.(*os.File)}
+	images := []core.ImageAttachment{{Data: []byte("png-data"), MimeType: "image/png"}}
+	receipt, err := cs.SteerAsync("picture", "m2", images, nil)
+	if receipt != nil || !errors.Is(err, core.ErrSteerNotWritten) {
+		t.Fatalf("receipt=%v error=%v", receipt, err)
+	}
+	id := cs.partialInput.id
+	finish(cs, first["uuid"])
+	if !(<-cs.events).Done {
+		t.Fatal("incomplete image blocked original result")
+	}
+	if err := cs.Send("picture", "m2", images, nil); err != nil {
+		t.Fatal(err)
+	}
+	frame := takeInput(t, ch)
+	if frame["uuid"] != id {
+		t.Fatal("new image UUID instead of finishing partial frame")
+	}
+	parts := frame["message"].(map[string]any)["content"].([]any)
+	if parts[0].(map[string]any)["source"].(map[string]any)["data"] != "cG5nLWRhdGE=" {
+		t.Fatal("corrupt image")
+	}
+	finish(cs, id)
+	if !(<-cs.events).Done {
+		t.Fatal("queued image did not finish")
+	}
+	if len(ch) != 0 {
+		t.Fatal("duplicate frame")
 	}
 }

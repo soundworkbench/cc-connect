@@ -129,13 +129,15 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	msg := &Message{
-		SessionKey:   sessionKey,
-		Platform:     platformName,
-		UserID:       "cron",
-		UserName:     "cron",
-		Content:      content,
-		ReplyCtx:     replyCtx,
-		ModeOverride: job.Mode,
+		scheduledPrompt:  true,
+		scheduledInputID: "cron:" + job.ID + ":" + fmt.Sprint(time.Now().UnixNano()),
+		SessionKey:       sessionKey,
+		Platform:         platformName,
+		UserID:           "cron",
+		UserName:         "cron",
+		Content:          content,
+		ReplyCtx:         replyCtx,
+		ModeOverride:     job.Mode,
 	}
 
 	// Resolve workspace-specific agent and sessions for multi-workspace mode.
@@ -203,13 +205,12 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	session := sessions.GetOrCreateActive(sessionKey)
-	if !session.TryLock() {
-		return fmt.Errorf("session %q is busy", sessionKey)
-	}
-
 	iKey := sessionKey
 	if workspaceDir != "" {
 		iKey = workspaceDir + ":" + sessionKey
+	}
+	if queued, err := e.admitScheduledPrompt(effectivePlatform, msg, session, sessions, agent, iKey, workspaceDir); queued || err != nil {
+		return err
 	}
 	prevHistLen := session.HistoryLen()
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)

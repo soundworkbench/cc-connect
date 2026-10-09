@@ -361,6 +361,9 @@ type LocationAttachment struct {
 
 // Message represents a unified incoming message from any platform.
 type Message struct {
+	// scheduledPrompt is an internal scheduler admission flag, never set by platforms.
+	scheduledPrompt  bool
+	scheduledInputID string // scheduler occurrence ID, never a platform message ID
 	// IsolateAgent requests per-routing-key agent options in addition to history isolation.
 	IsolateAgent bool
 	SessionKey   string // unique key for user context, e.g. "feishu:{chatID}:{userID}"

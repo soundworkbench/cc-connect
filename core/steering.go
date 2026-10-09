@@ -7,7 +7,7 @@ import (
 
 // state.mu must be held, keeping admission/history ordered with the turn drain.
 func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg *Message, session *Session, sessions *SessionManager) bool {
-	if session == nil || sessions == nil || state.stopped || state.pending != nil {
+	if msg.scheduledPrompt || msg.ModeOverride != "" || session == nil || sessions == nil || state.stopped || state.pending != nil {
 		return false
 	}
 	if msg.MessageID != "" && state.steerMessageIDs[msg.MessageID] {
@@ -63,13 +63,23 @@ func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg 
 func (e *Engine) steerQueuedMessages(state *interactiveState, session *Session, sessions *SessionManager) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	e.steerQueuedMessagesLocked(state, session, sessions)
+}
+
+// state.mu must be held. Never retry a failed/uncertain write or overtake a
+// scheduled prompt, file, or permission-mode boundary.
+func (e *Engine) steerQueuedMessagesLocked(state *interactiveState, session *Session, sessions *SessionManager) {
 	for len(state.pendingMessages) > 0 {
 		q := state.pendingMessages[0]
+		if !q.steerRetry {
+			return
+		}
 		msg := &Message{Content: q.content, MessageID: q.messageID, Images: q.images, Files: q.files,
 			UserID: q.userID, UserName: q.userName, Platform: q.msgPlatform, SessionKey: q.msgSessionKey,
 			ChannelKey: q.channelKey, ReplyCtx: q.replyCtx, UserMessageTimeMs: q.userMessageTimeMs}
 		if !e.trySteerMessageLocked(state, q.platform, msg, session, sessions) {
 			if state.steerWriteFailed {
+				state.pendingMessages[0].steerRetry = false
 				state.steerWriteFailed = false
 				e.reply(q.platform, q.replyCtx, e.i18n.T(MsgMessageSteerWriteFailed))
 			}

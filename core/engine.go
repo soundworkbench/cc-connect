@@ -503,6 +503,10 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
+	scheduledPrompt   bool
+	scheduledInputID  string
+	steerRetry        bool
+	modeOverride      string
 	messageID         string
 	platform          Platform
 	replyCtx          any
@@ -2355,23 +2359,29 @@ func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interact
 		return true
 	}
 	for _, q := range state.pendingMessages {
-		if msg.MessageID != "" && q.messageID == msg.MessageID {
+		if (msg.MessageID != "" && q.messageID == msg.MessageID) || (msg.scheduledInputID != "" && q.scheduledInputID == msg.scheduledInputID) {
 			return true
 		}
 	}
-	if msg.MessageID != "" && state.steerMessageIDs[msg.MessageID] {
+	if (msg.MessageID != "" && state.steerMessageIDs[msg.MessageID]) || (msg.scheduledInputID != "" && state.steerMessageIDs[msg.scheduledInputID]) {
 		return true
 	}
+	// Retry temporarily unavailable steering before admitting newer input.
+	e.steerQueuedMessagesLocked(state, session, sessions)
 	// Do not overtake earlier input; startup queues drain after Send is ready.
 	if len(state.pendingMessages) == 0 && e.trySteerMessageLocked(state, p, msg, session, sessions) {
 		return true
 	}
-	if len(state.pendingMessages) >= e.maxQueuedMessages {
+	if !msg.scheduledPrompt && len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
 		return true // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
+		scheduledPrompt:   msg.scheduledPrompt,
+		scheduledInputID:  msg.scheduledInputID,
+		modeOverride:      msg.ModeOverride,
+		steerRetry:        !msg.scheduledPrompt && msg.ModeOverride == "" && !state.steerWriteFailed && len(msg.Files) == 0,
 		messageID:         msg.MessageID,
 		platform:          p,
 		replyCtx:          msg.ReplyCtx,
@@ -2386,6 +2396,12 @@ func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interact
 		channelKey:        msg.ChannelKey,
 		userMessageTimeMs: msg.UserMessageTimeMs,
 	})
+	if msg.scheduledInputID != "" {
+		if state.steerMessageIDs == nil {
+			state.steerMessageIDs = make(map[string]bool)
+		}
+		state.steerMessageIDs[msg.scheduledInputID] = true
+	}
 	runMessageAccepted(msg)
 	queueDepth := len(state.pendingMessages)
 
@@ -2402,6 +2418,9 @@ func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interact
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
+	if msg.scheduledPrompt {
+		return true
+	}
 	if state.steerWriteFailed {
 		state.steerWriteFailed = false
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageSteerWriteFailed))
@@ -2943,6 +2962,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
+	if msg.scheduledInputID != "" {
+		if state.steerMessageIDs == nil {
+			state.steerMessageIDs = make(map[string]bool)
+		}
+		state.steerMessageIDs[msg.scheduledInputID] = true
+	}
 	state.currentMessageID = msg.MessageID
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	state.mu.Unlock()
@@ -3191,6 +3216,7 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 		return
 	}
 	existing.mu.Lock()
+	newState.steerMessageIDs = existing.steerMessageIDs
 	if len(existing.pendingMessages) > 0 {
 		newState.pendingMessages = existing.pendingMessages
 		existing.pendingMessages = nil
@@ -4081,6 +4107,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		turnDeadlineCh = turnDeadlineTimer.C
 	}
 
+	var restoreQueuedMode func()
+	defer func() {
+		if restoreQueuedMode != nil {
+			restoreQueuedMode()
+		}
+	}()
 	events := state.agentSession.Events()
 	stopCh := state.stopSignal()
 	for {
@@ -4094,6 +4126,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case event, ok = <-events:
 			if !ok {
 				goto channelClosed
+			}
+			if event.Type == EventToolUse || event.Type == EventText || event.Type == EventThinking || event.Type == EventProgress {
+				e.steerQueuedMessages(state, session, sessions)
 			}
 		case err := <-pendingSend:
 			pendingSend = nil
@@ -5211,6 +5246,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				as := state.agentSession // capture under lock to avoid race with cleanup
 				state.mu.Unlock()
 
+				if restoreQueuedMode != nil {
+					restoreQueuedMode()
+					restoreQueuedMode = nil
+				}
+				restoreQueuedMode = e.applyQueuedMode(as, queued.modeOverride, replyAgent)
 				nextSend := make(chan error, 1)
 				go func() {
 					if as == nil {
@@ -5560,6 +5600,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		session.AddHistory("user", queued.content)
 
+		restoreMode := e.applyQueuedMode(as, queued.modeOverride, state.agent)
 		sendDone := make(chan error, 1)
 		go func() {
 			if as == nil {
@@ -5576,6 +5617,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		slog.Info("processing queued message", "session", sessionKey)
 		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx)
+		if restoreMode != nil {
+			restoreMode()
+		}
 	}
 }
 

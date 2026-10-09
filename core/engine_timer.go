@@ -124,13 +124,15 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	}
 
 	msg := &Message{
-		SessionKey:   sessionKey,
-		Platform:     platformName,
-		UserID:       "timer",
-		UserName:     "timer",
-		Content:      content,
-		ReplyCtx:     replyCtx,
-		ModeOverride: job.Mode,
+		scheduledPrompt:  true,
+		scheduledInputID: "timer:" + job.ID + ":" + fmt.Sprint(job.ScheduledAt.UnixNano()),
+		SessionKey:       sessionKey,
+		Platform:         platformName,
+		UserID:           "timer",
+		UserName:         "timer",
+		Content:          content,
+		ReplyCtx:         replyCtx,
+		ModeOverride:     job.Mode,
 	}
 
 	agent := e.agent
@@ -187,13 +189,12 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	}
 
 	session := sessions.GetOrCreateActive(sessionKey)
-	if !session.TryLock() {
-		return fmt.Errorf("session %q is busy", sessionKey)
-	}
-
 	iKey := sessionKey
 	if workspaceDir != "" {
 		iKey = workspaceDir + ":" + sessionKey
+	}
+	if queued, err := e.admitScheduledPrompt(effectivePlatform, msg, session, sessions, agent, iKey, workspaceDir); queued || err != nil {
+		return err
 	}
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
 	return nil

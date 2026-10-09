@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,8 +79,8 @@ func (cs *claudeSession) Send(prompt, messageID string, images []core.ImageAttac
 	return err
 }
 
-// Steer admits only text. Attachments retain the existing queued path so disk
-// writes and large payloads never block busy-session admission. Stop/permission
+// Steer admits text and inline images without attachment disk writes. Files
+// retain the queued path. Stop/permission
 // handling remains owned by Engine. No interrupt or auto-resend is performed.
 func (cs *claudeSession) Steer(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (bool, error) {
 	receipt, err := cs.SteerAsync(prompt, messageID, images, files)
@@ -99,7 +100,7 @@ func (cs *claudeSession) Steer(prompt, messageID string, images []core.ImageAtta
 // Only the write has a deadline. A tool can run much longer than three seconds.
 // Claude queues complete stdin frames itself, including across native results.
 func (cs *claudeSession) SteerAsync(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (*core.SteerReceipt, error) {
-	if len(images) > 0 || len(files) > 0 {
+	if len(files) > 0 {
 		return nil, nil
 	}
 	cs.inputMu.Lock()
@@ -134,7 +135,22 @@ func (cs *claudeSession) SteerAsync(prompt, messageID string, images []core.Imag
 	id := newInputID()
 	input := &claudeInput{ack: make(chan struct{}), steered: true}
 	cs.inputs[id] = input
-	data, _ := json.Marshal(map[string]any{"type": "user", "uuid": id, "message": map[string]any{"role": "user", "content": prompt}})
+	var content any = prompt
+	if len(images) > 0 {
+		parts := make([]map[string]any, 0, len(images)+1)
+		for _, img := range images {
+			mime := img.MimeType
+			if mime == "" {
+				mime = "image/png"
+			}
+			parts = append(parts, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": mime, "data": base64.StdEncoding.EncodeToString(img.Data)}})
+		}
+		if prompt != "" {
+			parts = append(parts, map[string]any{"type": "text", "text": prompt})
+		}
+		content = parts
+	}
+	data, _ := json.Marshal(map[string]any{"type": "user", "uuid": id, "message": map[string]any{"role": "user", "content": content}})
 	data = append(data, '\n')
 	n, err := cs.stdin.Write(data)
 	if err == nil && n != len(data) {
