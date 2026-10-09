@@ -19,6 +19,14 @@ type claudeInput struct {
 	steered  bool
 }
 
+// A short write cannot deliver a JSON line without its terminating newline.
+// Preserve its unwritten tail so the normal queued Send can finish that same
+// frame exactly once, rather than concatenate a second JSON object to it.
+type claudePartialInput struct {
+	id, messageID, prompt string
+	tail                  []byte
+}
+
 var _ core.AgentSessionSteerer = (*claudeSession)(nil)
 
 const claudeInputTimeout = 3 * time.Second
@@ -42,6 +50,22 @@ func (cs *claudeSession) Send(prompt, messageID string, images []core.ImageAttac
 	msg["uuid"] = id
 	cs.inputMu.Lock()
 	defer cs.inputMu.Unlock()
+	if p := cs.partialInput; p != nil {
+		if p.messageID != messageID || p.prompt != prompt {
+			return errors.New("claude: cannot overtake incomplete input frame")
+		}
+		cs.inputs[p.id] = &claudeInput{ack: make(chan struct{})}
+		cs.inputActive = true
+		n, err := cs.writeBoundedBytes(p.tail)
+		if err != nil {
+			p.tail = p.tail[n:]
+			delete(cs.inputs, p.id)
+			cs.inputActive = len(cs.inputs) > 0
+		} else {
+			cs.partialInput = nil
+		}
+		return err
+	}
 	if cs.inputs == nil {
 		cs.inputs = make(map[string]*claudeInput)
 	}
@@ -58,37 +82,54 @@ func (cs *claudeSession) Send(prompt, messageID string, images []core.ImageAttac
 // writes and large payloads never block busy-session admission. Stop/permission
 // handling remains owned by Engine. No interrupt or auto-resend is performed.
 func (cs *claudeSession) Steer(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (bool, error) {
+	receipt, err := cs.SteerAsync(prompt, messageID, images, files)
+	if err != nil || receipt == nil {
+		return false, err
+	}
+	select {
+	case <-receipt.Ack:
+		return true, nil
+	case <-receipt.End:
+		return false, errors.New("claude: process ended before acknowledgement")
+	case <-cs.ctx.Done():
+		return false, cs.ctx.Err()
+	}
+}
+
+// Only the write has a deadline. A tool can run much longer than three seconds.
+// Claude queues complete stdin frames itself, including across native results.
+func (cs *claudeSession) SteerAsync(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (*core.SteerReceipt, error) {
 	if len(images) > 0 || len(files) > 0 {
-		return false, nil
+		return nil, nil
 	}
 	cs.inputMu.Lock()
-	if !cs.inputActive || !cs.alive.Load() {
+	if !cs.inputActive || !cs.alive.Load() || cs.partialInput != nil {
 		cs.inputMu.Unlock()
-		return false, nil
+		return nil, nil
 	}
 	// Deadline-capable pipes are required, including bounded lock acquisition.
 	w, ok := cs.stdin.(interface{ SetWriteDeadline(time.Time) error })
 	if !ok {
 		cs.inputMu.Unlock()
-		return false, nil
+		return nil, nil
 	}
 	deadline := time.Now().Add(claudeInputTimeout)
 	for !cs.stdinMu.TryLock() {
 		if time.Now().After(deadline) {
 			cs.inputMu.Unlock()
-			return false, nil
+			return nil, nil
 		}
 		select {
 		case <-cs.ctx.Done():
 			cs.inputMu.Unlock()
-			return false, nil
+			return nil, nil
 		case <-time.After(time.Millisecond):
 		}
 	}
 	if err := w.SetWriteDeadline(deadline); err != nil {
 		cs.stdinMu.Unlock()
 		cs.inputMu.Unlock()
-		return false, nil
+		return nil, core.ErrSteerNotWritten
 	}
 	id := newInputID()
 	input := &claudeInput{ack: make(chan struct{}), steered: true}
@@ -101,26 +142,20 @@ func (cs *claudeSession) Steer(prompt, messageID string, images []core.ImageAtta
 	}
 	_ = w.SetWriteDeadline(time.Time{})
 	cs.stdinMu.Unlock()
-	if err != nil && n == 0 {
+	if err != nil && n < len(data) {
+		if n > 0 {
+			cs.partialInput = &claudePartialInput{id: id, messageID: messageID, prompt: prompt, tail: append([]byte(nil), data[n:]...)}
+		}
 		delete(cs.inputs, id)
 		cs.inputActive = len(cs.inputs) > 0
 		cs.inputMu.Unlock()
-		return false, nil
+		return nil, core.ErrSteerNotWritten
 	}
 	cs.inputMu.Unlock()
 	if err != nil {
-		return false, errors.New("claude: input write unconfirmed; not replaying")
+		return nil, core.ErrSteerWriteUncertain
 	}
-	timer := time.NewTimer(time.Until(deadline))
-	defer timer.Stop()
-	select {
-	case <-input.ack:
-		return true, nil
-	case <-cs.ctx.Done():
-		return false, errors.New("claude: session ended before input acknowledgement")
-	case <-timer.C:
-		return false, errors.New("claude: input acknowledgement timed out; not replaying")
-	}
+	return &core.SteerReceipt{Ack: input.ack, End: cs.done}, nil
 }
 
 func (cs *claudeSession) acknowledgeInput(raw map[string]any) {
@@ -182,34 +217,44 @@ func (cs *claudeSession) completeInputs(raw map[string]any) bool {
 // Ordinary Send is bounded too, so it cannot hold inputMu indefinitely and
 // prevent steering or completion from acquiring it. Test buffers use writeJSON.
 func (cs *claudeSession) writeBoundedUser(v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = cs.writeBoundedBytes(append(b, '\n'))
+	return err
+}
+
+func (cs *claudeSession) writeBoundedBytes(b []byte) (int, error) {
 	w, ok := cs.stdin.(interface{ SetWriteDeadline(time.Time) error })
 	if !ok {
-		return cs.writeJSON(v)
+		cs.stdinMu.Lock()
+		defer cs.stdinMu.Unlock()
+		n, err := cs.stdin.Write(b)
+		if err == nil && n != len(b) {
+			err = io.ErrShortWrite
+		}
+		return n, err
 	}
 	deadline := time.Now().Add(claudeInputTimeout)
 	for !cs.stdinMu.TryLock() {
 		if time.Now().After(deadline) {
-			return errors.New("claude: stdin lock timeout")
+			return 0, errors.New("claude: stdin lock timeout")
 		}
 		select {
 		case <-cs.ctx.Done():
-			return cs.ctx.Err()
+			return 0, cs.ctx.Err()
 		case <-time.After(time.Millisecond):
 		}
 	}
 	defer cs.stdinMu.Unlock()
 	if err := w.SetWriteDeadline(deadline); err != nil {
-		return err
+		return 0, err
 	}
 	defer w.SetWriteDeadline(time.Time{})
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
 	n, err := cs.stdin.Write(b)
 	if err == nil && n != len(b) {
 		err = io.ErrShortWrite
 	}
-	return err
+	return n, err
 }

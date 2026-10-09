@@ -173,6 +173,8 @@ const (
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
+	MsgMessageSteerWriteFailed   MsgKey = "message_steer_write_failed"
+	MsgSteerWriteInterrupted     MsgKey = "message_steer_write_interrupted"
 	MsgMessageSteered            MsgKey = "message_steered"
 	MsgMessageSteerUnconfirmed   MsgKey = "message_steer_unconfirmed"
 	MsgMessageQueued             MsgKey = "message_queued"
@@ -744,6 +746,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "⏳ 上一個請求仍在處理中。使用 `/ps <訊息>` 可向正在執行的任務追加補充資訊。",
 		LangJapanese:           "⏳ 前のリクエストを処理中です。`/ps <メッセージ>` で実行中のタスクに補足情報を送れます。",
 		LangSpanish:            "⏳ La solicitud anterior aún se está procesando. Use `/ps <mensaje>` para enviar un P.S. a la tarea en curso.",
+	},
+	MsgSteerWriteInterrupted: {
+		LangEnglish:            "The extra message write was interrupted; it was not automatically resent.",
+		LangChinese:            "补充消息写入中断，未自动重发。",
+		LangTraditionalChinese: "補充訊息寫入中斷，未自動重發。",
+		LangJapanese:           "追加メッセージの書き込みが中断されました。自動再送はしていません。",
+		LangSpanish:            "La escritura del mensaje adicional se interrumpió; no se reenvió automáticamente.",
+	},
+	MsgMessageSteerWriteFailed: {
+		LangEnglish:            "The extra message could not enter the current task; queued for the next turn.",
+		LangChinese:            "补充消息没有送进当前任务，已排到下一轮处理。",
+		LangTraditionalChinese: "補充訊息沒有送進目前任務，已排到下一輪處理。",
+		LangJapanese:           "追加メッセージを現在のタスクに送れなかったため、次のターンに登録しました。",
+		LangSpanish:            "El mensaje adicional no pudo entrar en la tarea actual; se procesará en el siguiente turno.",
 	},
 	MsgMessageSteered: {
 		LangEnglish:            "Additional message delivered to the current task.",

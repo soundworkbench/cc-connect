@@ -1,18 +1,35 @@
 package core
 
-import "log/slog"
+import (
+	"errors"
+	"log/slog"
+)
 
 // state.mu must be held, keeping admission/history ordered with the turn drain.
 func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg *Message, session *Session, sessions *SessionManager) bool {
 	if session == nil || sessions == nil || state.stopped || state.pending != nil {
 		return false
 	}
-	steerer, ok := state.agentSession.(AgentSessionSteerer)
-	if !ok {
-		return false
+	if msg.MessageID != "" && state.steerMessageIDs[msg.MessageID] {
+		return true
 	}
 	prompt := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
-	accepted, err := steerer.Steer(prompt, msg.MessageID, msg.Images, msg.Files)
+	var accepted bool
+	var err error
+	var receipt *SteerReceipt
+	if async, ok := state.agentSession.(AgentSessionAsyncSteerer); ok {
+		receipt, err = async.SteerAsync(prompt, msg.MessageID, msg.Images, msg.Files)
+		accepted = receipt != nil
+	} else if steerer, ok := state.agentSession.(AgentSessionSteerer); ok {
+		accepted, err = steerer.Steer(prompt, msg.MessageID, msg.Images, msg.Files)
+	} else {
+		return false
+	}
+	if errors.Is(err, ErrSteerNotWritten) {
+		state.steerWriteFailed = true
+		return false
+	}
+
 	if accepted || err != nil {
 		runMessageAccepted(msg)
 		session.TouchUserActivity()
@@ -21,14 +38,22 @@ func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg 
 		if msg.UserMessageTimeMs > state.currentTurnUserMessageTimeMs {
 			state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 		}
-		if err != nil {
-			// Do not log upstream text: it can include user input or credentials.
-			slog.Warn("active-turn message delivery unconfirmed", "session", msg.SessionKey, "msg_id", msg.MessageID)
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageSteerUnconfirmed))
-		} else {
-			slog.Info("message accepted into active turn", "session", msg.SessionKey, "msg_id", msg.MessageID)
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageSteered))
+		if state.steerMessageIDs == nil {
+			state.steerMessageIDs = make(map[string]bool)
 		}
+		if msg.MessageID != "" {
+			state.steerMessageIDs[msg.MessageID] = true
+		}
+		if err != nil {
+			// Uncertain transport errors must never trigger an automatic duplicate.
+			slog.Warn("active-turn message delivery unconfirmed", "session", msg.SessionKey, "msg_id", msg.MessageID)
+			if errors.Is(err, ErrSteerWriteUncertain) {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerWriteInterrupted))
+			}
+		} else {
+			e.steerReaction(p, msg.ReplyCtx, receipt)
+		}
+
 		return true
 	}
 	return false
@@ -44,8 +69,41 @@ func (e *Engine) steerQueuedMessages(state *interactiveState, session *Session, 
 			UserID: q.userID, UserName: q.userName, Platform: q.msgPlatform, SessionKey: q.msgSessionKey,
 			ChannelKey: q.channelKey, ReplyCtx: q.replyCtx, UserMessageTimeMs: q.userMessageTimeMs}
 		if !e.trySteerMessageLocked(state, q.platform, msg, session, sessions) {
+			if state.steerWriteFailed {
+				state.steerWriteFailed = false
+				e.reply(q.platform, q.replyCtx, e.i18n.T(MsgMessageSteerWriteFailed))
+			}
 			return
 		}
 		state.pendingMessages = state.pendingMessages[1:]
 	}
+}
+
+// Network reaction calls and acknowledgement waits never hold the session lock.
+func (e *Engine) steerReaction(p Platform, replyCtx any, receipt *SteerReceipt) {
+	reaction, ok := p.(SteerReaction)
+	if !ok {
+		return
+	}
+	go func() {
+		finish := reaction.StartSteerReaction(e.ctx, replyCtx)
+		if receipt == nil {
+			finish(true)
+			return
+		}
+		select {
+		case <-receipt.Ack:
+			finish(true)
+		case <-receipt.End:
+			// Prefer an acknowledgement that raced process exit.
+			select {
+			case <-receipt.Ack:
+				finish(true)
+			default:
+				finish(false)
+			}
+		case <-e.ctx.Done():
+			finish(false)
+		}
+	}()
 }

@@ -408,12 +408,39 @@ type Agent interface {
 // AgentSession represents a running interactive agent session with a persistent process.
 // AgentSessionSteerer optionally accepts input into the active turn.
 // true,nil means acknowledged; false,nil means definitely not accepted and safe
-// to queue. Any error means delivery is uncertain and MUST NOT be auto-replayed.
-// Implementations must bound the call and must not expose a second Engine turn.
+// to queue. Errors other than ErrSteerNotWritten mean delivery is uncertain
+// and MUST NOT be auto-replayed. Engine prefers AgentSessionAsyncSteerer when
+// implemented; otherwise Steer must bound its synchronous acknowledgement wait.
 // Backends with queued streaming input must coalesce their native result frames.
 type AgentSessionSteerer interface {
 	Steer(prompt, messageID string, images []ImageAttachment, files []FileAttachment) (bool, error)
 }
+
+// SteerReceipt separates a successful write from consumption. Ack closes only
+// after protocol acknowledgement; End closes when the owning process exits.
+// The backend owns both channels and any native queue across result boundaries.
+type SteerReceipt struct {
+	Ack <-chan struct{}
+	End <-chan struct{}
+}
+
+// A nil receipt with nil error declines steering. ErrSteerNotWritten permits
+// normal queue admission; all other errors must not cause automatic replay.
+type AgentSessionAsyncSteerer interface {
+	SteerAsync(prompt, messageID string, images []ImageAttachment, files []FileAttachment) (*SteerReceipt, error)
+}
+
+// SteerReaction creates a received reaction and returns a completion callback.
+// consumed=false removes the pending reaction without claiming consumption.
+type SteerReaction interface {
+	StartSteerReaction(ctx context.Context, replyCtx any) func(consumed bool)
+}
+
+// ErrSteerNotWritten is safe to queue: no complete input frame was delivered.
+var ErrSteerNotWritten = errors.New("steer input was not written")
+
+// A complete frame accompanied by a write error has uncertain delivery.
+var ErrSteerWriteUncertain = errors.New("steer input write interrupted")
 
 type AgentSession interface {
 	// Send sends a user message (with optional images and files) to the running

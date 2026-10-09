@@ -115,15 +115,17 @@ func TestClaudeSteer_CompactionAndAttachmentFallback(t *testing.T) {
 		t.Fatal("final missing")
 	}
 }
-func TestClaudeSteer_TimeoutDoesNotReplayOrFinishEarly(t *testing.T) {
+func TestClaudeSteer_LateAckAfterThreeSecondsNoReplay(t *testing.T) {
 	cs, ch := steerFixture(t)
 	cs.Send("first", "", nil, nil)
 	a := takeInput(t, ch)
 	done := make(chan error, 1)
 	go func() { _, e := cs.Steer("second", "", nil, nil); done <- e }()
 	b := takeInput(t, ch)
-	if err := <-done; err == nil {
-		t.Fatal("missing acknowledgement must be uncertain")
+	select {
+	case err := <-done:
+		t.Fatalf("ack returned before consumption: %v", err)
+	case <-time.After(3200 * time.Millisecond):
 	}
 	select {
 	case <-ch:
@@ -135,6 +137,9 @@ func TestClaudeSteer_TimeoutDoesNotReplayOrFinishEarly(t *testing.T) {
 		t.Fatal("lost uncertain input")
 	}
 	ack(cs, b)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 	finish(cs, b["uuid"])
 	if !(<-cs.events).Done {
 		t.Fatal("late result not terminal")
@@ -173,11 +178,10 @@ func (p failingSteerPipe) SetWriteDeadline(time.Time) error {
 }
 func TestClaudeSteer_WriteFailureAdmission(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		pipe      failingSteerPipe
-		uncertain bool
+		name string
+		pipe failingSteerPipe
 	}{
-		{"zero", failingSteerPipe{}, false}, {"partial", failingSteerPipe{partial: true}, true}, {"deadline", failingSteerPipe{deadlineFail: true}, false},
+		{"zero", failingSteerPipe{}}, {"partial", failingSteerPipe{partial: true}}, {"deadline", failingSteerPipe{deadlineFail: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cs, ch := steerFixture(t)
@@ -187,11 +191,11 @@ func TestClaudeSteer_WriteFailureAdmission(t *testing.T) {
 			a := takeInput(t, ch)
 			cs.stdin = tc.pipe
 			ok, err := cs.Steer("second", "", nil, nil)
-			if ok || (err != nil) != tc.uncertain {
+			if ok || !errors.Is(err, core.ErrSteerNotWritten) {
 				t.Fatal("incorrect delivery certainty")
 			}
 			finish(cs, a["uuid"])
-			if (<-cs.events).Done == tc.uncertain {
+			if !(<-cs.events).Done {
 				t.Fatal("incorrect completion after write failure")
 			}
 		})
@@ -208,6 +212,57 @@ func TestClaudeSteer_StoppedQueues(t *testing.T) {
 	select {
 	case <-ch:
 		t.Fatal("unexpected write")
+	default:
+	}
+}
+
+// Unlike a mock that only reports n=1, this pipe actually commits a prefix.
+// Retrying a whole JSON frame would make the scanner reject the next input.
+type shortOncePipe struct {
+	*os.File
+	failed bool
+}
+
+func (p *shortOncePipe) Write(b []byte) (int, error) {
+	if !p.failed {
+		p.failed = true
+		n, err := p.File.Write(b[:7])
+		if err != nil {
+			return n, err
+		}
+		return n, errors.New("transient short write")
+	}
+	return p.File.Write(b)
+}
+func TestClaudeSteer_PartialWriteQueuesSameFrameExactlyOnce(t *testing.T) {
+	cs, ch := steerFixture(t)
+	if err := cs.Send("first", "m1", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	first := takeInput(t, ch)
+	cs.stdin = &shortOncePipe{File: cs.stdin.(*os.File)}
+	receipt, err := cs.SteerAsync("supplement", "m2", nil, nil)
+	if receipt != nil || !errors.Is(err, core.ErrSteerNotWritten) {
+		t.Fatalf("receipt=%v error=%v", receipt, err)
+	}
+	finish(cs, first["uuid"])
+	if !(<-cs.events).Done {
+		t.Fatal("incomplete frame held old turn open")
+	}
+	if err = cs.Send("supplement", "m2", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	second := takeInput(t, ch)
+	if second["message"].(map[string]any)["content"] != "supplement" {
+		t.Fatal("frame corrupted")
+	}
+	finish(cs, second["uuid"])
+	if !(<-cs.events).Done {
+		t.Fatal("queued turn not finished")
+	}
+	select {
+	case <-ch:
+		t.Fatal("duplicate input")
 	default:
 	}
 }

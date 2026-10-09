@@ -2813,12 +2813,15 @@ func (s *steeringJourneySession) Steer(prompt, _ string, _ []ImageAttachment, _ 
 }
 
 func TestCUJ_ST1_SteeringContinuousMessages(t *testing.T) {
-	for _, outcome := range []string{"accepted", "rejected", "unconfirmed", "startup"} {
+	for _, outcome := range []string{"accepted", "rejected", "unconfirmed", "startup", "write-failed"} {
 		t.Run(outcome, func(t *testing.T) {
 			p := &stubPlatformEngine{n: "steering"}
 			s := &steeringJourneySession{cujAgentSession: newCUJAgentSession(), started: make(chan string, 8), steered: make(chan string, 8), accept: outcome == "accepted" || outcome == "startup"}
 			if outcome == "startup" {
 				s.ready = make(chan struct{})
+			}
+			if outcome == "write-failed" {
+				s.steerErr = ErrSteerNotWritten
 			}
 			if outcome == "unconfirmed" {
 				s.steerErr = errors.New("transport closed after write")
@@ -2851,23 +2854,26 @@ func TestCUJ_ST1_SteeringContinuousMessages(t *testing.T) {
 			if outcome == "startup" {
 				close(s.ready)
 			}
-			notice := e.i18n.T(MsgMessageSteered)
-			if outcome == "rejected" {
-				notice = e.i18n.T(MsgMessageQueued)
-			}
-			if outcome == "unconfirmed" {
-				notice = e.i18n.T(MsgMessageSteerUnconfirmed)
-			}
-			wait(func() bool {
-				n := 0
+			if outcome == "rejected" || outcome == "write-failed" {
+				wait(func() bool {
+					n := 0
+					for _, v := range p.getSent() {
+						if v == e.i18n.T(MsgMessageQueued) || v == e.i18n.T(MsgMessageSteerWriteFailed) {
+							n++
+						}
+					}
+					return n == 2
+				})
+			} else {
+				wait(func() bool { return len(s.steered) == 2 })
 				for _, v := range p.getSent() {
-					if v == notice {
-						n++
+					if v == e.i18n.T(MsgMessageSteered) || v == e.i18n.T(MsgMessageSteerUnconfirmed) {
+						t.Fatalf("noisy steering notice: %s", v)
 					}
 				}
-				return n == 2
-			})
-			if outcome != "rejected" {
+			}
+
+			if outcome != "rejected" && outcome != "write-failed" {
 				if len(s.steered) != 2 {
 					t.Fatalf("running task received %d additions", len(s.steered))
 				}
@@ -2876,7 +2882,7 @@ func TestCUJ_ST1_SteeringContinuousMessages(t *testing.T) {
 				}
 			}
 			s.events <- Event{Type: EventResult, Content: "已合并全部要求", Done: true}
-			if outcome == "rejected" {
+			if outcome == "rejected" || outcome == "write-failed" {
 				for i := 0; i < 2; i++ {
 					select {
 					case <-s.started:
@@ -2887,7 +2893,7 @@ func TestCUJ_ST1_SteeringContinuousMessages(t *testing.T) {
 				}
 			}
 			wait(func() bool { return !e.sessions.GetOrCreateActive(key).Busy() })
-			if outcome != "rejected" && len(s.started) != 0 {
+			if outcome != "rejected" && outcome != "write-failed" && len(s.started) != 0 {
 				t.Fatal("steered input was replayed after final response")
 			}
 			history := e.sessions.GetOrCreateActive(key).GetHistory(0)

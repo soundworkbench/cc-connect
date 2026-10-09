@@ -534,6 +534,8 @@ type interactiveState struct {
 	stopped                  bool
 	backgroundTurnLease      bool
 	pending                  *pendingPermission
+	steerMessageIDs          map[string]bool // dedup admitted supplements in this session
+	steerWriteFailed         bool            // next queue admission follows a hard stdin write failure
 	pendingMessages          []queuedMessage // messages queued while session was busy
 	approveAll               bool            // when true, auto-approve all permission requests for this session
 	fromVoice                bool            // true if current turn originated from voice transcription
@@ -2351,6 +2353,14 @@ func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interact
 		e.logStaleUserMessageDropped("reject_before_queue", msg, interactiveKey, snap)
 		return true
 	}
+	for _, q := range state.pendingMessages {
+		if msg.MessageID != "" && q.messageID == msg.MessageID {
+			return true
+		}
+	}
+	if msg.MessageID != "" && state.steerMessageIDs[msg.MessageID] {
+		return true
+	}
 	// Do not overtake earlier input; startup queues drain after Send is ready.
 	if len(state.pendingMessages) == 0 && e.trySteerMessageLocked(state, p, msg, session, sessions) {
 		return true
@@ -2391,7 +2401,12 @@ func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interact
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	if state.steerWriteFailed {
+		state.steerWriteFailed = false
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageSteerWriteFailed))
+	} else {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	}
 	return true
 }
 

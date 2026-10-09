@@ -78,9 +78,10 @@ type claudeSession struct {
 	// EventThinking: deployments can hide private reasoning independently.
 	pendingText []string
 
-	inputMu     sync.Mutex
-	inputs      map[string]*claudeInput
-	inputActive bool
+	inputMu      sync.Mutex
+	inputs       map[string]*claudeInput
+	inputActive  bool
+	partialInput *claudePartialInput // incomplete frame, guarded by inputMu
 }
 
 // StartupWarning implements core.StartupWarner. Returns a non-empty string

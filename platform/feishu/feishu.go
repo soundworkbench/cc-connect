@@ -6803,3 +6803,26 @@ func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 		slog.Debug("feishu: set preview status patch failed", "code", resp.Code, "msg", resp.Msg)
 	}
 }
+
+// StartSteerReaction reuses the existing Feishu reaction API, but consumption
+// confirmation is independent of the quiet-mode task completion preference.
+func (p *Platform) StartSteerReaction(ctx context.Context, rctx any) func(bool) {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.messageID == "" {
+		return func(bool) {}
+	}
+	emoji := p.reactionEmoji
+	if emoji == "" {
+		emoji = "Get"
+	}
+	id := p.addReactionWithEmoji(rc.messageID, emoji)
+	var once sync.Once
+	return func(consumed bool) {
+		once.Do(func() {
+			p.removeReaction(rc.messageID, id)
+			if consumed {
+				p.addReactionWithEmoji(rc.messageID, "DONE")
+			}
+		})
+	}
+}

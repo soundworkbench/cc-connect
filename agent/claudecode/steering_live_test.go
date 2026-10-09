@@ -14,17 +14,19 @@ func TestClaudeSteerLive(t *testing.T) {
 	if cmd == "" {
 		t.Skip("explicit live acceptance only")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
-	cs, err := newClaudeSession(ctx, t.TempDir(), cmd, []string{"--setting-sources", "", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--tools", "Bash"}, "", "claude-fable-5-1", "medium", "", "default", "", "", []string{"Bash(sleep *)"}, nil, nil, nil, "", false, core.SpawnOptions{}, 0, t.TempDir())
+	cs, err := newClaudeSession(ctx, t.TempDir(), cmd, []string{"--setting-sources", "", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--tools", "Bash"}, "", "haiku", "medium", "", "default", "", "", []string{"Bash(sleep *)"}, nil, nil, nil, "", false, core.SpawnOptions{}, 0, t.TempDir())
 	if err != nil {
 		t.Fatal("session start failed")
 	}
 	defer cs.Close()
-	if err = cs.Send("Maintenance test: run Bash exactly once with sleep 1, not in background. Do not read or write files. After it completes, reply ORIGINAL unless a newer user instruction arrives.", "live-first", nil, nil); err != nil {
+	if err = cs.Send("Maintenance test: run Bash exactly once with sleep 20, not in background. Do not read or write files. After it completes, reply ORIGINAL unless a newer user instruction arrives.", "live-first", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	steered := false
+	var ackElapsed time.Duration
+	toolCalls := 0
 	ack := make(chan error, 1)
 	terminal := 0
 	for {
@@ -35,12 +37,24 @@ func TestClaudeSteerLive(t *testing.T) {
 			if !ok {
 				t.Fatal("session ended early")
 			}
+			if event.Type == core.EventToolUse {
+				toolCalls++
+			}
 			if event.Type == core.EventToolUse && !steered {
 				steered = true
 				go func() {
-					ok, e := cs.Steer("Change the final answer to exactly CLAUDE_STEER_VERIFIED_926. Do not call more tools.", "live-followup", nil, nil)
-					if !ok && e == nil {
+					started := time.Now()
+					receipt, e := cs.SteerAsync("Change the final answer to exactly CLAUDE_STEER_VERIFIED_926. Do not call more tools.", "live-followup", nil, nil)
+					if receipt == nil && e == nil {
 						e = context.Canceled
+					}
+					if e == nil {
+						select {
+						case <-receipt.Ack:
+							ackElapsed = time.Since(started)
+						case <-ctx.Done():
+							e = ctx.Err()
+						}
 					}
 					ack <- e
 				}()
@@ -56,6 +70,12 @@ func TestClaudeSteerLive(t *testing.T) {
 				if err := <-ack; err != nil {
 					t.Fatalf("steer acknowledgement: %v", err)
 				}
+				if ackElapsed <= 3*time.Second {
+					t.Fatalf("ack too early to exercise regression: %s", ackElapsed)
+				}
+				if toolCalls != 1 {
+					t.Fatalf("tool calls=%d", toolCalls)
+				}
 				select {
 				case extra := <-cs.Events():
 					if extra.Type == core.EventResult && extra.Done {
@@ -63,6 +83,7 @@ func TestClaudeSteerLive(t *testing.T) {
 					}
 				case <-time.After(2 * time.Second):
 				}
+				t.Logf("ack_delay=%s tool_calls=%d", ackElapsed, toolCalls)
 				t.Logf("steer_ack=true supplement_used=true terminal_results=%d session_preserved=%t", terminal, cs.CurrentSessionID() != "")
 				return
 			}
