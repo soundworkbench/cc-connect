@@ -50,6 +50,10 @@ type streamPreview struct {
 	timer     *time.Timer
 	timerStop chan struct{} // closed when preview ends
 
+	progressRows        []string
+	progressSeen        map[string]struct{}
+	progressFolded      int
+	keepProgressCard    bool
 	pendingToolProgress string     // latest coalesced progress; never answer text
 	pendingStatus       CardStatus // last status set via setStatus(); applied on recovery
 }
@@ -712,6 +716,8 @@ func (sp *streamPreview) detachForFinal() *streamPreview {
 	sp.degraded = true
 	final := newStreamPreview(sp.cfg, sp.platform, sp.replyCtx, sp.ctx, sp.transform)
 	final.previewMsgID, final.lastSentText = sp.previewMsgID, sp.lastSentText
+	final.keepProgressCard = sp.keepProgressCard
+	final.pendingToolProgress = sp.pendingToolProgress
 	sp.previewMsgID = nil
 	return final
 }
@@ -724,6 +730,9 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 	sp.cancelTimerLocked()
 	sp.degraded = true
 	handle, progress := sp.previewMsgID, sp.lastSentText
+	if (sp.keepProgressCard || len(sp.progressRows) > 0) && sp.pendingToolProgress != "" {
+		progress = sp.pendingToolProgress
+	}
 	sp.previewMsgID = nil
 	select {
 	case <-sp.timerStop:
@@ -773,7 +782,21 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 		}
 		return false
 	}
-	if handle != nil {
+	if handle != nil && sp.keepProgressCard {
+		if status, ok := sp.platform.(PreviewStatusUpdater); ok {
+			status.SetPreviewStatus(handle, CardStatusDone)
+		}
+		if updater, ok := sp.platform.(MessageUpdater); ok {
+			text := progress
+			if sp.transform != nil {
+				text = sp.transform(text)
+			}
+			if err := updater.UpdateMessage(sp.ctx, handle, text); err != nil {
+				slog.Warn("final response: retained progress update failed", "error", err)
+			}
+		}
+	}
+	if handle != nil && !sp.keepProgressCard {
 		if cleaner, ok := sp.platform.(PreviewCleaner); ok {
 			if err := cleaner.DeletePreviewMessage(sp.ctx, handle); err != nil {
 				slog.Warn("final response: recall failed", "error", err)

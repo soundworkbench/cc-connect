@@ -197,7 +197,9 @@ type DisplayConfig struct {
 	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
 	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
-	ToolProgressLines    *int    `toml:"tool_progress_lines"`    // quiet default 3; 0 disables; range 0–3
+	ProgressHistory      *string `toml:"progress_history"`       // quiet default append; append or recent
+	KeepProgressCard     *bool   `toml:"keep_progress_card"`     // default false
+	ToolProgressLines    *int    `toml:"tool_progress_lines"`    // quiet enabled; 0 disables; 1–3 caps recent mode only
 	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
 	HistoryMaxLen        *int    `toml:"history_max_len"`        // max chars per /history entry; 0 = no truncation; default 1000
 	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
@@ -1084,6 +1086,9 @@ func EffectiveToolProgressLines(cfg *Config, proj *ProjectConfig) *int {
 func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 	if display == nil {
 		return nil
+	}
+	if display.ProgressHistory != nil && *display.ProgressHistory != "append" && *display.ProgressHistory != "recent" {
+		return fmt.Errorf("config: %s.progress_history must be append or recent", prefix)
 	}
 	if display.ToolProgressLines != nil && (*display.ToolProgressLines < 0 || *display.ToolProgressLines > 3) {
 		return fmt.Errorf("config: %s.tool_progress_lines must be between 0 and 3", prefix)
@@ -3993,4 +3998,21 @@ func orDefault(v, d int) int {
 		return d
 	}
 	return v
+}
+
+func EffectiveProgressHistory(cfg *Config, proj *ProjectConfig) string {
+	if proj != nil && proj.Display != nil && proj.Display.ProgressHistory != nil {
+		return *proj.Display.ProgressHistory
+	}
+	if cfg.Display.ProgressHistory != nil {
+		return *cfg.Display.ProgressHistory
+	}
+	return ""
+}
+
+func EffectiveKeepProgressCard(cfg *Config, proj *ProjectConfig) bool {
+	if proj != nil && proj.Display != nil && proj.Display.KeepProgressCard != nil {
+		return *proj.Display.KeepProgressCard
+	}
+	return cfg.Display.KeepProgressCard != nil && *cfg.Display.KeepProgressCard
 }

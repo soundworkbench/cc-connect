@@ -109,8 +109,12 @@ level = "info" # debug, info, warn, error
 # 设为 0 表示不截断（显示完整内容）。
 
 # [display]
-# Recent tool rows in the existing compact placeholder (0 disables, 1–3 rows).
-# Defaults to 3 in quiet mode; full mode retains its existing behavior.
+# Append public progress in time order (quiet default); recent restores old behavior.
+# progress_history = "append"
+# Keep compact progress after final delivery; false recalls after successful delivery.
+# keep_progress_card = false
+# Tool rows: 0 disables; 1–3 caps recent mode only. Append keeps all within safety budget.
+# Defaults to enabled in quiet mode; full mode retains its existing behavior.
 # tool_progress_lines = 3
 # mode = "full"             # Display mode: "full" (default), "compact", or "quiet"
 #                           # full: show thinking + tool messages as separate messages

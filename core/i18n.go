@@ -159,6 +159,7 @@ func (i *I18n) SetLang(lang Language) {
 type MsgKey string
 
 const (
+	MsgProgressFolded      MsgKey = "progress_folded"
 	MsgProgressCommand     MsgKey = "tool_progress_command"
 	MsgProgressRead        MsgKey = "tool_progress_read"
 	MsgProgressEdit        MsgKey = "tool_progress_edit"
@@ -674,6 +675,7 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgProgressFolded:      {LangChinese: "…（前 %d 条已折叠）", LangEnglish: "… (%d earlier entries folded)", LangTraditionalChinese: "…（前 %d 條已摺疊）", LangJapanese: "…（前の %d 件を折りたたみました）", LangSpanish: "… (%d entradas anteriores contraídas)"},
 	MsgProgressCommand:     {LangChinese: "运行命令", LangEnglish: "Run command", LangTraditionalChinese: "執行命令", LangJapanese: "コマンドを実行", LangSpanish: "Ejecutar comando"},
 	MsgProgressRead:        {LangChinese: "读取文件", LangEnglish: "Read file", LangTraditionalChinese: "讀取檔案", LangJapanese: "ファイルを読む", LangSpanish: "Leer archivo"},
 	MsgProgressEdit:        {LangChinese: "修改文件", LangEnglish: "Modify file", LangTraditionalChinese: "修改檔案", LangJapanese: "ファイルを変更", LangSpanish: "Modificar archivo"},

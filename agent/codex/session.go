@@ -500,7 +500,7 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 	switch itemType {
 	case "command_execution":
 		command, _ := item["command"].(string)
-		evt := core.Event{Type: core.EventToolUse, ToolName: "Bash", ToolInput: command}
+		evt := core.Event{Type: core.EventToolUse, ProgressID: codexProgressID(item), ToolName: "Bash", ToolInput: command}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
@@ -509,7 +509,7 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 	case "function_call":
 		name, _ := item["name"].(string)
 		args, _ := item["arguments"].(string)
-		evt := core.Event{Type: core.EventToolUse, ToolName: name, ToolInput: args}
+		evt := core.Event{Type: core.EventToolUse, ProgressID: codexProgressID(item), ToolName: name, ToolInput: args}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
@@ -608,7 +608,7 @@ func (cs *codexSession) handleItemCompleted(raw map[string]any) {
 	default:
 		if toolName, known := codexToolNames[itemType]; known {
 			input := codexExtractToolInput(item)
-			evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: input}
+			evt := core.Event{Type: core.EventToolUse, ProgressID: codexProgressID(item), ToolName: toolName, ToolInput: input}
 			select {
 			case cs.events <- evt:
 			case <-cs.ctx.Done():
@@ -1001,3 +1001,5 @@ func truncate(s string, maxRunes int) string {
 	}
 	return string([]rune(s)[:maxRunes]) + "..."
 }
+
+func codexProgressID(item map[string]any) string { id, _ := item["id"].(string); return id }

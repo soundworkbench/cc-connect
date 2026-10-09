@@ -3193,7 +3193,7 @@ func chineseToolProgressJourney(t *testing.T, mode string) {
 	cfg := DefaultStreamPreviewCfg()
 	cfg.IntervalMs, cfg.MinDeltaChars = 1, 1
 	e.SetStreamPreviewCfg(cfg)
-	e.SetDisplayConfig(DisplayCfg{Mode: mode, ThinkingMessages: false, ToolMessages: false, HideAgentFooter: true})
+	e.SetDisplayConfig(DisplayCfg{Mode: mode, ThinkingMessages: mode == "quiet", ToolMessages: false, HideAgentFooter: true})
 	defer e.Stop()
 	for turn := 1; turn <= 3; turn++ {
 		first, second, final := fmt.Sprintf("第%d轮正在检查。", turn), fmt.Sprintf("第%d轮正在验证。", turn), fmt.Sprintf("第%d轮完成。", turn)
@@ -3206,7 +3206,17 @@ func chineseToolProgressJourney(t *testing.T, mode string) {
 			{Type: EventResult, Content: final, Done: true},
 		}
 		if mode == "quiet" {
-			events = []Event{events[0], events[1], events[3], events[5]}
+			events = []Event{
+				events[0],
+				{Type: EventProgress, ProgressID: "p1", Content: "先定位问题。"},
+				{Type: EventToolUse, ProgressID: "t1", ToolName: "Bash", ToolInput: "PRIVATE_COMMAND", Metadata: map[string]any{"public_tool_progress": first}},
+				{Type: EventProgress, ProgressID: "p2", Content: "接着检查边界。"},
+				{Type: EventToolUse, ProgressID: "t1", ToolName: "Bash", ToolInput: "PRIVATE_COMMAND", Metadata: map[string]any{"public_tool_progress": first}},
+				{Type: EventToolUse, ProgressID: "t2", ToolName: "Read", ToolInput: "PRIVATE_INPUT", Metadata: map[string]any{"public_tool_progress": second}},
+				{Type: EventThinking, Content: "PRIVATE_ANALYSIS_LATER"},
+				{Type: EventProgress, ProgressID: "p3", Content: "已完成逐步检查。"},
+				events[5],
+			}
 		}
 		a.mu.Lock()
 		if len(a.sessions) == 0 {
@@ -3225,8 +3235,16 @@ func chineseToolProgressJourney(t *testing.T, mode string) {
 		for {
 			p.previewMu.Lock()
 			count := len(p.edits)
+			latest := ""
+			if count > 0 {
+				latest = p.edits[count-1]
+			}
 			p.previewMu.Unlock()
-			if count >= turn*2 {
+			ready := strings.Contains(latest, second)
+			if mode == "quiet" {
+				ready = ready && strings.Contains(latest, "已完成逐步检查。")
+			}
+			if count >= turn*2 && ready {
 				break
 			}
 			if len(p.getSent()) >= turn || time.Now().After(deadline) {
@@ -3239,6 +3257,12 @@ func chineseToolProgressJourney(t *testing.T, mode string) {
 		p.previewMu.Unlock()
 		if !strings.Contains(latest, first) || !strings.Contains(latest, second) || strings.Contains(latest, "PRIVATE_") || strings.Contains(latest, final) {
 			t.Fatalf("bad public preview=%s", latest)
+		}
+		if mode == "quiet" {
+			want := "先定位问题。\n" + first + "\n接着检查边界。\n" + second + "\n已完成逐步检查。"
+			if !strings.HasSuffix(latest, want) || strings.Count(latest, first) != 1 {
+				t.Fatalf("append history order/duplicate: %s", latest)
+			}
 		}
 		for len(p.getSent()) < turn || e.sessions.GetOrCreateActive("public-progress:user").Busy() {
 			if time.Now().After(deadline) {

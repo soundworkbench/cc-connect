@@ -1,6 +1,9 @@
 package core
 
 import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 	"unicode"
@@ -68,6 +71,10 @@ func publicToolProgress(event Event) string {
 func (sp *streamPreview) replaceToolProgress(text string) {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
+	sp.queueProgressLocked(text)
+}
+
+func (sp *streamPreview) queueProgressLocked(text string) {
 	if sp.degraded || sp.previewMsgID == nil {
 		return
 	}
@@ -89,4 +96,70 @@ func (sp *streamPreview) replaceToolProgress(text string) {
 		}
 		sp.replacePreviewLocked(sp.pendingToolProgress)
 	})
+}
+
+func (d DisplayCfg) appendProgress() bool {
+	return d.Mode != "full" && (d.ProgressHistory == "append" || (d.ProgressHistory == "" && d.Mode == "quiet"))
+}
+
+// Budget leaves room for the card envelope, status/footer and escaping inside
+// the API's JSON string. Source: Feishu im-v1/message/create (30 KB card body).
+const progressMaxRunes = 8000
+const progressMaxJSONBytes = 20000
+
+func progressFits(text string) bool {
+	encoded, _ := json.Marshal(text)
+	encoded, _ = json.Marshal(string(encoded)) // content is itself a JSON string in the request
+	return len([]rune(text)) <= progressMaxRunes && len(encoded) <= progressMaxJSONBytes
+}
+
+func (sp *streamPreview) progressTextLocked() string {
+	text := strings.Join(sp.progressRows, "\n")
+	if sp.progressFolded > 0 {
+		text = NewI18n(LangChinese).Tf(MsgProgressFolded, sp.progressFolded) + "\n" + text
+	}
+	return text
+}
+
+// A source ID distinguishes separate operations with identical public wording.
+// Older adapters without IDs deduplicate identical public events within the turn;
+// only public data participates in that fallback (never raw input or thinking).
+func (sp *streamPreview) appendProgressEvent(event Event, text string) {
+	if event.Type != EventProgress && event.Type != EventToolUse {
+		return
+	}
+	text = strings.TrimSpace(text)
+	if text == "" || isEllipsisOnly(text) {
+		return
+	}
+	key := string(event.Type) + ":" + event.ProgressID
+	if event.ProgressID == "" {
+		key = fmt.Sprintf("%s:%x", event.Type, sha256.Sum256([]byte(event.ToolName+"\x00"+text)))
+	}
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sp.degraded || sp.previewMsgID == nil {
+		return
+	}
+	if sp.progressSeen == nil {
+		sp.progressSeen = make(map[string]struct{})
+	}
+	if _, seen := sp.progressSeen[key]; seen {
+		return
+	}
+	sp.progressSeen[key] = struct{}{}
+	// Split unusually large entries before displaying them. Existing visible rows
+	// are never rewritten: only complete oldest rows can be folded later.
+	runes := []rune(text)
+	for len(runes) > 0 {
+		n := min(len(runes), 2000)
+		sp.progressRows = append(sp.progressRows, string(runes[:n]))
+		runes = runes[n:]
+	}
+	for !progressFits(sp.progressTextLocked()) && len(sp.progressRows) > 1 {
+		sp.progressRows[0] = "" // release folded text rather than retaining it in the backing slice
+		sp.progressRows = sp.progressRows[1:]
+		sp.progressFolded++
+	}
+	sp.queueProgressLocked(sp.progressTextLocked())
 }

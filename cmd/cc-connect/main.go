@@ -561,6 +561,8 @@ func main() {
 				ToolMaxLen:        toollen,
 				ToolMessages:      tool,
 				ToolProgressLines: config.EffectiveToolProgressLines(cfg, &proj),
+				ProgressHistory:   config.EffectiveProgressHistory(cfg, &proj),
+				KeepProgressCard:  config.EffectiveKeepProgressCard(cfg, &proj),
 				HistoryMaxLen:     &historyMaxLen,
 				HideAgentFooter:   hideAgentFooter,
 			})
@@ -1760,6 +1762,8 @@ func reloadConfig(configPath, projName string, engine *core.Engine) (*core.Confi
 		ToolMaxLen:        toollen,
 		ToolMessages:      tool,
 		ToolProgressLines: config.EffectiveToolProgressLines(cfg, proj),
+		ProgressHistory:   config.EffectiveProgressHistory(cfg, proj),
+		KeepProgressCard:  config.EffectiveKeepProgressCard(cfg, proj),
 		HistoryMaxLen:     &historyMaxLen,
 		HideAgentFooter:   hideAgentFooter,
 	})

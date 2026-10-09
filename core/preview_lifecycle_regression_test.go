@@ -49,7 +49,7 @@ func TestProcessInteractiveEvents_PreviewLifecycleOneCard(t *testing.T) {
 		t.Run(fmt.Sprintf("tools_%t", tools), func(t *testing.T) {
 			p := &lifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "lifecycle"}}
 			e := NewEngine("test", &stubAgent{}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
-			e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: true, ToolMessages: tools, HideAgentFooter: true})
+			e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ProgressHistory: "recent", ThinkingMessages: true, ToolMessages: tools, HideAgentFooter: true})
 			e.SetStreamPreviewCfg(DefaultStreamPreviewCfg())
 			key := "lifecycle:one"
 			session := e.sessions.GetOrCreateActive(key)
@@ -159,7 +159,7 @@ func testPreviewLifecycleThreeTurns(t *testing.T, failures int, textPreview, ins
 	cfg.MinDeltaChars = 1
 	e.SetStreamPreviewCfg(cfg)
 	e.SetInstantReply(InstantReplyCfg{Enabled: instant, Content: "思考中…"})
-	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: true, HideAgentFooter: true})
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ProgressHistory: "recent", ThinkingMessages: true, HideAgentFooter: true})
 	defer e.Stop()
 	for turn := 1; turn <= 3; turn++ {
 		events := []Event{
@@ -266,7 +266,7 @@ func TestProcessInteractiveEvents_PreviewLifecyclePermissionKeepsHandle(t *testi
 	p := &lifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "lifecycle"}}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
 	e.SetStreamPreviewCfg(DefaultStreamPreviewCfg())
-	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: true, HideAgentFooter: true})
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ProgressHistory: "recent", ThinkingMessages: true, HideAgentFooter: true})
 	key := "lifecycle:permission"
 	as := newControllableSession("permission")
 	state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx"}
@@ -297,5 +297,75 @@ func TestProcessInteractiveEvents_PreviewLifecyclePermissionKeepsHandle(t *testi
 	}
 	if !strings.HasPrefix(p.edits[1], "card-1:") {
 		t.Fatal("question detached the original card")
+	}
+}
+
+// Permissions interrupt the event loop, but must not detach or replace the
+// append history. Private thinking stays hidden even when explicitly enabled.
+func TestAppendProgressPermissionKeepsHistoryAndHandle(t *testing.T) {
+	p := &lifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "lifecycle"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	defer e.Stop()
+	cfg := DefaultStreamPreviewCfg()
+	cfg.IntervalMs = 5
+	e.SetStreamPreviewCfg(cfg)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: true, HideAgentFooter: true})
+	key := "lifecycle:append-permission"
+	as := newControllableSession("permission")
+	state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx"}
+	e.interactiveStates[key] = state
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "m", time.Now(), nil, nil, "ctx")
+	}()
+	waitEdit := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			p.previewMu.Lock()
+			text := ""
+			if len(p.edits) > 0 {
+				text = p.edits[len(p.edits)-1]
+			}
+			p.previewMu.Unlock()
+			if text == want {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("missing preview %q", want)
+	}
+	as.events <- Event{Type: EventThinking, Content: "PRIVATE_BEFORE"}
+	as.events <- Event{Type: EventProgress, ProgressID: "p1", Content: "先检查。"}
+	waitEdit("card-1:先检查。")
+	as.events <- Event{Type: EventPermissionRequest, RequestID: "permission", ToolName: "Bash", ToolInput: "fixture"}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		state.mu.Lock()
+		pending := state.pending
+		state.mu.Unlock()
+		if pending != nil {
+			pending.resolve()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("permission never appeared")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	as.events <- Event{Type: EventThinking, Content: "PRIVATE_AFTER"}
+	as.events <- Event{Type: EventProgress, ProgressID: "p2", Content: "继续验证。"}
+	waitEdit("card-1:先检查。\n继续验证。")
+	as.events <- Event{Type: EventResult, Content: "final answer", Done: true}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn never finished")
+	}
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	if len(p.starts) != 1 || len(p.edits) != 2 || len(p.deletes) != 1 {
+		t.Fatalf("starts=%v edits=%v deletes=%v", p.starts, p.edits, p.deletes)
 	}
 }

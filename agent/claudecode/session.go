@@ -76,7 +76,8 @@ type claudeSession struct {
 	// Only readLoop owns pendingText. A following tool call identifies public
 	// commentary; a terminal result identifies the final answer. Do not reuse
 	// EventThinking: deployments can hide private reasoning independently.
-	pendingText []string
+	pendingText        []string
+	pendingProgressIDs []string
 
 	inputMu      sync.Mutex
 	inputs       map[string]*claudeInput
@@ -708,7 +709,7 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 	if !ok {
 		return
 	}
-	for _, contentItem := range contentArr {
+	for contentIndex, contentItem := range contentArr {
 		item, ok := contentItem.(map[string]any)
 		if !ok {
 			continue
@@ -722,7 +723,7 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 				continue
 			}
 			inputSummary := chineseToolProgress(toolName, item["input"], strVal(item, "title"))
-			evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: inputSummary, Metadata: map[string]any{"public_tool_progress": inputSummary}}
+			evt := core.Event{Type: core.EventToolUse, ProgressID: strVal(item, "id"), ToolName: toolName, ToolInput: inputSummary, Metadata: map[string]any{"public_tool_progress": inputSummary}}
 			select {
 			case cs.events <- evt:
 			case <-cs.ctx.Done():
@@ -740,6 +741,14 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 		case "text":
 			if text, ok := item["text"].(string); ok && text != "" {
 				cs.pendingText = append(cs.pendingText, text)
+				id := strVal(msg, "id")
+				if id == "" {
+					id = strVal(raw, "uuid")
+				}
+				if id != "" {
+					id = fmt.Sprintf("%s:%d", id, contentIndex)
+				}
+				cs.pendingProgressIDs = append(cs.pendingProgressIDs, id)
 			}
 		}
 	}
@@ -748,12 +757,18 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 func (cs *claudeSession) flushPublicText(kind core.EventType) {
 	texts := cs.pendingText
 	cs.pendingText = nil
-	for _, text := range texts {
+	ids := cs.pendingProgressIDs
+	cs.pendingProgressIDs = nil
+	for i, text := range texts {
+		id := ""
+		if i < len(ids) {
+			id = ids[i]
+		}
 		if cs.ctx.Err() != nil {
 			return
 		}
 		select {
-		case cs.events <- core.Event{Type: kind, Content: text}:
+		case cs.events <- core.Event{Type: kind, Content: text, ProgressID: id}:
 		case <-cs.ctx.Done():
 			return
 		}

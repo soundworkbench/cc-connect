@@ -436,6 +436,7 @@ type UserQuestionOption struct {
 
 // Event represents a single piece of agent output streamed back to the engine.
 type Event struct {
+	ProgressID               string // stable source event/item ID; never displayed
 	Type                     EventType
 	Content                  string
 	ToolName                 string         // populated for EventToolUse, EventPermissionRequest

@@ -15,7 +15,7 @@ func TestQuietToolProgressPlaceholderRegression(t *testing.T) {
 			p := &lifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "progress"}}
 			e := NewEngine("test", &stubAgent{}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
 			defer e.Stop()
-			display := DisplayCfg{Mode: mode, ToolMessages: mode == "full", HideAgentFooter: true}
+			display := DisplayCfg{Mode: mode, ProgressHistory: "recent", ToolMessages: mode == "full", HideAgentFooter: true}
 			if mode == "disabled" {
 				zero := 0
 				display.Mode = "quiet"

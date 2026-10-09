@@ -322,9 +322,11 @@ type DisplayCfg struct {
 	Mode              string // "full" (default), "compact", or "quiet" — thinking/tool visibility
 	CardMode          string // "legacy" (default) or "rich" (Card 2.0 Feishu)
 	ThinkingMessages  bool
-	ThinkingMaxLen    int  // max runes for thinking preview; 0 = no truncation
-	ToolMaxLen        int  // max runes for tool use preview; 0 = no truncation
-	ToolProgressLines *int // nil: quiet defaults to 3; 0 disables; 1–3 recent rows
+	ThinkingMaxLen    int    // max runes for thinking preview; 0 = no truncation
+	ToolMaxLen        int    // max runes for tool use preview; 0 = no truncation
+	ToolProgressLines *int   // 0 disables tools; append ignores positive row limits
+	ProgressHistory   string // quiet defaults to append; recent retains bounded tools
+	KeepProgressCard  bool   // retain compact placeholder after terminal delivery
 	ToolMessages      bool
 	HistoryMaxLen     *int // max runes for /history entries; nil = default, 0 = no truncation
 	HideAgentFooter   bool // strip model/token footer lines emitted as agent text
@@ -4060,6 +4062,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+	sp.keepProgressCard = e.display.KeepProgressCard
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	thinkingProcessPreview := false
 	if pref, ok := state.platform.(ThinkingProcessPreviewPreference); ok {
@@ -4282,6 +4285,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				break
 			}
 			if thinkingProcessPreview {
+				if e.display.appendProgress() {
+					break // Private thinking never enters append history, even if enabled.
+				}
 				if e.display.ThinkingMessages && event.Content != "" {
 					preview := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen))
 					if preview != "" {
@@ -4385,6 +4391,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolUse:
 			toolCount++
 			if thinkingProcessPreview {
+				if e.display.appendProgress() {
+					if e.display.ToolProgressLines == nil || *e.display.ToolProgressLines > 0 {
+						sp.appendProgressEvent(event, publicToolProgress(event))
+					}
+					break
+				}
 				if limit := e.display.toolProgressLimit(); limit > 0 && !e.display.ToolMessages {
 					toolProgressRows = append(toolProgressRows, publicToolProgress(event))
 					if len(toolProgressRows) > limit {
@@ -4590,6 +4602,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// switch. Other display modes retain ordinary text behavior.
 			if thinkingProcessPreview {
 				preview := strings.TrimSpace(event.Content)
+				if e.display.appendProgress() {
+					sp.appendProgressEvent(event, preview)
+					break
+				}
 				if preview != "" && !isEllipsisOnly(preview) {
 					if thinkingPreviewText.Len() > 0 {
 						thinkingPreviewText.WriteString("\n\n")
@@ -5315,6 +5331,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+				sp.keepProgressCard = e.display.KeepProgressCard
 				state.mu.Lock()
 				state.activePreview = sp
 				if state.stopped {
