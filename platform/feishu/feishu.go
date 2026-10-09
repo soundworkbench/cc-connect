@@ -1632,18 +1632,6 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			UserMessageTimeMs: createTimeMs,
 		})
 
-	case "interactive":
-		// Single forwarded cards arrive directly as interactive messages, not merge_forward.
-		text := stripMentions(extractInteractiveCardText(content), mentions, p.getBotOpenID())
-		p.flushImageBatchForSession(sessionKey)
-		p.dispatchCoreMessage(&core.Message{
-			SessionKey: sessionKey, Platform: p.platformName,
-			MessageID: messageID,
-			UserID:    userID, UserName: userName, ChatName: chatName,
-			Content: text, ExtraContent: quoted.text, Images: quoted.images,
-			ReplyCtx: rctx, UserMessageTimeMs: createTimeMs,
-		})
-
 	case "post":
 		textParts, images := p.parsePostContent(messageID, content)
 		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
@@ -1693,6 +1681,21 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 				FileName: fileBody.FileName,
 			}},
 			ReplyCtx:          rctx,
+			UserMessageTimeMs: createTimeMs,
+		})
+
+	case "interactive":
+		senderName := userName
+		if senderName == "" {
+			senderName = userID
+		}
+		text, images := interactiveCardContent(content, messageID, messageID, senderName, p.downloadImage)
+		text = stripMentions(text, mentions, p.getBotOpenID())
+		p.flushImageBatchForSession(sessionKey)
+		p.dispatchCoreMessage(&core.Message{
+			SessionKey: sessionKey, Platform: p.platformName, MessageID: messageID,
+			UserID: userID, UserName: userName, ChatName: chatName,
+			Content: text, Images: append(quoted.images, images...), ExtraContent: quoted.text, ReplyCtx: rctx,
 			UserMessageTimeMs: createTimeMs,
 		})
 
@@ -2390,101 +2393,11 @@ func extractPostPlainText(content string) string {
 	return strings.Join(parts, "\n")
 }
 
-// extractInteractiveCardText extracts readable text from a Feishu interactive card JSON.
-// With raw_card_content, the response wraps the card in {"json_card": "...", ...}.
-// Supports schema 2.0 (body.property.elements with recursive nesting) and
-// legacy format (top-level title + elements).
+// extractInteractiveCardText also serves quoted cards; media is downloaded only
+// by the incoming-message paths, not while walking an arbitrary quote chain.
 func extractInteractiveCardText(content string) string {
-	// Try raw_card_content format: {"json_card": "<escaped JSON>", ...}
-	var wrapper struct {
-		JsonCard string `json:"json_card"`
-		UserDSL  string `json:"user_dsl"`
-	}
-	cardJSON := content
-	if json.Unmarshal([]byte(content), &wrapper) == nil {
-		if wrapper.JsonCard != "" {
-			cardJSON = wrapper.JsonCard
-		} else if wrapper.UserDSL != "" {
-			// Forwarded mobile cards carry their real body here; outer elements
-			// may contain only an "upgrade your client" compatibility placeholder.
-			var dsl map[string]json.RawMessage
-			if json.Unmarshal([]byte(wrapper.UserDSL), &dsl) == nil && dsl != nil {
-				cardJSON = wrapper.UserDSL
-			}
-		}
-	}
-
-	var card map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(cardJSON), &card); err != nil {
-		return "[interactive card]"
-	}
-
-	var parts []string
-
-	// Schema 2.0: body may use property.elements (standard) or direct elements (simplified).
-	if raw, ok := card["body"]; ok {
-		var body struct {
-			Tag      string            `json:"tag"`
-			Elements []json.RawMessage `json:"elements"`
-			Property struct {
-				Elements []json.RawMessage `json:"elements"`
-			} `json:"property"`
-		}
-		if json.Unmarshal(raw, &body) == nil {
-			if body.Tag == "body" && len(body.Property.Elements) > 0 {
-				extractCardElements(body.Property.Elements, &parts)
-			} else if len(body.Elements) > 0 {
-				extractCardElements(body.Elements, &parts)
-			}
-		}
-	}
-
-	// Legacy: direct title string + flat/nested elements.
-	if len(parts) == 0 {
-		if raw, ok := card["header"]; ok {
-			var header struct {
-				Title struct {
-					Content string `json:"content"`
-				} `json:"title"`
-			}
-			if json.Unmarshal(raw, &header) == nil && header.Title.Content != "" {
-				parts = append(parts, header.Title.Content)
-			}
-		}
-		if len(parts) == 0 {
-			if raw, ok := card["title"]; ok {
-				var title string
-				if json.Unmarshal(raw, &title) == nil && title != "" {
-					parts = append(parts, title)
-				}
-			}
-		}
-		var elements []json.RawMessage
-		if raw, ok := card["elements"]; ok {
-			var nested [][]json.RawMessage
-			if json.Unmarshal(raw, &nested) == nil && len(nested) > 0 {
-				for _, row := range nested {
-					elements = append(elements, row...)
-				}
-			} else {
-				_ = json.Unmarshal(raw, &elements)
-			}
-		}
-		for _, raw := range elements {
-			var elem struct {
-				Tag  string `json:"tag"`
-				Text string `json:"text"`
-			}
-			if json.Unmarshal(raw, &elem) == nil && elem.Tag == "text" && strings.TrimSpace(elem.Text) != "" {
-				parts = append(parts, elem.Text)
-			}
-		}
-	}
-
-	if len(parts) == 0 {
-		return "[interactive card]"
-	}
-	return strings.Join(parts, "\n")
+	text, _ := parseInteractiveCard(content)
+	return text
 }
 
 // extractCardElements recursively extracts text from schema 2.0 card elements.
@@ -2705,7 +2618,7 @@ func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.Image
 			parentID = rootMessageID
 		}
 		childrenMap[parentID] = append(childrenMap[parentID], item)
-		if item.Sender != nil && item.Sender.Id != nil {
+		if item.Sender != nil && item.Sender.Id != nil && (item.Sender.SenderType == nil || *item.Sender.SenderType != "app") {
 			senderIDs[*item.Sender.Id] = struct{}{}
 		}
 	}
@@ -2717,11 +2630,18 @@ func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.Image
 	}
 	nameMap := p.resolveUserNames(uniqueIDs)
 
+	for _, item := range items {
+		if item.Sender != nil && item.Sender.Id != nil && item.Sender.SenderType != nil && *item.Sender.SenderType == "app" {
+			id := *item.Sender.Id
+			nameMap[id] = p.resolveBotSenderName(id)
+		}
+	}
+
 	var allImages []core.ImageAttachment
 	var allFiles []core.FileAttachment
 	var sb strings.Builder
 	sb.WriteString("<forwarded_messages>\n")
-	p.formatMergeForwardTree(rootMessageID, childrenMap, nameMap, &sb, &allImages, &allFiles, 0)
+	p.formatMergeForwardTree(rootMessageID, rootMessageID, childrenMap, nameMap, &sb, &allImages, &allFiles, 0)
 	sb.WriteString("</forwarded_messages>")
 
 	return sb.String(), allImages, allFiles
@@ -2738,7 +2658,7 @@ func replaceMentions(text string, mentions []*larkim.Mention) string {
 }
 
 // formatMergeForwardTree recursively formats the sub-message tree.
-func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
+func (p *Platform) formatMergeForwardTree(parentID, rootMessageID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
 	if depth > 10 {
 		sb.WriteString(strings.Repeat("    ", depth) + "[nested forwarding truncated]\n")
 		return
@@ -2801,6 +2721,14 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 				}
 			}
 
+		case "interactive":
+			text, cardImages := interactiveCardContent(content, msgID, rootMessageID, senderName, p.downloadImage)
+			*images = append(*images, cardImages...)
+			sb.WriteString(fmt.Sprintf("%s[%s] %s:\n", indent, ts, senderName))
+			for _, line := range strings.Split(replaceMentions(text, item.Mentions), "\n") {
+				sb.WriteString(fmt.Sprintf("%s    %s\n", indent, line))
+			}
+
 		case "image":
 			var imgBody struct {
 				ImageKey string `json:"image_key"`
@@ -2835,7 +2763,7 @@ func (p *Platform) formatMergeForwardTree(parentID string, childrenMap map[strin
 
 		case "merge_forward":
 			sb.WriteString(fmt.Sprintf("%s[%s] %s: [forwarded messages]\n", indent, ts, senderName))
-			p.formatMergeForwardTree(msgID, childrenMap, nameMap, sb, images, files, depth+1)
+			p.formatMergeForwardTree(msgID, rootMessageID, childrenMap, nameMap, sb, images, files, depth+1)
 
 		default:
 			sb.WriteString(fmt.Sprintf("%s[%s] %s: [%s message]\n", indent, ts, senderName, msgType))

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 func forwardedDSLCard(t *testing.T, text string) string {
@@ -30,12 +31,12 @@ func TestForwardedInteractiveCard_UserDSLPreservesBody(t *testing.T) {
 }
 
 func TestForwardedInteractiveCard_DispatchesToAgent(t *testing.T) {
-	p := &Platform{platformName: "feishu"}
+	p := &Platform{platformName: "feishu", botOpenID: "ou_bot"}
 	p.userNameCache.Store("ou_sender", "Sender")
 	p.chatNameCache.Store("oc_chat", "Chat")
 	var got *core.Message
 	p.handler = func(_ core.Platform, msg *core.Message) { got = msg }
-	p.dispatchMessage(context.Background(), "interactive", forwardedDSLCard(t, "forwarded body"), nil, "om_forward", "feishu:oc_chat:ou_sender", "ou_sender", "oc_chat", replyContext{messageID: "om_forward", chatID: "oc_chat"}, "", 123)
+	p.dispatchMessage(context.Background(), "interactive", forwardedDSLCard(t, "@_user_1 forwarded body"), []*larkim.MentionEvent{{Key: strPtr("@_user_1"), Id: &larkim.UserId{OpenId: strPtr("ou_bot")}}}, "om_forward", "feishu:oc_chat:ou_sender", "ou_sender", "oc_chat", replyContext{messageID: "om_forward", chatID: "oc_chat"}, "", 123)
 	if got == nil {
 		t.Fatal("forwarded interactive card was silently dropped")
 	}

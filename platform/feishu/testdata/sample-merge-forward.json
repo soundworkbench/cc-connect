@@ -1,0 +1,46 @@
+{
+  "ok": true,
+  "identity": "bot",
+  "data": {
+    "items": [
+      {
+        "body": {
+          "content": "Merged and Forwarded Message"
+        },
+        "chat_id": "oc_00000000000000000000000000000001",
+        "create_time": "1791188363201",
+        "deleted": false,
+        "message_id": "om_00000000000000000000000000000001",
+        "message_position": "12133",
+        "msg_type": "merge_forward",
+        "sender": {
+          "id": "ou_00000000000000000000000000000001",
+          "id_type": "open_id",
+          "sender_type": "user",
+          "tenant_key": "0000000000000000"
+        },
+        "update_time": "1791188363201",
+        "updated": false
+      },
+      {
+        "body": {
+          "content": "{\"title\":null,\"elements\":[[{\"tag\":\"img\",\"image_key\":\"img_v3_00000_00000000-0000-0000-0000-000000000001\"},{\"tag\":\"text\",\"text\":\"请升级至最新版本客户端，以查看内容\"},{\"tag\":\"text\",\"text\":\"\"}]]}"
+        },
+        "chat_id": "oc_00000000000000000000000000000002",
+        "create_time": "1791188327375",
+        "deleted": false,
+        "message_id": "om_00000000000000000000000000000002",
+        "msg_type": "interactive",
+        "sender": {
+          "id": "ou_00000000000000000000000000000002",
+          "id_type": "open_id",
+          "sender_type": "user",
+          "tenant_key": "0000000000000000"
+        },
+        "update_time": "1791188327375",
+        "updated": false,
+        "upper_message_id": "om_00000000000000000000000000000001"
+      }
+    ]
+  }
+}

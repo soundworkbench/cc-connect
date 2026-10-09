@@ -173,6 +173,8 @@ const (
 	MsgProgressOperation   MsgKey = "tool_progress_operation"
 )
 
+const MsgFeishuCardImageUnavailable MsgKey = "feishu_card_image_unavailable"
+
 const (
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
@@ -675,6 +677,13 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgFeishuCardImageUnavailable: {
+		LangEnglish:            "[Card image unavailable: Feishu restricts cross-app card images | sender %s | image_key=%s]",
+		LangChinese:            "[卡片图片无法下载：飞书限制跨应用卡片图片｜发送方 %s ｜image_key=%s]",
+		LangTraditionalChinese: "[卡片圖片無法下載：飛書限制跨應用卡片圖片｜發送方 %s ｜image_key=%s]",
+		LangJapanese:           "[カード画像を取得できません：Feishuは他アプリのカード画像を制限しています｜送信者 %s ｜image_key=%s]",
+		LangSpanish:            "[Imagen de tarjeta no disponible: Feishu restringe imágenes de otras aplicaciones | remitente %s | image_key=%s]",
+	},
 	MsgProgressFolded:      {LangChinese: "…（前 %d 条已折叠）", LangEnglish: "… (%d earlier entries folded)", LangTraditionalChinese: "…（前 %d 條已摺疊）", LangJapanese: "…（前の %d 件を折りたたみました）", LangSpanish: "… (%d entradas anteriores contraídas)"},
 	MsgProgressCommand:     {LangChinese: "运行命令", LangEnglish: "Run command", LangTraditionalChinese: "執行命令", LangJapanese: "コマンドを実行", LangSpanish: "Ejecutar comando"},
 	MsgProgressRead:        {LangChinese: "读取文件", LangEnglish: "Read file", LangTraditionalChinese: "讀取檔案", LangJapanese: "ファイルを読む", LangSpanish: "Leer archivo"},
