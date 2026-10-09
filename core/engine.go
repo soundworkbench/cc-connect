@@ -461,8 +461,9 @@ type Engine struct {
 	observeCancel     context.CancelFunc
 
 	// Interactive agent session management
-	interactiveMu     sync.Mutex
-	interactiveStates map[string]*interactiveState // key = sessionKey
+	assistantAdmissionMu sync.Mutex // serializes routing selection with local rotation
+	interactiveMu        sync.Mutex
+	interactiveStates    map[string]*interactiveState // key = sessionKey
 
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
@@ -2132,6 +2133,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		return
 	}
 
+	e.assistantAdmissionMu.Lock()
+	defer e.assistantAdmissionMu.Unlock()
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
@@ -2934,7 +2937,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	turnStart := time.Now()
 
 	e.i18n.DetectAndSet(msg.Content)
-	session.AddHistory("user", msg.Content)
+	if !msg.historyPreseeded {
+		session.AddHistory("user", msg.Content)
+	}
 	// Persist user message immediately so crashes between user input and
 	// assistant reply don't lose it (the assistant-side Save below depends
 	// on the turn completing without a process crash).
@@ -2945,7 +2950,14 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	var state *interactiveState
+	if msg.preflightSent {
+		e.interactiveMu.Lock()
+		state = e.interactiveStates[interactiveKey]
+		e.interactiveMu.Unlock()
+	} else {
+		state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	}
 
 	e.installBackgroundTurnGate(state, session, interactiveKey)
 
@@ -3047,13 +3059,17 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// Send until the prompt turn finishes (e.g. ACP session/prompt); they may emit
 	// EventPermissionRequest while blocked — the event loop must run in parallel.
 	sendDone := make(chan error, 1)
-	go func() {
-		if as == nil {
-			sendDone <- fmt.Errorf("agent session became nil")
-			return
-		}
-		sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
-	}()
+	if msg.preflightSent {
+		sendDone <- nil
+	} else {
+		go func() {
+			if as == nil {
+				sendDone <- fmt.Errorf("agent session became nil")
+				return
+			}
+			sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
+		}()
+	}
 
 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {

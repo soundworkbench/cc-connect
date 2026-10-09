@@ -23,14 +23,16 @@ const DefaultMaxAttachmentSize int64 = 50 << 20
 // APIServer exposes a local Unix socket API for external tools (e.g. cron jobs)
 // to send messages to active sessions.
 type APIServer struct {
-	socketPath string
-	listener   net.Listener
-	server     *http.Server
-	mux        *http.ServeMux
-	engines    map[string]*Engine // project name → engine
-	cron       *CronScheduler
-	timer      *TimerScheduler
-	relay      *RelayManager
+	assistantMu       sync.Mutex
+	assistantRequests map[string]assistantReceipt
+	socketPath        string
+	listener          net.Listener
+	server            *http.Server
+	mux               *http.ServeMux
+	engines           map[string]*Engine // project name → engine
+	cron              *CronScheduler
+	timer             *TimerScheduler
+	relay             *RelayManager
 	// maxAttachmentBytes caps the raw size of a single attachment accepted by
 	// /send; the request body limit in handleSend is derived from it (base64
 	// expansion + envelope). Defaults to DefaultMaxAttachmentSize.
@@ -89,6 +91,9 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 		engines:            make(map[string]*Engine),
 		maxAttachmentBytes: DefaultMaxAttachmentSize,
 	}
+	s.mux.HandleFunc("/assistant/inject", s.handleAssistantInject)
+	s.mux.HandleFunc("/assistant/state", s.handleAssistantState)
+	s.mux.HandleFunc("/assistant/rotate", s.handleAssistantRotate)
 	s.mux.HandleFunc("/send", s.handleSend)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
