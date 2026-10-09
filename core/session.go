@@ -18,11 +18,11 @@ const ContinueSession = "__continue__"
 
 // Session tracks one conversation between a user and the agent.
 type Session struct {
-	ID                  string         `json:"id"`
-	Name                string         `json:"name"`
-	AgentSessionID      string         `json:"agent_session_id"`
-	AgentType           string         `json:"agent_type,omitempty"`
-	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	AgentSessionID      string   `json:"agent_session_id"`
+	AgentType           string   `json:"agent_type,omitempty"`
+	PastAgentSessionIDs []string `json:"past_agent_session_ids,omitempty"`
 	// ActiveProvider is the agent provider name that was active when this
 	// session last took a turn. It is restored before --resume so that a
 	// cc-connect process restart does not silently drop a user's
@@ -266,6 +266,7 @@ const snapshotVersion = 1
 
 // sessionSnapshot is the JSON-serializable state of the SessionManager.
 type sessionSnapshot struct {
+	IsolatedModels map[string]string    `json:"isolated_models,omitempty"`
 	Sessions       map[string]*Session  `json:"sessions"`
 	ActiveSession  map[string]string    `json:"active_session"`
 	UserSessions   map[string][]string  `json:"user_sessions"`
@@ -280,14 +281,15 @@ type sessionSnapshot struct {
 // SessionManager supports multiple named sessions per user with active-session tracking.
 // It can persist state to a JSON file and reload on startup.
 type SessionManager struct {
-	mu            sync.RWMutex
-	sessions      map[string]*Session
-	activeSession map[string]string
-	userSessions  map[string][]string
-	sessionNames  map[string]string    // agent session ID → custom name
-	userMeta      map[string]*UserMeta // sessionKey → display info
-	counter       int64
-	storePath     string // empty = no persistence
+	isolatedModels map[string]string
+	mu             sync.RWMutex
+	sessions       map[string]*Session
+	activeSession  map[string]string
+	userSessions   map[string][]string
+	sessionNames   map[string]string    // agent session ID → custom name
+	userMeta       map[string]*UserMeta // sessionKey → display info
+	counter        int64
+	storePath      string // empty = no persistence
 
 	// legacyData is true when sessions were loaded from a snapshot that
 	// predates PastAgentSessionIDs tracking. In this state, many sessions
@@ -665,6 +667,7 @@ func (sm *SessionManager) saveLocked() {
 	}
 
 	snap := sessionSnapshot{
+		IsolatedModels: sm.isolatedModels,
 		Sessions:       snapSessions,
 		ActiveSession:  sm.activeSession,
 		UserSessions:   sm.userSessions,
@@ -702,6 +705,7 @@ func (sm *SessionManager) load() {
 		slog.Error("session: failed to unmarshal", "path", sm.storePath, "error", err)
 		return
 	}
+	sm.isolatedModels = snap.IsolatedModels
 	sm.sessions = snap.Sessions
 	sm.activeSession = snap.ActiveSession
 	sm.userSessions = snap.UserSessions
@@ -828,7 +832,7 @@ func (sm *SessionManager) PruneDuplicateSessions(mergeHistory bool) PruneResult 
 	defer sm.mu.Unlock()
 
 	// Group sessions by baseChat
-	chatSessions := make(map[string][]*Session) // baseChat -> sessions
+	chatSessions := make(map[string][]*Session)  // baseChat -> sessions
 	sessionToBaseChat := make(map[string]string) // session.ID -> baseChat
 
 	for userKey, sessionIDs := range sm.userSessions {

@@ -2989,3 +2989,119 @@ func TestCUJ_BackgroundCompletion_TwoBatchesUserMessageAndStop(t *testing.T) {
 		t.Fatal("automatic results missing on platform")
 	}
 }
+
+// TestCUJ_P2P1_ThreadCommandsPreserveOtherConversations uses opaque platform
+// routing keys, so core remains independent of the platform implementing them.
+func TestCUJ_P2P1_ThreadCommandsPreserveOtherConversations(t *testing.T) {
+	env := newCUJEnv(t)
+	defer env.engine.Stop()
+	keys := []string{"test:chat:user", "test:chat:root:a", "test:chat:root:b"}
+	markers := []string{"MAIN-MARKER", "THREAD-A-MARKER", "THREAD-B-MARKER"}
+	send := func(key, content string) {
+		t.Helper()
+		env.plat.clearSent()
+		env.engine.ReceiveMessage(env.plat, &Message{SessionKey: key, Platform: "test", UserID: "user", Content: content, ReplyCtx: key})
+		env.waitFor(content, 2*time.Second, func() bool { return len(env.plat.getSent()) > 0 })
+	}
+	for i, key := range keys {
+		send(key, markers[i])
+		env.waitFor("history saved", 2*time.Second, func() bool { return len(env.activeSession(key).GetHistory(0)) >= 2 })
+	}
+	send(keys[1], "/stop")
+	send(keys[1], "/new")
+	for i, key := range keys {
+		send(key, "/history")
+		visible := strings.Join(env.plat.getSent(), "\n")
+		for j, marker := range markers {
+			want := i == j && i != 1
+			if strings.Contains(visible, marker) != want {
+				t.Fatalf("history for %s: %s", key, visible)
+			}
+		}
+	}
+	send(keys[1], "FRESH-A-MARKER")
+	env.waitFor("new history saved", 2*time.Second, func() bool { return len(env.activeSession(keys[1]).GetHistory(0)) >= 2 })
+	send(keys[1], "/history")
+	if !env.sentContains("FRESH-A-MARKER") || env.sentContains("THREAD-A-MARKER") {
+		t.Fatal(env.plat.getSent())
+	}
+}
+
+// p2pModelAgent is an external-process boundary whose reply exposes the model
+// actually selected for a newly started session.
+type p2pModelAgent struct {
+	cujAgent
+	modelMu sync.Mutex
+	model   string
+}
+
+func (a *p2pModelAgent) Name() string      { return "p2p-model-cuj" }
+func (a *p2pModelAgent) GetModel() string  { a.modelMu.Lock(); defer a.modelMu.Unlock(); return a.model }
+func (a *p2pModelAgent) SetModel(m string) { a.modelMu.Lock(); defer a.modelMu.Unlock(); a.model = m }
+func (a *p2pModelAgent) AvailableModels(context.Context) []ModelOption {
+	return []ModelOption{{Name: "alpha"}, {Name: "beta"}}
+}
+func (a *p2pModelAgent) WorkspaceAgentOptions() map[string]any {
+	return map[string]any{"model": a.GetModel()}
+}
+func (a *p2pModelAgent) StartSession(ctx context.Context, id string) (AgentSession, error) {
+	s, err := a.cujAgent.StartSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	cs := s.(*cujAgentSession)
+	cs.mu.Lock()
+	cs.reply = "MODEL=" + a.GetModel()
+	cs.mu.Unlock()
+	return cs, nil
+}
+
+func TestCUJ_P2P2_ModelChangeIsLocalAndPersistent(t *testing.T) {
+	RegisterAgent("p2p-model-cuj", func(opts map[string]any) (Agent, error) {
+		model, _ := opts["model"].(string)
+		return &p2pModelAgent{model: model}, nil
+	})
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &p2pModelAgent{model: "alpha"}, []Platform{p}, path, LangEnglish)
+	env := &cujEnv{t: t, engine: e, plat: p}
+	send := func(key, content string, isolated bool) string {
+		t.Helper()
+		p.clearSent()
+		e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: "user", Content: content, ReplyCtx: key, IsolateAgent: isolated})
+		env.waitFor(content, 2*time.Second, func() bool { return len(p.getSent()) > 0 })
+		return strings.Join(p.getSent(), "\n")
+	}
+	if got := send("test:chat:root:a", "/model switch beta", true); !strings.Contains(got, "beta") {
+		t.Fatal(got)
+	}
+	for _, tc := range []struct {
+		key, want string
+		isolate   bool
+	}{
+		{"test:chat:root:a", "MODEL=beta", true},
+		{"test:chat:user", "MODEL=alpha", false},
+		{"test:chat:root:b", "MODEL=alpha", true},
+	} {
+		if got := send(tc.key, "which model", tc.isolate); !strings.Contains(got, tc.want) {
+			t.Fatalf("%s: %s", tc.key, got)
+		}
+		env.waitFor("saved", 2*time.Second, func() bool { return !e.sessions.GetOrCreateActive(tc.key).Busy() })
+	}
+	send("test:chat:root:a", "/new", true)
+	if err := e.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	e = NewEngine("test", &p2pModelAgent{model: "alpha"}, []Platform{p}, path, LangEnglish)
+	env.engine = e
+	defer e.Stop()
+	// No opt-in flag simulates a card callback after restart: the persisted
+	// routing-key scope must still protect the shared agent.
+	if got := send("test:chat:root:a", "which model", false); !strings.Contains(got, "MODEL=beta") {
+		t.Fatal(got)
+	}
+	env.waitFor("saved after restart", 2*time.Second, func() bool { return !e.sessions.GetOrCreateActive("test:chat:root:a").Busy() })
+	if got := send("test:chat:user", "which model", false); !strings.Contains(got, "MODEL=alpha") {
+		t.Fatal(got)
+	}
+}

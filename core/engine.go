@@ -344,6 +344,8 @@ type RateLimitCfg struct {
 
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
+	sessionAgentsMu       sync.Mutex
+	sessionAgents         map[sessionAgentKey]sessionAgent
 	name                  string
 	agent                 Agent
 	platforms             []Platform
@@ -1517,6 +1519,13 @@ func (e *Engine) Stop() error {
 	}
 	e.userRolesMu.Unlock()
 
+	e.sessionAgentsMu.Lock()
+	for _, entry := range e.sessionAgents {
+		if err := entry.agent.Stop(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	e.sessionAgentsMu.Unlock()
 	if err := e.agent.Stop(); err != nil {
 		errs = append(errs, fmt.Errorf("stop agent %s: %w", e.agent.Name(), err))
 	}
@@ -2104,6 +2113,13 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		sessions = wsSessions
 		agent = wsAgent
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
+	}
+
+	var isolationErr error
+	agent, isolationErr = e.isolateAgent(agent, sessions, msg.SessionKey, msg.IsolateAgent)
+	if isolationErr != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, isolationErr))
+		return
 	}
 
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
@@ -11050,6 +11066,9 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 }
 
 func (e *Engine) persistWorkspaceModelOverride(interactiveKey, sessionKey string, agent Agent, model string) {
+	if e.persistIsolatedModel(agent, model) {
+		return
+	}
 	if e.projectState == nil || !e.multiWorkspace || model == "" {
 		return
 	}
@@ -14496,7 +14515,7 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 // commandContextWithWorkspace is like commandContext but additionally returns
 // the resolved workspace path for callers that need to forward it to
 // processInteractiveMessageWith (idle reaper bookkeeping, reply footer, etc).
-func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
+func (e *Engine) baseCommandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
 	if !e.multiWorkspace {
 		return e.agent, e.sessions, msg.SessionKey, "", nil
 	}
@@ -14521,7 +14540,7 @@ func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *
 
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
 // It uses existing workspace bindings and falls back to global context if unresolved.
-func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager) {
+func (e *Engine) baseSessionContextForKey(sessionKey string) (Agent, *SessionManager) {
 	if workspace := e.sendWorkDirForSession(sessionKey); workspace != "" {
 		if wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(workspace); err == nil {
 			return wsAgent, wsSessions

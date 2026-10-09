@@ -107,6 +107,7 @@ func init() {
 }
 
 type replyContext struct {
+	p2pThread       bool
 	messageID       string
 	chatID          string
 	sessionKey      string
@@ -131,6 +132,7 @@ type Platform struct {
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
 	threadIsolation            bool
+	p2pThreadIsolation         bool
 	// noReplyToTrigger: when true, send via Create instead of Im.Message.Reply (no quote to the user's message).
 	noReplyToTrigger bool
 	resolveMentions  bool
@@ -311,6 +313,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	respondToAtEveryoneAndHere, _ := opts["respond_to_at_everyone_and_here"].(bool)
 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
 	threadIsolation, _ := opts["thread_isolation"].(bool)
+	p2pThreadIsolation, _ := opts["p2p_thread_isolation"].(bool)
 	resolveMentionsOpt, _ := opts["resolve_mentions"].(bool)
 	noReplyToTrigger := false
 	if v, ok := opts["reply_to_trigger"].(bool); ok && !v {
@@ -402,6 +405,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
 		threadIsolation:            threadIsolation,
+		p2pThreadIsolation:         p2pThreadIsolation,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
 		client:                     lark.NewClient(appID, appSecret, clientOpts...),
@@ -1118,8 +1122,9 @@ func (p *Platform) populateWorkspaceChannelKeys(msg *core.Message) {
 	if !ok || rctx.chatID == "" {
 		return
 	}
+	msg.IsolateAgent = rctx.p2pThread
 	msg.ChannelKey = rctx.chatID
-	if !p.threadIsolation {
+	if !p.threadIsolation && !p.p2pThreadIsolation {
 		return
 	}
 	parts := strings.SplitN(rctx.sessionKey, ":", 3)
@@ -1441,7 +1446,8 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	mentions := msg.Mentions
 	parentID := stringValue(msg.ParentId)
 
-	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey,
+		p2pThread: p.p2pThreadIsolation && chatType != "group" && stringValue(msg.ThreadId) != ""}
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
 		"session_key", sessionKey,
@@ -1500,7 +1506,7 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 	// exception: earlier unmentioned messages were never dispatched to the
 	// agent, so bootstrap its context from the parent/root reply chain once.
 	var quoted quotedMessage
-	if parentID != "" && (!p.threadIsolation || !isThreadSessionKey(sessionKey) || rctx.bootstrapThread) {
+	if parentID != "" && (!p.isIsolatedThreadSession(sessionKey) || rctx.bootstrapThread) {
 		quoted = p.fetchQuotedMessage(ctx, parentID)
 	}
 
@@ -3597,7 +3603,7 @@ func isAttachmentMsgType(msgType string) bool {
 // It reports whether this call activated the thread for the first time. It is
 // a no-op when thread isolation is disabled or sessionKey is not a thread key.
 func (p *Platform) markThreadSessionActive(sessionKey string) bool {
-	if !p.threadIsolation || !isThreadSessionKey(sessionKey) {
+	if !p.isIsolatedThreadSession(sessionKey) {
 		return false
 	}
 	_, loaded := p.activeThreadSessions.LoadOrStore(sessionKey, time.Now())
@@ -3610,7 +3616,7 @@ func (p *Platform) markThreadSessionActive(sessionKey string) bool {
 // isActiveThreadSession reports whether the given sessionKey corresponds to a
 // thread that has previously been engaged by an @bot message.
 func (p *Platform) isActiveThreadSession(sessionKey string) bool {
-	if !p.threadIsolation || !isThreadSessionKey(sessionKey) {
+	if !p.isIsolatedThreadSession(sessionKey) {
 		return false
 	}
 	_, ok := p.activeThreadSessions.Load(sessionKey)
@@ -3639,10 +3645,17 @@ func stripMentions(text string, mentions []*larkim.MentionEvent, botOpenID strin
 	return strings.TrimSpace(text)
 }
 
-// TODO: Session-key derivation and reply-thread behavior are split across multiple code paths here.
-// Should revisit thread/root handling without changing thread_isolation=false behavior.
+// isIsolatedThreadSession handles shared thread behavior after routing. Only
+// makeSessionKey decides which chat types may create isolated thread keys.
+func (p *Platform) isIsolatedThreadSession(key string) bool {
+	return (p.threadIsolation || p.p2pThreadIsolation) && isThreadSessionKey(key)
+}
+
+// ThreadId distinguishes a P2P reply-in-thread from a plain quote reply:
+// ParentId/RootId alone do not opt a P2P message into a separate session.
 func (p *Platform) makeSessionKey(msg *larkim.EventMessage, chatID, userID string) string {
-	if p.threadIsolation && msg != nil && stringValue(msg.ChatType) == "group" {
+	if msg != nil && ((p.threadIsolation && stringValue(msg.ChatType) == "group") ||
+		(p.p2pThreadIsolation && stringValue(msg.ChatType) != "group" && stringValue(msg.ThreadId) != "")) {
 		rootID := stringValue(msg.RootId)
 		if rootID == "" {
 			rootID = stringValue(msg.MessageId)
@@ -3673,7 +3686,7 @@ func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
 	}
-	return p.threadIsolation && isThreadSessionKey(rc.sessionKey)
+	return p.isIsolatedThreadSession(rc.sessionKey)
 }
 
 // shouldUseThreadOrReplyAPI is true when we should call Im.Message.Reply (optionally with ReplyInThread).
@@ -3681,7 +3694,7 @@ func (p *Platform) shouldUseThreadOrReplyAPI(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
 	}
-	return !p.noReplyToTrigger
+	return !p.noReplyToTrigger || (rc.p2pThread && p.shouldReplyInThread(rc))
 }
 
 func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, msgType, content string) error {
