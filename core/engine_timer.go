@@ -188,13 +188,16 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		return nil
 	}
 
+	e.assistantAdmissionMu.Lock()
 	session := sessions.GetOrCreateActive(sessionKey)
 	iKey := sessionKey
 	if workspaceDir != "" {
 		iKey = workspaceDir + ":" + sessionKey
 	}
-	if queued, err := e.admitScheduledPrompt(effectivePlatform, msg, session, sessions, agent, iKey, workspaceDir); queued || err != nil {
-		return err
+	queued, admissionErr := e.admitScheduledPrompt(effectivePlatform, msg, session, sessions, agent, iKey, workspaceDir)
+	e.assistantAdmissionMu.Unlock()
+	if queued || admissionErr != nil {
+		return admissionErr
 	}
 	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
 	return nil

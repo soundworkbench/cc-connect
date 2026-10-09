@@ -624,9 +624,9 @@ func (sm *SessionManager) Save() {
 	sm.saveLocked()
 }
 
-func (sm *SessionManager) saveLocked() {
+func (sm *SessionManager) saveLocked() error {
 	if sm.storePath == "" {
-		return
+		return nil
 	}
 
 	// Build a deep-copy snapshot to avoid racing with concurrent Session mutations.
@@ -643,6 +643,7 @@ func (sm *SessionManager) saveLocked() {
 			Name:                s.Name,
 			AgentSessionID:      agentSID,
 			AgentType:           s.AgentType,
+			ActiveProvider:      s.ActiveProvider,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
@@ -681,15 +682,17 @@ func (sm *SessionManager) saveLocked() {
 	data, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
 		slog.Error("session: failed to marshal", "error", err)
-		return
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(sm.storePath), 0o755); err != nil {
 		slog.Error("session: failed to create dir", "error", err)
-		return
+		return err
 	}
 	if err := AtomicWriteFile(sm.storePath, data, 0o644); err != nil {
 		slog.Error("session: failed to write", "path", sm.storePath, "error", err)
+		return err
 	}
+	return nil
 }
 
 func (sm *SessionManager) load() {

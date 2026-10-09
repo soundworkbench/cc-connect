@@ -12,6 +12,9 @@ import (
 func (e *Engine) admitScheduledPrompt(p Platform, msg *Message, session *Session, sessions *SessionManager, agent Agent, key, workspace string) (bool, error) {
 	e.ensureInteractiveStateForQueueing(key, p, msg.ReplyCtx)
 	for {
+		if !msg.admissionDeadline.IsZero() && time.Now().After(msg.admissionDeadline) {
+			return false, fmt.Errorf("local assistant admission timed out")
+		}
 		if e.ctx.Err() != nil {
 			return false, e.ctx.Err()
 		}
