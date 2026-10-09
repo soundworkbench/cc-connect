@@ -2914,3 +2914,78 @@ func TestCUJ_ST1_SteeringContinuousMessages(t *testing.T) {
 		})
 	}
 }
+
+// Background completions share the user-turn lock; they are not detached turns
+// allowed to race a user message or resurrect a stopped session.
+type backgroundJourneySession struct {
+	*cujAgentSession
+	gateMu sync.Mutex
+	gate   func() bool
+}
+
+func (s *backgroundJourneySession) SetBackgroundTurnGate(g func() bool) {
+	s.gateMu.Lock()
+	s.gate = g
+	s.gateMu.Unlock()
+}
+func (s *backgroundJourneySession) beginBackground() bool {
+	s.gateMu.Lock()
+	g := s.gate
+	s.gateMu.Unlock()
+	return g != nil && g()
+}
+
+type backgroundJourneyAgent struct {
+	cujAgent
+	s *backgroundJourneySession
+}
+
+func (a *backgroundJourneyAgent) StartSession(context.Context, string) (AgentSession, error) {
+	return a.s, nil
+}
+
+func TestCUJ_BackgroundCompletion_TwoBatchesUserMessageAndStop(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	s := &backgroundJourneySession{cujAgentSession: newCUJAgentSession()}
+	a := &backgroundJourneyAgent{s: s}
+	e := NewEngine("test", a, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	defer e.Stop()
+	send := func(id, content string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", MessageID: id, Content: content, ReplyCtx: context.Background()})
+	}
+	wait := func(check func() bool) {
+		t.Helper()
+		end := time.Now().Add(3 * time.Second)
+		for time.Now().Before(end) {
+			if check() {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatal("journey condition timed out")
+	}
+	visible := func(text string) bool { return strings.Contains(strings.Join(p.getSent(), "\n"), text) }
+	send("m1", "开始已有任务")
+	wait(func() bool { return len(s.getSentPrompts()) == 1 && visible("ok") })
+	for _, marker := range []string{"AUTOMATIC_BATCH_ONE", "AUTOMATIC_BATCH_TWO"} {
+		wait(func() bool { return s.beginBackground() })
+		s.events <- Event{Type: EventResult, Content: marker, Done: true}
+		wait(func() bool { return visible(marker) })
+	}
+	wait(func() bool { return s.beginBackground() })
+	send("m2", "补充要求")
+	if len(s.getSentPrompts()) != 1 {
+		t.Fatal("foreground Send raced background turn")
+	}
+	s.events <- Event{Type: EventResult, Content: "BACKGROUND_BEFORE_QUEUED_USER", Done: true}
+	wait(func() bool { return len(s.getSentPrompts()) == 2 })
+	wait(func() bool { return s.beginBackground() })
+	send("m3", "/stop")
+	wait(func() bool { return !s.Alive() })
+	if s.beginBackground() {
+		t.Fatal("stopped session accepted late wakeup")
+	}
+	if !visible("AUTOMATIC_BATCH_ONE") || !visible("AUTOMATIC_BATCH_TWO") {
+		t.Fatal("automatic results missing on platform")
+	}
+}

@@ -530,6 +530,7 @@ type interactiveState struct {
 	mu                       sync.Mutex
 	stopCh                   chan struct{}
 	stopped                  bool
+	backgroundTurnLease      bool
 	pending                  *pendingPermission
 	pendingMessages          []queuedMessage // messages queued while session was busy
 	approveAll               bool            // when true, auto-approve all permission requests for this session
@@ -2892,6 +2893,8 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
 
+	e.installBackgroundTurnGate(state, session, interactiveKey)
+
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
 		state.mu.Lock()
@@ -3705,6 +3708,7 @@ func (e *Engine) startUnsolicitedReader(state *interactiveState, session *Sessio
 func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.CancelFunc, done chan struct{}, state *interactiveState, agentSession AgentSession, session *Session, sessions *SessionManager, sessionKey string, workspaceDir string) {
 	defer close(done)
 	defer cancel()
+	defer e.abandonBackgroundTurnLease(state, session)
 
 	events := agentSession.Events()
 
@@ -3743,6 +3747,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				state.mu.Lock()
 				state.eventsNeedResync = true
 				state.mu.Unlock()
+				e.releaseBackgroundTurnLease(state, session, sessions, sessionKey, workspaceDir)
 				return
 			}
 
@@ -3763,6 +3768,11 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				state.mu.Unlock()
 				return
 			default:
+			}
+
+			if event.Synthetic && event.Metadata["background_cancelled"] == true {
+				e.releaseBackgroundTurnLease(state, session, sessions, sessionKey, workspaceDir)
+				continue
 			}
 
 			// Mark workspace active on first event.
@@ -3850,6 +3860,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				// when the original idle timer fires. See #1686 P1-C P1-1.
 				e.scheduleAgentSessionIdleClose(sessionKey, state)
 
+				e.releaseBackgroundTurnLease(state, session, sessions, sessionKey, workspaceDir)
+
 				slog.Info("unsolicited turn complete",
 					"session", sessionKey,
 					"response_len", len(fullResponse))
@@ -3897,6 +3909,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 			case EventError:
 				if event.Error != nil {
+					e.releaseBackgroundTurnLease(state, session, sessions, sessionKey, workspaceDir)
+
 					slog.Error("unsolicited agent error", "error", event.Error, "session", sessionKey)
 					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), event.Error))
 				}

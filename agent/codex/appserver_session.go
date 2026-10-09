@@ -178,6 +178,8 @@ type appServerSession struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 
+	sendMu        sync.Mutex
+	wakeup        backgroundWakeup
 	stateMu       sync.Mutex
 	pendingMsgs   []string
 	currentTurn   string
@@ -445,6 +447,25 @@ func (s *appServerSession) storeContextUsage(usage *core.ContextUsage) {
 }
 
 func (s *appServerSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	s.stateMu.Lock()
+	s.wakeup.userInput(prompt, time.Now())
+	backgroundActive := s.wakeup.inFlight && s.currentTurn != ""
+	s.stateMu.Unlock()
+	if backgroundActive {
+		accepted, err := s.Steer(prompt, messageID, images, files)
+		if err != nil {
+			return err
+		}
+		if accepted {
+			return nil
+		}
+	}
+	return s.sendPrompt(prompt, messageID, images, files)
+}
+
+func (s *appServerSession) sendPrompt(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	if !s.alive.Load() {
 		return fmt.Errorf("session is closed")
 	}
@@ -1106,6 +1127,10 @@ func (s *appServerSession) handleResponse(resp rpcResponseEnvelope) {
 }
 
 func (s *appServerSession) handleNotification(method string, paramsRaw json.RawMessage) {
+	// Parent-scoped completion activity can arrive after its original turn ended.
+	// Inspect only this typed control event before the stale-turn output filter.
+	s.observeBackgroundCompletion(method, paramsRaw)
+
 	// The app-server also emits notifications for delegated agent threads.
 	// Only this session's thread may change its turn, output or context usage.
 	if strings.HasPrefix(method, "turn/") || strings.HasPrefix(method, "item/") || strings.HasPrefix(method, "thread/") || method == "error" {
@@ -1550,6 +1575,10 @@ func (s *appServerSession) finishTurnID(expectedTurnID string, turnErr error) {
 	}
 	s.completedTurn = s.currentTurn
 	s.currentTurn = ""
+	s.wakeup.inFlight = false
+	if turnErr != nil {
+		s.wakeup.disable()
+	}
 	msgs := append([]string(nil), s.pendingMsgs...)
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()

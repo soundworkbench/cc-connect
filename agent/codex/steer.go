@@ -14,6 +14,7 @@ const appServerSteerTimeout = 5 * time.Second
 // Transport failures are deliberately not converted into queueable rejections.
 func (s *appServerSession) Steer(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (bool, error) {
 	s.stateMu.Lock()
+	s.wakeup.userInput(prompt, time.Now())
 	turnID := s.currentTurn
 	s.stateMu.Unlock()
 	if turnID == "" || !s.alive.Load() {

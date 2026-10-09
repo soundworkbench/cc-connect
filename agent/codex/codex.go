@@ -33,22 +33,23 @@ func init() {
 //   - "full-auto": --sandbox workspace-write + approval_policy=never
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
-	workDir         string
-	model           string
-	reasoningEffort string
-	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
-	backend         string // "exec" | "app_server"
-	appServerURL    string
-	codexHome       string
-	systemPrompt    string
-	appendPrompt    string
-	cmd             string   // CLI binary name, default "codex"
-	cliExtraArgs    []string // extra args parsed from cmd after the binary
-	providers       []core.ProviderConfig
-	activeIdx       int      // -1 = no provider set
-	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	sessionEnv      []string
-	mu              sync.RWMutex
+	backgroundWakeup backgroundWakeupPolicy
+	workDir          string
+	model            string
+	reasoningEffort  string
+	mode             string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	backend          string // "exec" | "app_server"
+	appServerURL     string
+	codexHome        string
+	systemPrompt     string
+	appendPrompt     string
+	cmd              string   // CLI binary name, default "codex"
+	cliExtraArgs     []string // extra args parsed from cmd after the binary
+	providers        []core.ProviderConfig
+	activeIdx        int      // -1 = no provider set
+	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+	sessionEnv       []string
+	mu               sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -91,20 +92,25 @@ func New(opts map[string]any) (core.Agent, error) {
 		}
 	}
 
+	backgroundWakeup, err := parseBackgroundWakeupPolicy(opts)
+	if err != nil {
+		return nil, err
+	}
 	return &Agent{
-		workDir:         workDir,
-		model:           model,
-		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
-		mode:            mode,
-		backend:         backend,
-		appServerURL:    appServerURL,
-		codexHome:       strings.TrimSpace(codexHome),
-		systemPrompt:    strings.TrimSpace(systemPrompt),
-		appendPrompt:    strings.TrimSpace(appendPrompt),
-		cmd:             cmd,
-		cliExtraArgs:    cliExtraArgs,
-		configEnv:       configEnv,
-		activeIdx:       -1,
+		backgroundWakeup: backgroundWakeup,
+		workDir:          workDir,
+		model:            model,
+		reasoningEffort:  normalizeReasoningEffort(reasoningEffort),
+		mode:             mode,
+		backend:          backend,
+		appServerURL:     appServerURL,
+		codexHome:        strings.TrimSpace(codexHome),
+		systemPrompt:     strings.TrimSpace(systemPrompt),
+		appendPrompt:     strings.TrimSpace(appendPrompt),
+		cmd:              cmd,
+		cliExtraArgs:     cliExtraArgs,
+		configEnv:        configEnv,
+		activeIdx:        -1,
 	}, nil
 }
 
@@ -499,7 +505,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		s, err := newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		if err == nil && a.backgroundWakeup.enabled {
+			s.startBackgroundWakeup(a.backgroundWakeup)
+		}
+		return s, err
 	}
 	if codexHome != "" {
 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
