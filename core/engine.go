@@ -4062,6 +4062,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+	sp.progressI18n = e.i18n
 	sp.keepProgressCard = e.display.KeepProgressCard
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
 	thinkingProcessPreview := false
@@ -5331,6 +5332,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+				sp.progressI18n = e.i18n
 				sp.keepProgressCard = e.display.KeepProgressCard
 				state.mu.Lock()
 				state.activePreview = sp

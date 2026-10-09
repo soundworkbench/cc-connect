@@ -48,3 +48,47 @@ func TestFinalReplyOrderFactory(t *testing.T) {
 		t.Fatalf("zero platform order %q", got)
 	}
 }
+
+func TestProgressMergeFactory(t *testing.T) {
+	for _, name := range []string{"feishu", "lark"} {
+		for _, tc := range []struct {
+			name    string
+			options map[string]any
+			want    core.ProgressMergeCfg
+			invalid bool
+		}{
+			{name: "default", want: core.DefaultProgressMergeCfg()},
+			{name: "off", options: map[string]any{"merge_progress_into_final": false}, want: core.ProgressMergeCfg{MinChars: 400, Tables: true}},
+			{name: "custom", options: map[string]any{"merge_progress_min_chars": int64(600), "merge_progress_tables": false}, want: core.ProgressMergeCfg{Enabled: true, MinChars: 600}},
+			{name: "bad_bool", options: map[string]any{"merge_progress_into_final": "true"}, invalid: true},
+			{name: "bad_tables", options: map[string]any{"merge_progress_tables": 1}, invalid: true},
+			{name: "zero", options: map[string]any{"merge_progress_min_chars": 0}, invalid: true},
+			{name: "negative", options: map[string]any{"merge_progress_min_chars": -1}, invalid: true},
+			{name: "fraction", options: map[string]any{"merge_progress_min_chars": 400.5}, invalid: true},
+			{name: "string", options: map[string]any{"merge_progress_min_chars": "400"}, invalid: true},
+		} {
+			t.Run(name+"/"+tc.name, func(t *testing.T) {
+				opts := map[string]any{"app_id": "fixture", "app_secret": "fixture"}
+				for k, v := range tc.options {
+					opts[k] = v
+				}
+				p, err := newPlatform(name, lark.FeishuBaseUrl, opts)
+				if tc.invalid {
+					if err == nil || !strings.Contains(err.Error(), "merge_progress") {
+						t.Fatalf("want config error, got %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := p.(core.ProgressMergePreference).ProgressMergeConfig(); got != tc.want {
+					t.Fatalf("got %+v want %+v", got, tc.want)
+				}
+			})
+		}
+	}
+	if got := (&Platform{}).ProgressMergeConfig(); got != core.DefaultProgressMergeCfg() {
+		t.Fatal(got)
+	}
+}

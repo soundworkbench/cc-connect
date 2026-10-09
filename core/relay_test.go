@@ -415,7 +415,7 @@ func TestHandleRelay_TimeoutWithoutTextReturnsContextError(t *testing.T) {
 		done <- relayResult{resp: resp, err: err}
 	}()
 
-	time.Sleep(40 * time.Millisecond)
+	<-ctx.Done() // Establish cancellation before queuing the completion event.
 	// One event to unblock HandleRelay's for-range, one for the drain goroutine.
 	session.events <- Event{Type: EventThinking, Content: "still working"}
 	session.events <- Event{Type: EventResult, Content: "done", Done: true}

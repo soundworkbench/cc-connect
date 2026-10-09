@@ -201,6 +201,7 @@ const (
 	MsgToolAuthNotSupported      MsgKey = "tool_auth_not_supported"
 	MsgToolAllowFailed           MsgKey = "tool_allow_failed"
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
+	MsgIntermediateContent       MsgKey = "intermediate_content"
 	MsgFinalDeliveryFailed       MsgKey = "final_delivery_failed"
 	MsgError                     MsgKey = "error"
 	MsgAgentTurnFailed           MsgKey = "agent_turn_failed"
@@ -868,6 +869,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "✅ 工具 `%s` 已預授權。將在下次會話生效。",
 		LangJapanese:           "✅ ツール `%s` を事前許可しました。次のセッションから有効になります。",
 		LangSpanish:            "✅ Herramienta `%s` pre-autorizada. Se aplicará en la próxima sesión.",
+	},
+	MsgIntermediateContent: {
+		LangEnglish:            "(Intermediate content)",
+		LangChinese:            "（中途内容）",
+		LangTraditionalChinese: "（中途內容）",
+		LangJapanese:           "（途中の内容）",
+		LangSpanish:            "(Contenido intermedio)",
 	},
 	MsgFinalDeliveryFailed: {
 		LangEnglish:            "Final message delivery failed. Progress was kept.",

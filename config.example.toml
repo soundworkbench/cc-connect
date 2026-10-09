@@ -1038,6 +1038,9 @@ app_secret = "your-feishu-app-secret"
 #                           # 设为 true 时，群聊按飞书话题/根消息隔离会话；multi-workspace 模式下每个话题也独立绑定 workspace
 # reply_to_trigger = true   # Default: bot uses “reply to message” API (quotes the user’s message). Set false to post plain chat messages instead.
 #                           # 默认 true：用「回复消息」API（引用用户消息）。设为 false 则在会话里发普通消息、不引用触发消息。
+# merge_progress_into_final = true # Preserve substantive public progress in the final reply / 最终回复保留实质中途内容
+# merge_progress_min_chars = 400 # Per-segment Unicode character threshold / 单段 Unicode 字符阈值（正整数）
+# merge_progress_tables = true # Markdown table separator also qualifies / Markdown 表格分隔行也触发保留
 # final_reply_order = "recall_first" # Default: recall progress before final reply (iPhone); send_first keeps Apple Watch notification order
 #                           # 默认先撤回进度卡再发最终回复（iPhone）；send_first 保持 Apple Watch 通知顺序
 # progress_style = "legacy" # Progress rendering style: legacy | compact | card

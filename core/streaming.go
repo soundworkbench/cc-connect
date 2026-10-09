@@ -36,6 +36,21 @@ const (
 	FinalReplySendFirst   FinalReplyOrder = "send_first"
 )
 
+// ProgressMergeCfg describes which public progress segments survive final recall.
+type ProgressMergeCfg struct {
+	Enabled  bool
+	MinChars int
+	Tables   bool
+}
+
+func DefaultProgressMergeCfg() ProgressMergeCfg {
+	return ProgressMergeCfg{Enabled: true, MinChars: 400, Tables: true}
+}
+
+type ProgressMergePreference interface {
+	ProgressMergeConfig() ProgressMergeCfg
+}
+
 type FinalReplyOrderPreference interface {
 	FinalReplyOrder() FinalReplyOrder
 }
@@ -67,6 +82,9 @@ type streamPreview struct {
 	timer     *time.Timer
 	timerStop chan struct{} // closed when preview ends
 
+	mergeCfg            ProgressMergeCfg
+	progressI18n        *I18n
+	substantiveProgress []string
 	progressRows        []string
 	progressSeen        map[string]struct{}
 	progressFolded      int
@@ -233,13 +251,19 @@ func (sp *streamPreview) replacePreviewLocked(text string) bool {
 }
 
 func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx context.Context, transform func(string) string) *streamPreview {
+	mergeCfg := DefaultProgressMergeCfg()
+	if pref, ok := p.(ProgressMergePreference); ok {
+		mergeCfg = pref.ProgressMergeConfig()
+	}
 	return &streamPreview{
-		cfg:       cfg,
-		platform:  p,
-		replyCtx:  replyCtx,
-		ctx:       ctx,
-		transform: transform,
-		timerStop: make(chan struct{}),
+		cfg:          cfg,
+		mergeCfg:     mergeCfg,
+		progressI18n: NewI18n(LangChinese),
+		platform:     p,
+		replyCtx:     replyCtx,
+		ctx:          ctx,
+		transform:    transform,
+		timerStop:    make(chan struct{}),
 	}
 }
 
@@ -735,6 +759,8 @@ func (sp *streamPreview) detachForFinal() *streamPreview {
 	final.previewMsgID, final.lastSentText = sp.previewMsgID, sp.lastSentText
 	final.keepProgressCard = sp.keepProgressCard
 	final.pendingToolProgress = sp.pendingToolProgress
+	final.mergeCfg, final.progressI18n = sp.mergeCfg, sp.progressI18n
+	final.substantiveProgress, sp.substantiveProgress = sp.substantiveProgress, nil
 	sp.previewMsgID = nil
 	return final
 }
@@ -752,6 +778,9 @@ func (sp *streamPreview) deliverFinalInOrder(body, footer string, sendFn func(Pl
 	sp.mu.Lock()
 	sp.cancelTimerLocked()
 	sp.degraded = true
+	mergedBody := sp.mergeProgressLocked(body)
+	mergedProgress := mergedBody != body
+	body = mergedBody
 	handle, progress := sp.previewMsgID, sp.lastSentText
 	if (sp.keepProgressCard || len(sp.progressRows) > 0) && sp.pendingToolProgress != "" {
 		progress = sp.pendingToolProgress
@@ -800,7 +829,7 @@ delivery:
 		} else {
 			slog.Error("final response: chunk retry exhausted", "error", err, "chunk", i)
 		}
-		if order == FinalReplyRecallFirst {
+		if order == FinalReplyRecallFirst || mergedProgress {
 			unsent := append([]string(nil), chunks[i:]...)
 			if footer != "" {
 				unsent[len(unsent)-1] = appendReplyFooter(unsent[len(unsent)-1], footer)

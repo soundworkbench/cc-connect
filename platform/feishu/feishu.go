@@ -122,6 +122,7 @@ type Platform struct {
 	appSecret                  string
 	progressStyle              string
 	finalReplyOrder            core.FinalReplyOrder
+	progressMergeCfg           *core.ProgressMergeCfg
 	useInteractiveCard         bool
 	self                       core.Platform
 	reactionEmoji              string
@@ -346,6 +347,31 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		}
 	}
 
+	mergeCfg := core.DefaultProgressMergeCfg()
+	for key, target := range map[string]*bool{"merge_progress_into_final": &mergeCfg.Enabled, "merge_progress_tables": &mergeCfg.Tables} {
+		if raw, exists := opts[key]; exists {
+			value, ok := raw.(bool)
+			if !ok {
+				return nil, fmt.Errorf("%s: invalid %s (want boolean)", name, key)
+			}
+			*target = value
+		}
+	}
+	if raw, exists := opts["merge_progress_min_chars"]; exists {
+		var value int64
+		switch x := raw.(type) {
+		case int:
+			value = int64(x)
+		case int64:
+			value = x
+		default:
+			return nil, fmt.Errorf("%s: invalid merge_progress_min_chars (want positive integer)", name)
+		}
+		if value <= 0 || int64(int(value)) != value {
+			return nil, fmt.Errorf("%s: invalid merge_progress_min_chars (want positive integer)", name)
+		}
+		mergeCfg.MinChars = int(value)
+	}
 	finalReplyOrder := core.FinalReplyRecallFirst
 	if raw, exists := opts["final_reply_order"]; exists {
 		value, ok := raw.(string)
@@ -405,6 +431,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
 		finalReplyOrder:            finalReplyOrder,
+		progressMergeCfg:           &mergeCfg,
 		useInteractiveCard:         useInteractiveCard,
 		reactionEmoji:              reactionEmoji,
 		doneEmoji:                  doneEmoji,
@@ -6786,4 +6813,11 @@ func (p *Platform) StartSteerReaction(ctx context.Context, rctx any) func(bool) 
 			}
 		})
 	}
+}
+
+func (p *Platform) ProgressMergeConfig() core.ProgressMergeCfg {
+	if p.progressMergeCfg == nil {
+		return core.DefaultProgressMergeCfg()
+	}
+	return *p.progressMergeCfg
 }

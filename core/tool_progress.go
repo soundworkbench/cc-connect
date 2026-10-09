@@ -148,6 +148,10 @@ func (sp *streamPreview) appendProgressEvent(event Event, text string) {
 		return
 	}
 	sp.progressSeen[key] = struct{}{}
+	// Retain the original public segment before card size limits split/fold it.
+	if sp.mergeCfg.Enabled && substantiveProgress(text, sp.mergeCfg) {
+		sp.substantiveProgress = append(sp.substantiveProgress, text)
+	}
 	// Split unusually large entries before displaying them. Existing visible rows
 	// are never rewritten: only complete oldest rows can be folded later.
 	runes := []rune(text)
