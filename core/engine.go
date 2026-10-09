@@ -9267,9 +9267,9 @@ func (e *Engine) replyAfterPreview(p Platform, replyCtx any, preview *streamPrev
 		e.reply(p, replyCtx, text)
 		return
 	}
-	preview.deliverFinal(text, "", func(_ Platform, _ any, text string) error {
+	preview.deliverFinalInOrder(text, "", func(_ Platform, _ any, text string) error {
 		return e.replyWithError(p, replyCtx, text)
-	}, e.i18n.T(MsgFinalDeliveryFailed))
+	}, e.i18n.T(MsgFinalDeliveryFailed), FinalReplySendFirst)
 }
 
 // cmdCancel stops the current execution and starts a fresh session.

@@ -28,6 +28,23 @@ func DefaultStreamPreviewCfg() StreamPreviewCfg {
 	}
 }
 
+// FinalReplyOrder controls temporary preview recall relative to final delivery.
+type FinalReplyOrder string
+
+const (
+	FinalReplyRecallFirst FinalReplyOrder = "recall_first"
+	FinalReplySendFirst   FinalReplyOrder = "send_first"
+)
+
+type FinalReplyOrderPreference interface {
+	FinalReplyOrder() FinalReplyOrder
+}
+
+// PlainTextSender bypasses rich rendering for final delivery recovery.
+type PlainTextSender interface {
+	SendPlainText(context.Context, any, string) error
+}
+
 // streamPreview manages the state and throttling of a single streaming preview.
 // It accumulates text from EventText events and periodically pushes
 // updates to the platform via MessageUpdater.UpdateMessage.
@@ -722,10 +739,16 @@ func (sp *streamPreview) detachForFinal() *streamPreview {
 	return final
 }
 
-// deliverFinal stops progress updates and sends every chunk before recalling the
-// placeholder. Detaching the handle keeps deferred cleanup and /stop from
-// deleting it during delivery or after a failed send.
+// deliverFinal freezes progress updates before delivering the final reply.
 func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform, any, string) error, failureText string) bool {
+	order := FinalReplySendFirst
+	if pref, ok := sp.platform.(FinalReplyOrderPreference); ok {
+		order = pref.FinalReplyOrder()
+	}
+	return sp.deliverFinalInOrder(body, footer, sendFn, failureText, order)
+}
+
+func (sp *streamPreview) deliverFinalInOrder(body, footer string, sendFn func(Platform, any, string) error, failureText string, order FinalReplyOrder) bool {
 	sp.mu.Lock()
 	sp.cancelTimerLocked()
 	sp.degraded = true
@@ -740,10 +763,21 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 		close(sp.timerStop)
 	}
 	sp.mu.Unlock()
+	recalled := false
+	if order == FinalReplyRecallFirst && handle != nil && !sp.keepProgressCard {
+		if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+			if err := cleaner.DeletePreviewMessage(sp.ctx, handle); err != nil {
+				slog.Warn("final response: recall failed", "error", err)
+			} else {
+				recalled = true
+			}
+		}
+	}
 	chunks := SplitMessageCodeFenceAware(body, maxPlatformMessageLen)
 	if strings.TrimSpace(body) == "" && strings.TrimSpace(footer) == "" {
 		chunks = nil // Duplicate suppression has no new message to deliver.
 	}
+delivery:
 	for i, chunk := range chunks {
 		if i == len(chunks)-1 && footer != "" {
 			if sender, ok := sp.platform.(StatusFooterSender); ok {
@@ -764,7 +798,49 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 		if err := sendFn(sp.platform, sp.replyCtx, chunk); err == nil {
 			continue
 		} else {
-			slog.Error("final response: retry failed; keeping progress card", "error", err, "chunk", i)
+			slog.Error("final response: chunk retry exhausted", "error", err, "chunk", i)
+		}
+		if order == FinalReplyRecallFirst {
+			unsent := append([]string(nil), chunks[i:]...)
+			if footer != "" {
+				unsent[len(unsent)-1] = appendReplyFooter(unsent[len(unsent)-1], footer)
+			}
+			if sender, ok := sp.platform.(PlainTextSender); ok {
+				recovered := true
+				for index, text := range unsent {
+					if err := sender.SendPlainText(sp.ctx, sp.replyCtx, text); err != nil {
+						slog.Warn("final response: plain-text fallback failed; retrying", "error", err)
+						if err = sender.SendPlainText(sp.ctx, sp.replyCtx, text); err != nil {
+							slog.Error("final response: plain-text fallback retry failed", "error", err)
+							recovered = false
+							unsent = unsent[index:]
+							break
+						}
+					}
+				}
+				if recovered {
+					break delivery
+				}
+			}
+			// Recover each remaining segment independently to respect platform size limits.
+			for index, text := range unsent {
+				recoveryText := appendReplyFooter(text, failureText)
+				if index == 0 && !recalled && handle != nil {
+					if updater, ok := sp.platform.(MessageUpdater); ok {
+						if err := updater.UpdateMessage(sp.ctx, handle, recoveryText); err == nil {
+							continue
+						} else {
+							slog.Error("final response: recovery card update failed", "error", err)
+						}
+					}
+				}
+				if starter, ok := sp.platform.(PreviewStarter); ok {
+					if _, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, recoveryText); err != nil {
+						slog.Error("final response: recovery card creation failed", "error", err)
+					}
+				}
+			}
+			return false
 		}
 		if handle != nil {
 			if updater, ok := sp.platform.(MessageUpdater); ok {
@@ -796,7 +872,7 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 			}
 		}
 	}
-	if handle != nil && !sp.keepProgressCard {
+	if handle != nil && !sp.keepProgressCard && order != FinalReplyRecallFirst {
 		if cleaner, ok := sp.platform.(PreviewCleaner); ok {
 			if err := cleaner.DeletePreviewMessage(sp.ctx, handle); err != nil {
 				slog.Warn("final response: recall failed", "error", err)

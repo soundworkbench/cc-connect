@@ -121,6 +121,7 @@ type Platform struct {
 	appID                      string
 	appSecret                  string
 	progressStyle              string
+	finalReplyOrder            core.FinalReplyOrder
 	useInteractiveCard         bool
 	self                       core.Platform
 	reactionEmoji              string
@@ -345,6 +346,14 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		}
 	}
 
+	finalReplyOrder := core.FinalReplyRecallFirst
+	if raw, exists := opts["final_reply_order"]; exists {
+		value, ok := raw.(string)
+		if !ok || (value != string(core.FinalReplyRecallFirst) && value != string(core.FinalReplySendFirst)) {
+			return nil, fmt.Errorf("%s: invalid final_reply_order (want recall_first or send_first)", name)
+		}
+		finalReplyOrder = core.FinalReplyOrder(value)
+	}
 	progressStyle := "legacy"
 	if v, ok := opts["progress_style"].(string); ok {
 		switch strings.ToLower(strings.TrimSpace(v)) {
@@ -395,6 +404,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		appID:                      appID,
 		appSecret:                  appSecret,
 		progressStyle:              progressStyle,
+		finalReplyOrder:            finalReplyOrder,
 		useInteractiveCard:         useInteractiveCard,
 		reactionEmoji:              reactionEmoji,
 		doneEmoji:                  doneEmoji,
@@ -465,6 +475,13 @@ func (p *Platform) getBotOpenID() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.botOpenID
+}
+
+func (p *Platform) FinalReplyOrder() core.FinalReplyOrder {
+	if p.finalReplyOrder == "" {
+		return core.FinalReplyRecallFirst
+	}
+	return p.finalReplyOrder
 }
 
 func (p *Platform) KeepPreviewOnFinish() bool {
@@ -2802,6 +2819,22 @@ func (p *Platform) Send(ctx context.Context, rctx any, content string) error {
 	content = p.resolveMentionsInContent(ctx, rc.chatID, content)
 	msgType, msgBody := buildReplyContent(content)
 	return p.sendNewMessageToChat(ctx, rc, msgType, msgBody)
+}
+
+// SendPlainText preserves literal content when final rich-message delivery fails.
+func (p *Platform) SendPlainText(ctx context.Context, rctx any, content string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return fmt.Errorf("%s: plain-text send: invalid reply context type %T", p.tag(), rctx)
+	}
+	body, err := json.Marshal(map[string]string{"text": content})
+	if err != nil {
+		return fmt.Errorf("%s: plain-text encode: %w", p.tag(), err)
+	}
+	if p.shouldUseThreadOrReplyAPI(rc) {
+		return p.replyMessage(ctx, rc, larkim.MsgTypeText, string(body))
+	}
+	return p.sendNewMessageToChat(ctx, rc, larkim.MsgTypeText, string(body))
 }
 
 // SendWithStatusFooter implements core.StatusFooterSender: send a reply with
