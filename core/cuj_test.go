@@ -3179,3 +3179,81 @@ func TestCUJ_ST2_RestoredFirstTurnSteeringRecovers(t *testing.T) {
 func TestCUJ_ST3_RestoredImageThenTextSteering(t *testing.T) {
 	cc27ImageJourney(t)
 }
+
+func TestCUJ_CP28_ChineseToolProgressThreeTurns(t *testing.T) {
+	for _, mode := range []string{"compact", "quiet"} {
+		t.Run(mode, func(t *testing.T) { chineseToolProgressJourney(t, mode) })
+	}
+}
+
+func chineseToolProgressJourney(t *testing.T, mode string) {
+	p := &lifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "public-progress"}}
+	a := &cujAgent{}
+	e := NewEngine("test", a, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	cfg := DefaultStreamPreviewCfg()
+	cfg.IntervalMs, cfg.MinDeltaChars = 1, 1
+	e.SetStreamPreviewCfg(cfg)
+	e.SetDisplayConfig(DisplayCfg{Mode: mode, ThinkingMessages: false, ToolMessages: false, HideAgentFooter: true})
+	defer e.Stop()
+	for turn := 1; turn <= 3; turn++ {
+		first, second, final := fmt.Sprintf("第%d轮正在检查。", turn), fmt.Sprintf("第%d轮正在验证。", turn), fmt.Sprintf("第%d轮完成。", turn)
+		events := []Event{
+			{Type: EventThinking, Content: "PRIVATE_ANALYSIS"},
+			{Type: EventToolUse, ToolName: "Bash", ToolInput: "PRIVATE_COMMAND", Metadata: map[string]any{"public_tool_progress": first}},
+			{Type: EventToolUse, ToolName: "Read"},
+			{Type: EventToolUse, ToolName: "Read", ToolInput: "/PRIVATE_PATH/file", Metadata: map[string]any{"public_tool_progress": second}},
+			{Type: EventToolUse, ToolName: "Read"},
+			{Type: EventResult, Content: final, Done: true},
+		}
+		if mode == "quiet" {
+			events = []Event{events[0], events[1], events[3], events[5]}
+		}
+		a.mu.Lock()
+		if len(a.sessions) == 0 {
+			a.nextSessionEvents = events
+			a.nextSessionDelayMs = 100
+		} else {
+			s := a.sessions[0]
+			s.mu.Lock()
+			s.pendingEvents = events
+			s.pendingDelayMs = 100
+			s.mu.Unlock()
+		}
+		a.mu.Unlock()
+		e.ReceiveMessage(p, &Message{SessionKey: "public-progress:user", Platform: "public-progress", UserID: "user", MessageID: fmt.Sprint(turn), Content: "检查", ReplyCtx: "ctx"})
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			p.previewMu.Lock()
+			count := len(p.edits)
+			p.previewMu.Unlock()
+			if count >= turn*2 {
+				break
+			}
+			if len(p.getSent()) >= turn || time.Now().After(deadline) {
+				t.Fatalf("turn %d: no two progress updates before final; updates=%d", turn, count)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		p.previewMu.Lock()
+		latest := p.edits[len(p.edits)-1]
+		p.previewMu.Unlock()
+		if !strings.Contains(latest, first) || !strings.Contains(latest, second) || strings.Contains(latest, "PRIVATE_") || strings.Contains(latest, final) {
+			t.Fatalf("bad public preview=%s", latest)
+		}
+		for len(p.getSent()) < turn || e.sessions.GetOrCreateActive("public-progress:user").Busy() {
+			if time.Now().After(deadline) {
+				t.Fatal("final reply timed out")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if p.getSent()[turn-1] != final {
+			t.Fatalf("final contains progress or duplicates: %v", p.getSent())
+		}
+		p.previewMu.Lock()
+		starts, deletes := len(p.starts), len(p.deletes)
+		p.previewMu.Unlock()
+		if starts != turn || deletes != turn {
+			t.Fatalf("starts=%d recalls=%d", starts, deletes)
+		}
+	}
+}

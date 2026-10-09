@@ -197,6 +197,7 @@ type DisplayConfig struct {
 	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
 	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
 	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
+	ToolProgressLines    *int    `toml:"tool_progress_lines"`    // quiet default 3; 0 disables; range 0–3
 	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
 	HistoryMaxLen        *int    `toml:"history_max_len"`        // max chars per /history entry; 0 = no truncation; default 1000
 	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
@@ -1072,9 +1073,20 @@ func (c *Config) validateInternal(permissive bool) error {
 	return nil
 }
 
+// EffectiveToolProgressLines preserves nil so runtime mode changes retain defaults.
+func EffectiveToolProgressLines(cfg *Config, proj *ProjectConfig) *int {
+	if proj != nil && proj.Display != nil && proj.Display.ToolProgressLines != nil {
+		return proj.Display.ToolProgressLines
+	}
+	return cfg.Display.ToolProgressLines
+}
+
 func validateDisplayConfig(prefix string, display *DisplayConfig) error {
 	if display == nil {
 		return nil
+	}
+	if display.ToolProgressLines != nil && (*display.ToolProgressLines < 0 || *display.ToolProgressLines > 3) {
+		return fmt.Errorf("config: %s.tool_progress_lines must be between 0 and 3", prefix)
 	}
 	if display.Mode != nil {
 		switch *display.Mode {

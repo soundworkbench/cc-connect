@@ -319,14 +319,15 @@ var RestartCh = make(chan RestartRequest, 1)
 // DisplayCfg controls how intermediate messages are surfaced.
 // A value of -1 means "use default", 0 means "no truncation".
 type DisplayCfg struct {
-	Mode             string // "full" (default), "compact", or "quiet" — thinking/tool visibility
-	CardMode         string // "legacy" (default) or "rich" (Card 2.0 Feishu)
-	ThinkingMessages bool
-	ThinkingMaxLen   int // max runes for thinking preview; 0 = no truncation
-	ToolMaxLen       int // max runes for tool use preview; 0 = no truncation
-	ToolMessages     bool
-	HistoryMaxLen    *int // max runes for /history entries; nil = default, 0 = no truncation
-	HideAgentFooter  bool // strip model/token footer lines emitted as agent text
+	Mode              string // "full" (default), "compact", or "quiet" — thinking/tool visibility
+	CardMode          string // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages  bool
+	ThinkingMaxLen    int  // max runes for thinking preview; 0 = no truncation
+	ToolMaxLen        int  // max runes for tool use preview; 0 = no truncation
+	ToolProgressLines *int // nil: quiet defaults to 3; 0 disables; 1–3 recent rows
+	ToolMessages      bool
+	HistoryMaxLen     *int // max runes for /history entries; nil = default, 0 = no truncation
+	HideAgentFooter   bool // strip model/token footer lines emitted as agent text
 }
 
 // InstantReplyCfg controls the immediate confirmation reply sent when a message
@@ -4048,6 +4049,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 	var thinkingPreviewText strings.Builder
+	var toolProgressRows []string
 
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
@@ -4383,6 +4385,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case EventToolUse:
 			toolCount++
 			if thinkingProcessPreview {
+				if limit := e.display.toolProgressLimit(); limit > 0 && !e.display.ToolMessages {
+					toolProgressRows = append(toolProgressRows, publicToolProgress(event))
+					if len(toolProgressRows) > limit {
+						toolProgressRows = toolProgressRows[len(toolProgressRows)-limit:]
+					}
+					sp.replaceToolProgress(strings.Join(toolProgressRows, "\n"))
+					break
+				}
+				if e.display.Mode == "quiet" && !e.display.ToolMessages {
+					break // An explicit zero restores the static quiet placeholder.
+				}
+				// Only an agent-approved public summary may enter the placeholder.
+				// Raw tool input and private thinking remain hidden.
+				if progress, ok := event.Metadata["public_tool_progress"].(string); ok && strings.TrimSpace(progress) != "" {
+					if thinkingPreviewText.Len() > 0 {
+						thinkingPreviewText.WriteString("\n\n")
+					}
+					thinkingPreviewText.WriteString(progress)
+					sp.replacePreview(thinkingPreviewText.String())
+				}
 				break
 			}
 			if hasRichCard {
@@ -5301,6 +5323,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.mu.Unlock()
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 				thinkingPreviewText.Reset()
+				toolProgressRows = nil
 				thinkingProcessPreview = false
 
 				// Reset streaming card state for the next turn

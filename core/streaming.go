@@ -50,7 +50,8 @@ type streamPreview struct {
 	timer     *time.Timer
 	timerStop chan struct{} // closed when preview ends
 
-	pendingStatus CardStatus // last status set via setStatus(); applied on recovery
+	pendingToolProgress string     // latest coalesced progress; never answer text
+	pendingStatus       CardStatus // last status set via setStatus(); applied on recovery
 }
 
 // ToolStepKind identifies the kind of progress row shown in rich cards.
@@ -164,6 +165,13 @@ func (sp *streamPreview) replacePreview(text string) bool {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 	sp.cancelTimerLocked()
+	return sp.replacePreviewLocked(text)
+}
+
+func (sp *streamPreview) replacePreviewLocked(text string) bool {
+	if sp.degraded {
+		return false
+	}
 	if sp.transform != nil {
 		text = sp.transform(text)
 	}

@@ -721,8 +721,8 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 			if toolName == "AskUserQuestion" {
 				continue
 			}
-			inputSummary := summarizeInput(toolName, item["input"])
-			evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: inputSummary}
+			inputSummary := chineseToolProgress(toolName, item["input"], strVal(item, "title"))
+			evt := core.Event{Type: core.EventToolUse, ToolName: toolName, ToolInput: inputSummary, Metadata: map[string]any{"public_tool_progress": inputSummary}}
 			select {
 			case cs.events <- evt:
 			case <-cs.ctx.Done():

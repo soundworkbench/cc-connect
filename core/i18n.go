@@ -159,6 +159,20 @@ func (i *I18n) SetLang(lang Language) {
 type MsgKey string
 
 const (
+	MsgProgressCommand     MsgKey = "tool_progress_command"
+	MsgProgressRead        MsgKey = "tool_progress_read"
+	MsgProgressEdit        MsgKey = "tool_progress_edit"
+	MsgProgressSearchFiles MsgKey = "tool_progress_searchfiles"
+	MsgProgressFetch       MsgKey = "tool_progress_fetch"
+	MsgProgressWebSearch   MsgKey = "tool_progress_websearch"
+	MsgProgressAgent       MsgKey = "tool_progress_agent"
+	MsgProgressSkill       MsgKey = "tool_progress_skill"
+	MsgProgressTodo        MsgKey = "tool_progress_todo"
+	MsgProgressMCP         MsgKey = "tool_progress_mcp"
+	MsgProgressOperation   MsgKey = "tool_progress_operation"
+)
+
+const (
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
 	MsgTool                      MsgKey = "tool"
@@ -660,6 +674,18 @@ const (
 )
 
 var messages = map[MsgKey]map[Language]string{
+	MsgProgressCommand:     {LangChinese: "运行命令", LangEnglish: "Run command", LangTraditionalChinese: "執行命令", LangJapanese: "コマンドを実行", LangSpanish: "Ejecutar comando"},
+	MsgProgressRead:        {LangChinese: "读取文件", LangEnglish: "Read file", LangTraditionalChinese: "讀取檔案", LangJapanese: "ファイルを読む", LangSpanish: "Leer archivo"},
+	MsgProgressEdit:        {LangChinese: "修改文件", LangEnglish: "Modify file", LangTraditionalChinese: "修改檔案", LangJapanese: "ファイルを変更", LangSpanish: "Modificar archivo"},
+	MsgProgressSearchFiles: {LangChinese: "搜索文件", LangEnglish: "Search files", LangTraditionalChinese: "搜尋檔案", LangJapanese: "ファイルを検索", LangSpanish: "Buscar archivos"},
+	MsgProgressFetch:       {LangChinese: "读取网页", LangEnglish: "Read webpage", LangTraditionalChinese: "讀取網頁", LangJapanese: "ウェブページを読む", LangSpanish: "Leer página web"},
+	MsgProgressWebSearch:   {LangChinese: "联网搜索", LangEnglish: "Search web", LangTraditionalChinese: "聯網搜尋", LangJapanese: "ウェブ検索", LangSpanish: "Buscar en la web"},
+	MsgProgressAgent:       {LangChinese: "派子代理", LangEnglish: "Delegate to subagent", LangTraditionalChinese: "派子代理", LangJapanese: "サブエージェントに委任", LangSpanish: "Delegar a subagente"},
+	MsgProgressSkill:       {LangChinese: "加载技能", LangEnglish: "Load skill", LangTraditionalChinese: "載入技能", LangJapanese: "スキルを読み込む", LangSpanish: "Cargar habilidad"},
+	MsgProgressTodo:        {LangChinese: "更新待办", LangEnglish: "Update todos", LangTraditionalChinese: "更新待辦", LangJapanese: "タスクを更新", LangSpanish: "Actualizar tareas"},
+	MsgProgressMCP:         {LangChinese: "调用工具", LangEnglish: "Call tool", LangTraditionalChinese: "呼叫工具", LangJapanese: "ツールを呼び出す", LangSpanish: "Invocar herramienta"},
+	MsgProgressOperation:   {LangChinese: "执行操作", LangEnglish: "Perform operation", LangTraditionalChinese: "執行操作", LangJapanese: "操作を実行", LangSpanish: "Realizar operación"},
+
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",

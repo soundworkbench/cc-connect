@@ -195,8 +195,15 @@ func testPreviewLifecycleThreeTurns(t *testing.T, failures int, textPreview, ins
 			time.Sleep(time.Millisecond)
 		}
 		p.previewMu.Lock()
-		if len(p.starts) != turn || len(p.deletes) != turn || len(p.edits) != turn {
+		wantEdits := turn
+		if !textPreview {
+			wantEdits = turn * 2
+		} // thinking + quiet tool progress on the same card
+		if len(p.starts) != turn || len(p.deletes) != turn || len(p.edits) != wantEdits {
 			t.Errorf("turn %d: starts=%v edits=%v recalls=%v", turn, p.starts, p.edits, p.deletes)
+		}
+		if !textPreview && p.edits[len(p.edits)-1] != fmt.Sprintf("card-%d:运行命令", turn) {
+			t.Errorf("quiet tool progress missing or unsafe: %v", p.edits)
 		}
 		if !strings.Contains(p.edits[len(p.edits)-1], fmt.Sprintf("card-%d:", turn)) {
 			t.Error("updated previous turn card")
