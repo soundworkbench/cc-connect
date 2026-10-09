@@ -1046,6 +1046,8 @@ func (cs *claudeSession) buildUserInput(prompt string, messageID string, images 
 
 	var parts []map[string]any
 	var savedPaths []string
+	var pathOnly []string
+	inlineBytes := 0
 
 	// Save and encode images
 	for i, img := range images {
@@ -1063,6 +1065,15 @@ func (cs *claudeSession) buildUserInput(prompt string, messageID string, images 
 		if mimeType == "" {
 			mimeType = "image/png"
 		}
+		// Large base64 payloads overflow the stdin pipe buffer; with the bounded
+		// active-turn writer they time out mid-line and corrupt the stream. Keep
+		// big images on disk and let Claude Read them by path instead.
+		encodedLen := base64.StdEncoding.EncodedLen(len(img.Data))
+		if inlineBytes+encodedLen > claudeInlineImageLimit {
+			pathOnly = append(pathOnly, fpath)
+			continue
+		}
+		inlineBytes += encodedLen
 		parts = append(parts, map[string]any{
 			"type": "image",
 			"source": map[string]any{
@@ -1083,7 +1094,9 @@ func (cs *claudeSession) buildUserInput(prompt string, messageID string, images 
 	} else if textPart == "" {
 		textPart = "Please analyze the attached image(s)."
 	}
-	if len(savedPaths) > 0 {
+	if len(pathOnly) > 0 {
+		textPart += "\n\n(Images saved locally, please read them with the Read tool: " + strings.Join(pathOnly, ", ") + ")"
+	} else if len(savedPaths) > 0 {
 		textPart += "\n\n(Images also saved locally: " + strings.Join(savedPaths, ", ") + ")"
 	}
 	if len(filePaths) > 0 {

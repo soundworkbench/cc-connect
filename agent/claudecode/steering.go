@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -32,6 +33,10 @@ var _ core.AgentSessionSteerer = (*claudeSession)(nil)
 
 const claudeInputTimeout = 3 * time.Second
 
+// claudeInlineImageLimit caps base64 image bytes sent inline in one user
+// message, keeping the JSON line under the 64 KiB pipe buffer.
+const claudeInlineImageLimit = 48 << 10
+
 func newInputID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -53,7 +58,15 @@ func (cs *claudeSession) Send(prompt, messageID string, images []core.ImageAttac
 	defer cs.inputMu.Unlock()
 	if p := cs.partialInput; p != nil {
 		if p.messageID != messageID || p.prompt != prompt {
-			return errors.New("claude: cannot overtake incomplete input frame")
+			// The incomplete frame's owner is not resending it, so its tail will
+			// never arrive. Refusing forever wedged the whole chat; instead close
+			// stdin so this session ends and the next message starts fresh.
+			slog.Error("claudeSession: incomplete input frame abandoned, closing session", "pending_message", p.messageID, "new_message", messageID)
+			cs.partialInput = nil
+			cs.stdinMu.Lock()
+			_ = cs.stdin.Close()
+			cs.stdinMu.Unlock()
+			return errors.New("claude: previous input frame incomplete; session closed, please resend")
 		}
 		cs.inputs[p.id] = &claudeInput{ack: make(chan struct{})}
 		cs.inputActive = true
@@ -101,6 +114,16 @@ func (cs *claudeSession) Steer(prompt, messageID string, images []core.ImageAtta
 // Claude queues complete stdin frames itself, including across native results.
 func (cs *claudeSession) SteerAsync(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (*core.SteerReceipt, error) {
 	if len(files) > 0 {
+		return nil, nil
+	}
+	// 2026-10-09: inline base64 screenshots overflowed the pipe within the 3s
+	// steer deadline and left a partial frame. Large images take the queued
+	// path, where buildUserInput keeps them on disk and passes the path.
+	encoded := 0
+	for _, img := range images {
+		encoded += base64.StdEncoding.EncodedLen(len(img.Data))
+	}
+	if encoded > claudeInlineImageLimit {
 		return nil, nil
 	}
 	cs.inputMu.Lock()
@@ -271,6 +294,14 @@ func (cs *claudeSession) writeBoundedBytes(b []byte) (int, error) {
 	n, err := cs.stdin.Write(b)
 	if err == nil && n != len(b) {
 		err = io.ErrShortWrite
+	}
+	if err != nil && n > 0 && n < len(b) {
+		// A partial JSON line is now in Claude's stdin; every later message
+		// would be appended to it and fail to parse, wedging the session.
+		// Close stdin so the process exits and the next message starts fresh.
+		slog.Error("claudeSession: partial stdin write, closing session", "written", n, "size", len(b), "error", err)
+		_ = cs.stdin.Close()
+		return n, fmt.Errorf("claude: partial input write (%d/%d bytes), session closed: %w", n, len(b), err)
 	}
 	return n, err
 }
