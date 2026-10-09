@@ -1,7 +1,6 @@
 package core
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -9,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -464,6 +462,8 @@ type Engine struct {
 	platformLifecycleMu sync.Mutex
 	platformReady       map[Platform]bool
 	stopping            bool
+	activeWork          int
+	workIdle            chan struct{}
 	replyFooterMu       sync.Mutex
 	replyFooterUsage    replyFooterUsageCache
 
@@ -1070,18 +1070,6 @@ func (e *Engine) AddPlatform(p Platform) {
 	e.platforms = append(e.platforms, p)
 }
 
-func (e *Engine) SetCronScheduler(cs *CronScheduler) {
-	e.cronScheduler = cs
-}
-
-func (e *Engine) SetTimerScheduler(ts *TimerScheduler) {
-	e.timerScheduler = ts
-}
-
-func (e *Engine) SetHeartbeatScheduler(hs *HeartbeatScheduler) {
-	e.heartbeatScheduler = hs
-}
-
 func (e *Engine) SetCommandSaveAddFunc(fn func(name, description, prompt, exec, workDir string) error) {
 	e.commandSaveAddFunc = fn
 }
@@ -1435,859 +1423,6 @@ func (e *Engine) ActiveSessionKeys() []string {
 	return keys
 }
 
-// ExecuteCronJob runs a cron job by injecting a synthetic message into the engine.
-// It finds the platform that owns the session key, reconstructs a reply context,
-// and processes the message as if the user sent it.
-func (e *Engine) ExecuteCronJob(job *CronJob) error {
-	e.hooks.Emit(HookEvent{
-		Event:      HookEventCronTriggered,
-		SessionKey: job.SessionKey,
-		Content:    job.Prompt,
-		Extra:      map[string]any{"job_id": job.ID, "job_description": job.Description},
-	})
-
-	sessionKey := job.SessionKey
-	platformName := ""
-	if idx := strings.Index(sessionKey, ":"); idx > 0 {
-		platformName = sessionKey[:idx]
-	}
-
-	var targetPlatform Platform
-	for _, p := range e.platforms {
-		if p.Name() == platformName {
-			targetPlatform = p
-			break
-		}
-	}
-	// Fallback: in multi-workspace mode the stored session key may be prefixed
-	// with the workspace path (e.g. "/home/user/project:slack:C123:U456").
-	// Search for a known platform name within the key and strip the prefix.
-	if targetPlatform == nil {
-		for _, p := range e.platforms {
-			needle := ":" + p.Name() + ":"
-			if idx := strings.Index(sessionKey, needle); idx >= 0 {
-				targetPlatform = p
-				platformName = p.Name()
-				sessionKey = sessionKey[idx+1:] // strip workspace prefix
-				break
-			}
-		}
-	}
-	if targetPlatform == nil {
-		return fmt.Errorf("platform %q not found for session %q", platformName, sessionKey)
-	}
-
-	rc, ok := targetPlatform.(ReplyContextReconstructor)
-	if !ok {
-		return fmt.Errorf("platform %q does not support proactive messaging (cron)", platformName)
-	}
-
-	runSessionKey := sessionKey
-	var replyCtx any
-	var err error
-	if !job.Mute {
-		if resolver, ok := targetPlatform.(CronReplyTargetResolver); ok {
-			resolvedSessionKey, resolvedReplyCtx, err := resolver.ResolveCronReplyTarget(sessionKey, cronRunTitle(job))
-			if err != nil {
-				if !errors.Is(err, ErrNotSupported) {
-					return fmt.Errorf("resolve cron reply target: %w", err)
-				}
-			} else {
-				if resolvedSessionKey != "" {
-					runSessionKey = resolvedSessionKey
-				}
-				if resolvedReplyCtx != nil {
-					replyCtx = resolvedReplyCtx
-				}
-			}
-		}
-	}
-	if replyCtx == nil {
-		replyCtx, err = rc.ReconstructReplyCtx(runSessionKey)
-		if err != nil {
-			return fmt.Errorf("reconstruct reply context: %w", err)
-		}
-	}
-
-	// Wrap platform to discard all outgoing messages when muted
-	effectivePlatform := targetPlatform
-	if job.Mute {
-		effectivePlatform = &mutePlatform{targetPlatform}
-	}
-
-	// Notify user that a cron job is executing (unless silent/muted)
-	// Note: this notification uses targetPlatform directly, not the tracking wrapper,
-	// so it won't count as a "meaningful delivery" for empty response detection.
-	if !job.Mute {
-		silent := false
-		if e.cronScheduler != nil {
-			silent = e.cronScheduler.IsSilent(job)
-		}
-		if !silent {
-			desc := job.Description
-			if desc == "" {
-				if job.IsShellJob() {
-					desc = truncateStr(job.Exec, 40)
-				} else {
-					desc = truncateStr(job.Prompt, 40)
-				}
-			}
-			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
-		}
-	}
-
-	if job.IsShellJob() {
-		return e.executeCronShell(effectivePlatform, replyCtx, job)
-	}
-
-	content := job.Prompt
-	if strings.HasPrefix(content, "/") {
-		parts := strings.Fields(content)
-		if len(parts) > 0 {
-			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
-			if skill := e.skills.Resolve(cmd); skill != nil {
-				content = BuildSkillInvocationPrompt(skill, parts[1:])
-			}
-		}
-	}
-
-	msg := &Message{
-		SessionKey:   sessionKey,
-		Platform:     platformName,
-		UserID:       "cron",
-		UserName:     "cron",
-		Content:      content,
-		ReplyCtx:     replyCtx,
-		ModeOverride: job.Mode,
-	}
-
-	// Resolve workspace-specific agent and sessions for multi-workspace mode.
-	// Priority: job.WorkDir (explicit) > workspace binding > global agent fallback.
-	agent := e.agent
-	sessions := e.sessions
-	workspaceDir := ""
-
-	if e.multiWorkspace {
-		channelID := extractChannelID(sessionKey)
-		if channelID != "" {
-			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
-			if err == nil && workspace != "" {
-				wsAgent, wsSessions, _, effectiveDir, err := e.workspaceContext(workspace, sessionKey)
-				if err == nil {
-					agent = wsAgent
-					sessions = wsSessions
-					workspaceDir = effectiveDir
-				}
-			}
-		}
-	}
-
-	if job.WorkDir != "" {
-		wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(job.WorkDir)
-		if err == nil {
-			agent = wsAgent
-			sessions = wsSessions
-			workspaceDir = job.WorkDir
-		} else {
-			slog.Warn("cron: workspace agent creation failed, using global",
-				"work_dir", job.WorkDir, "session_key", sessionKey, "error", err)
-		}
-	}
-
-	useNewSession := false
-	if e.cronScheduler != nil {
-		useNewSession = e.cronScheduler.UsesNewSession(job)
-	} else {
-		useNewSession = job.UsesNewSessionPerRun()
-	}
-
-	if useNewSession {
-		msg.SessionKey = runSessionKey
-		session := sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
-		if !session.TryLock() {
-			return fmt.Errorf("session %q is busy", runSessionKey)
-		}
-		iKey := fmt.Sprintf("%s#cron:%s", runSessionKey, session.ID)
-		if workspaceDir != "" {
-			iKey = workspaceDir + ":" + iKey
-		}
-		prevHistLen := session.HistoryLen()
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
-		e.cleanupInteractiveState(iKey)
-		// Empty-response detection via session history delta: processInteractiveMessageWith
-		// always adds a "user" entry (prevHistLen+1), then an "assistant" entry on success
-		// (prevHistLen+2). This approach correctly detects empty responses across all
-		// delivery modes (plain text, cards, rich cards, DingTalk AI streaming) because
-		// AddHistory("assistant",...) is called before any platform-specific rendering path.
-		if !job.Mute && session.HistoryLen() < prevHistLen+2 {
-			return fmt.Errorf("cron job %q produced an empty response", job.ID)
-		}
-		return nil
-	}
-
-	session := sessions.GetOrCreateActive(sessionKey)
-	if !session.TryLock() {
-		return fmt.Errorf("session %q is busy", sessionKey)
-	}
-
-	iKey := sessionKey
-	if workspaceDir != "" {
-		iKey = workspaceDir + ":" + sessionKey
-	}
-	prevHistLen := session.HistoryLen()
-	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
-	// Same empty-response detection as the useNewSession path above.
-	if !job.Mute && session.HistoryLen() < prevHistLen+2 {
-		return fmt.Errorf("cron job %q produced an empty response", job.ID)
-	}
-	return nil
-}
-
-// ExecuteTimerJob fires a one-shot timer job: resolves the platform, sends a
-// notification (unless muted), and either runs a shell command or injects a
-// synthetic message into the agent session.
-func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
-	e.hooks.Emit(HookEvent{
-		Event:      HookEventTimerTriggered,
-		SessionKey: job.SessionKey,
-		Content:    job.Prompt,
-		Extra:      map[string]any{"job_id": job.ID, "job_description": job.Description},
-	})
-
-	sessionKey := job.SessionKey
-	platformName := ""
-	if idx := strings.Index(sessionKey, ":"); idx > 0 {
-		platformName = sessionKey[:idx]
-	}
-
-	var targetPlatform Platform
-	for _, p := range e.platforms {
-		if p.Name() == platformName {
-			targetPlatform = p
-			break
-		}
-	}
-	// Multi-workspace fallback: strip workspace prefix from session key.
-	if targetPlatform == nil {
-		for _, p := range e.platforms {
-			needle := ":" + p.Name() + ":"
-			if idx := strings.Index(sessionKey, needle); idx >= 0 {
-				targetPlatform = p
-				platformName = p.Name()
-				sessionKey = sessionKey[idx+1:]
-				break
-			}
-		}
-	}
-	if targetPlatform == nil {
-		return fmt.Errorf("platform %q not found for session %q", platformName, sessionKey)
-	}
-
-	rc, ok := targetPlatform.(ReplyContextReconstructor)
-	if !ok {
-		return fmt.Errorf("platform %q does not support proactive messaging (timer)", platformName)
-	}
-
-	runSessionKey := sessionKey
-	var replyCtx any
-	var err error
-	if !job.Mute {
-		if resolver, ok := targetPlatform.(CronReplyTargetResolver); ok {
-			resolvedSessionKey, resolvedReplyCtx, err := resolver.ResolveCronReplyTarget(sessionKey, timerRunTitle(job))
-			if err != nil {
-				if !errors.Is(err, ErrNotSupported) {
-					return fmt.Errorf("resolve timer reply target: %w", err)
-				}
-			} else {
-				if resolvedSessionKey != "" {
-					runSessionKey = resolvedSessionKey
-				}
-				if resolvedReplyCtx != nil {
-					replyCtx = resolvedReplyCtx
-				}
-			}
-		}
-	}
-	if replyCtx == nil {
-		replyCtx, err = rc.ReconstructReplyCtx(runSessionKey)
-		if err != nil {
-			return fmt.Errorf("reconstruct reply context: %w", err)
-		}
-	}
-
-	effectivePlatform := targetPlatform
-	if job.Mute {
-		effectivePlatform = &mutePlatform{targetPlatform}
-	}
-
-	// Notify user unless muted or silent
-	if !job.Mute {
-		silent := false
-		if e.timerScheduler != nil {
-			silent = e.timerScheduler.IsSilent(job)
-		}
-		if !silent {
-			desc := job.Description
-			if desc == "" {
-				if job.IsShellJob() {
-					desc = truncateStr(job.Exec, 40)
-				} else {
-					desc = truncateStr(job.Prompt, 40)
-				}
-			}
-			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
-		}
-	}
-
-	if job.IsShellJob() {
-		return e.executeTimerShell(effectivePlatform, replyCtx, job)
-	}
-
-	content := job.Prompt
-	if strings.HasPrefix(content, "/") {
-		parts := strings.Fields(content)
-		if len(parts) > 0 {
-			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
-			if skill := e.skills.Resolve(cmd); skill != nil {
-				content = BuildSkillInvocationPrompt(skill, parts[1:])
-			}
-		}
-	}
-
-	msg := &Message{
-		SessionKey:   sessionKey,
-		Platform:     platformName,
-		UserID:       "timer",
-		UserName:     "timer",
-		Content:      content,
-		ReplyCtx:     replyCtx,
-		ModeOverride: job.Mode,
-	}
-
-	agent := e.agent
-	sessions := e.sessions
-	workspaceDir := ""
-
-	if e.multiWorkspace {
-		channelID := extractChannelID(sessionKey)
-		if channelID != "" {
-			workspace, _, err := e.resolveWorkspace(targetPlatform, channelID)
-			if err == nil && workspace != "" {
-				wsAgent, wsSessions, _, effectiveDir, err := e.workspaceContext(workspace, sessionKey)
-				if err == nil {
-					agent = wsAgent
-					sessions = wsSessions
-					workspaceDir = effectiveDir
-				}
-			}
-		}
-	}
-
-	if job.WorkDir != "" {
-		wsAgent, wsSessions, err := e.getOrCreateWorkspaceAgent(job.WorkDir)
-		if err == nil {
-			agent = wsAgent
-			sessions = wsSessions
-			workspaceDir = job.WorkDir
-		} else {
-			slog.Warn("timer: workspace agent creation failed, using global",
-				"work_dir", job.WorkDir, "session_key", sessionKey, "error", err)
-		}
-	}
-
-	useNewSession := false
-	if e.timerScheduler != nil {
-		useNewSession = e.timerScheduler.UsesNewSession(job)
-	} else {
-		useNewSession = job.UsesNewSessionPerRun()
-	}
-
-	if useNewSession {
-		msg.SessionKey = runSessionKey
-		session := sessions.NewSideSession(runSessionKey, "timer-"+job.ID)
-		if !session.TryLock() {
-			return fmt.Errorf("session %q is busy", runSessionKey)
-		}
-		iKey := fmt.Sprintf("%s#timer:%s", runSessionKey, session.ID)
-		if workspaceDir != "" {
-			iKey = workspaceDir + ":" + iKey
-		}
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
-		e.cleanupInteractiveState(iKey)
-		return nil
-	}
-
-	session := sessions.GetOrCreateActive(sessionKey)
-	if !session.TryLock() {
-		return fmt.Errorf("session %q is busy", sessionKey)
-	}
-
-	iKey := sessionKey
-	if workspaceDir != "" {
-		iKey = workspaceDir + ":" + sessionKey
-	}
-	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
-	return nil
-}
-
-func timerRunTitle(job *TimerJob) string {
-	if job == nil {
-		return "timer"
-	}
-	if job.Description != "" {
-		return job.Description
-	}
-	if job.IsShellJob() {
-		return truncateStr(job.Exec, 40)
-	}
-	return truncateStr(job.Prompt, 40)
-}
-
-// executeTimerShell runs a shell command for a timer job and sends the output.
-func (e *Engine) executeTimerShell(p Platform, replyCtx any, job *TimerJob) error {
-	workDir := job.WorkDir
-	if workDir == "" {
-		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
-			workDir = wd.GetWorkDir()
-		}
-	}
-	if workDir == "" {
-		workDir, _ = os.Getwd()
-	}
-
-	timeout := job.ExecutionTimeout()
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
-
-	cmdLabel := truncateStr(job.Exec, 60)
-
-	ctx, cancel := context.WithTimeout(e.ctx, timeout)
-	defer cancel()
-
-	var shellCmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		shellCmd = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", job.Exec)
-	} else {
-		shellCmd = exec.CommandContext(ctx, "sh", "-c", job.Exec)
-	}
-	shellCmd.Dir = workDir
-
-	stdout, err := shellCmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("shell: stdout pipe: %w", err)
-	}
-	stderr, err := shellCmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("shell: stderr pipe: %w", err)
-	}
-
-	if err := shellCmd.Start(); err != nil {
-		e.send(p, replyCtx, fmt.Sprintf("⏰ ❌ `%s`\nerror: failed to start: %v", cmdLabel, err))
-		return fmt.Errorf("shell: start: %w", err)
-	}
-
-	var mu sync.Mutex
-	var buf bytes.Buffer
-	doneCh := make(chan struct{})
-
-	readPipe := func(r io.Reader) {
-		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
-		for scanner.Scan() {
-			mu.Lock()
-			if buf.Len() > 0 {
-				buf.WriteByte('\n')
-			}
-			buf.WriteString(scanner.Text())
-			mu.Unlock()
-		}
-	}
-	var pipeWg sync.WaitGroup
-	pipeWg.Add(2)
-	go func() { defer pipeWg.Done(); readPipe(stdout) }()
-	go func() { defer pipeWg.Done(); readPipe(stderr) }()
-
-	go func() {
-		pipeWg.Wait()
-		_ = shellCmd.Wait()
-		close(doneCh)
-	}()
-
-	select {
-	case <-doneCh:
-		return e.finishCronShell(p, replyCtx, shellCmd, &mu, &buf, cmdLabel)
-	case <-ctx.Done():
-		killAndWait(shellCmd, doneCh)
-		mu.Lock()
-		output := buf.String()
-		mu.Unlock()
-		msg := fmt.Sprintf("⏰ ⚠️ timeout: `%s`", cmdLabel)
-		if output != "" {
-			msg = fmt.Sprintf("⏰ ⚠️ timeout: `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
-		}
-		e.send(p, replyCtx, msg)
-		return fmt.Errorf("shell command timed out")
-	case <-time.After(quickFinishTimeout):
-	}
-
-	// Long-running command — try in-place updates
-	var previewHandle any
-	var useUpdate bool
-	if _, ok := p.(MessageUpdater); ok {
-		if starter, ok := p.(PreviewStarter); ok {
-			mu.Lock()
-			output := buf.String()
-			mu.Unlock()
-			progressMsg := fmt.Sprintf("⏰ ⏳ `%s`", cmdLabel)
-			if output != "" {
-				progressMsg = fmt.Sprintf("⏰ ⏳ `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
-			}
-			handle, err := starter.SendPreviewStart(e.ctx, replyCtx, progressMsg)
-			if err == nil && handle != nil {
-				previewHandle = handle
-				useUpdate = true
-			}
-		}
-	}
-	if !useUpdate {
-		e.send(p, replyCtx, fmt.Sprintf("⏰ ⏳ `%s`", cmdLabel))
-	}
-
-	updateDone := make(chan struct{})
-	if useUpdate {
-		go func() {
-			ticker := time.NewTicker(2 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					mu.Lock()
-					output := buf.String()
-					mu.Unlock()
-					msg := fmt.Sprintf("⏰ ⏳ `%s`", cmdLabel)
-					if output != "" {
-						msg = fmt.Sprintf("⏰ ⏳ `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
-					}
-					_ = updaterFor(p).UpdateMessage(e.ctx, previewHandle, msg)
-				case <-updateDone:
-					return
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-	}
-
-	select {
-	case <-doneCh:
-		close(updateDone)
-		return e.finishCronShell(p, replyCtx, shellCmd, &mu, &buf, cmdLabel, useUpdate, previewHandle)
-	case <-ctx.Done():
-		close(updateDone)
-		killAndWait(shellCmd, doneCh)
-		mu.Lock()
-		output := buf.String()
-		mu.Unlock()
-		msg := fmt.Sprintf("⏰ ⚠️ timeout: `%s`", cmdLabel)
-		if output != "" {
-			msg = fmt.Sprintf("⏰ ⚠️ timeout: `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
-		}
-		if useUpdate {
-			_ = updaterFor(p).UpdateMessage(e.ctx, previewHandle, msg)
-		} else {
-			e.send(p, replyCtx, msg)
-		}
-		return fmt.Errorf("shell command timed out")
-	}
-}
-
-func cronRunTitle(job *CronJob) string {
-	if job == nil {
-		return "cron"
-	}
-	if desc := strings.TrimSpace(job.Description); desc != "" {
-		return truncateStr(desc, 60)
-	}
-	if job.IsShellJob() {
-		if cmd := strings.TrimSpace(job.Exec); cmd != "" {
-			return truncateStr(cmd, 60)
-		}
-		return "cron"
-	}
-	if prompt := strings.TrimSpace(job.Prompt); prompt != "" {
-		return truncateStr(prompt, 60)
-	}
-	return "cron"
-}
-
-// executeCronShell runs a shell command for a cron job and sends the output.
-func (e *Engine) executeCronShell(p Platform, replyCtx any, job *CronJob) error {
-	workDir := job.WorkDir
-	if workDir == "" {
-		if wd, ok := e.agent.(interface{ GetWorkDir() string }); ok {
-			workDir = wd.GetWorkDir()
-		}
-	}
-	if workDir == "" {
-		workDir, _ = os.Getwd()
-	}
-
-	timeout := job.ExecutionTimeout()
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
-
-	cmdLabel := truncateStr(job.Exec, 60)
-
-	ctx, cancel := context.WithTimeout(e.ctx, timeout)
-	defer cancel()
-
-	shellCmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.shellProfile, job.Exec)
-	shellCmd.Dir = workDir
-
-	stdout, err := shellCmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("shell: stdout pipe: %w", err)
-	}
-	stderr, err := shellCmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("shell: stderr pipe: %w", err)
-	}
-
-	if err := shellCmd.Start(); err != nil {
-		e.send(p, replyCtx, fmt.Sprintf("⏰ ❌ `%s`\nerror: failed to start: %v", cmdLabel, err))
-		return fmt.Errorf("shell: start: %w", err)
-	}
-
-	var mu sync.Mutex
-	var buf bytes.Buffer
-	doneCh := make(chan struct{})
-
-	readPipe := func(r io.Reader) {
-		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
-		for scanner.Scan() {
-			mu.Lock()
-			if buf.Len() > 0 {
-				buf.WriteByte('\n')
-			}
-			buf.WriteString(scanner.Text())
-			mu.Unlock()
-		}
-	}
-	// Use a WaitGroup so both pipe-reader goroutines drain completely before
-	// doneCh is closed. Without this, shellCmd.Wait() can return (closing the
-	// pipe write-ends) while the scanners still have unread data in the OS
-	// buffer, causing finishCronShell to read a truncated output.
-	var pipeWg sync.WaitGroup
-	pipeWg.Add(2)
-	go func() { defer pipeWg.Done(); readPipe(stdout) }()
-	go func() { defer pipeWg.Done(); readPipe(stderr) }()
-
-	go func() {
-		pipeWg.Wait()
-		_ = shellCmd.Wait()
-		close(doneCh)
-	}()
-
-	// Wait briefly to see if the command finishes quickly
-	select {
-	case <-doneCh:
-		return e.finishCronShell(p, replyCtx, shellCmd, &mu, &buf, cmdLabel)
-	case <-ctx.Done():
-		killAndWait(shellCmd, doneCh)
-		mu.Lock()
-		output := buf.String()
-		mu.Unlock()
-		msg := fmt.Sprintf("⏰ ⚠️ timeout: `%s`", cmdLabel)
-		if output != "" {
-			msg = fmt.Sprintf("⏰ ⚠️ timeout: `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
-		}
-		e.send(p, replyCtx, msg)
-		return fmt.Errorf("shell command timed out")
-	case <-time.After(quickFinishTimeout):
-		// Still running — fall through to progress mode
-	}
-
-	// Long-running command. Try in-place updates.
-	var previewHandle any
-	var useUpdate bool
-	if _, ok := p.(MessageUpdater); ok {
-		if starter, ok := p.(PreviewStarter); ok {
-			mu.Lock()
-			output := buf.String()
-			mu.Unlock()
-			progressMsg := fmt.Sprintf("⏰ ⏳ `%s`", cmdLabel)
-			if output != "" {
-				progressMsg = fmt.Sprintf("⏰ ⏳ `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
-			}
-			handle, err := starter.SendPreviewStart(e.ctx, replyCtx, progressMsg)
-			if err == nil && handle != nil {
-				previewHandle = handle
-				useUpdate = true
-			}
-		}
-	}
-	if !useUpdate {
-		e.send(p, replyCtx, fmt.Sprintf("⏰ ⏳ `%s`", cmdLabel))
-	}
-
-	updateDone := make(chan struct{})
-	if useUpdate {
-		go func() {
-			ticker := time.NewTicker(2 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					mu.Lock()
-					output := buf.String()
-					mu.Unlock()
-					msg := fmt.Sprintf("⏰ ⏳ `%s`", cmdLabel)
-					if output != "" {
-						msg = fmt.Sprintf("⏰ ⏳ `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
-					}
-					_ = updaterFor(p).UpdateMessage(e.ctx, previewHandle, msg)
-				case <-updateDone:
-					return
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-	}
-
-	select {
-	case <-doneCh:
-		close(updateDone)
-		return e.finishCronShell(p, replyCtx, shellCmd, &mu, &buf, cmdLabel, useUpdate, previewHandle)
-	case <-ctx.Done():
-		close(updateDone)
-		killAndWait(shellCmd, doneCh)
-		mu.Lock()
-		output := buf.String()
-		mu.Unlock()
-		msg := fmt.Sprintf("⏰ ⚠️ timeout: `%s`", cmdLabel)
-		if output != "" {
-			msg = fmt.Sprintf("⏰ ⚠️ timeout: `%s`\n\n%s", cmdLabel, truncateStr(output, 3000))
-		}
-		if useUpdate {
-			_ = updaterFor(p).UpdateMessage(e.ctx, previewHandle, msg)
-		} else {
-			e.send(p, replyCtx, msg)
-		}
-		return fmt.Errorf("shell command timed out")
-	}
-}
-
-func (e *Engine) finishCronShell(p Platform, replyCtx any, cmd *exec.Cmd, mu *sync.Mutex, buf *bytes.Buffer, cmdLabel string, opts ...any) error {
-	mu.Lock()
-	output := buf.String()
-	mu.Unlock()
-
-	exitOK := cmd.ProcessState.ExitCode() == 0
-
-	var finalMsg string
-	if exitOK {
-		result := strings.TrimSpace(output)
-		if result == "" {
-			result = "(no output)"
-		}
-		finalMsg = fmt.Sprintf("⏰ ✅ `%s`\n\n%s", cmdLabel, truncateStr(result, 3000))
-	} else {
-		errMsg := output
-		if errMsg != "" {
-			finalMsg = fmt.Sprintf("⏰ ❌ `%s`\n\n%s\n\nerror: exit code %d", cmdLabel, truncateStr(errMsg, 3000), cmd.ProcessState.ExitCode())
-		} else {
-			finalMsg = fmt.Sprintf("⏰ ❌ `%s`\n\nerror: exit code %d", cmdLabel, cmd.ProcessState.ExitCode())
-		}
-	}
-
-	if len(opts) >= 2 {
-		if useUpdate, ok := opts[0].(bool); ok && useUpdate {
-			if handle := opts[1]; handle != nil {
-				_ = updaterFor(p).UpdateMessage(e.ctx, handle, finalMsg)
-				if !exitOK {
-					return fmt.Errorf("shell: exit code %d", cmd.ProcessState.ExitCode())
-				}
-				return nil
-			}
-		}
-	}
-
-	e.send(p, replyCtx, finalMsg)
-	if !exitOK {
-		return fmt.Errorf("shell: exit code %d", cmd.ProcessState.ExitCode())
-	}
-	return nil
-}
-
-// ExecuteHeartbeat runs a heartbeat check by injecting a synthetic message
-// into the main session, similar to cron but designed for periodic awareness.
-func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error {
-	platformName := ""
-	if idx := strings.Index(sessionKey, ":"); idx > 0 {
-		platformName = sessionKey[:idx]
-	}
-
-	var targetPlatform Platform
-	for _, p := range e.platforms {
-		if p.Name() == platformName {
-			targetPlatform = p
-			break
-		}
-	}
-	// Fallback: in multi-workspace mode the stored session key may be prefixed
-	// with the workspace path (e.g. "/home/user/project:slack:C123:U456").
-	// Search for a known platform name within the key and strip the prefix.
-	if targetPlatform == nil {
-		for _, p := range e.platforms {
-			needle := ":" + p.Name() + ":"
-			if idx := strings.Index(sessionKey, needle); idx >= 0 {
-				targetPlatform = p
-				platformName = p.Name()
-				sessionKey = sessionKey[idx+1:] // strip workspace prefix
-				break
-			}
-		}
-	}
-	if targetPlatform == nil {
-		return fmt.Errorf("platform %q not found for session %q", platformName, sessionKey)
-	}
-
-	rc, ok := targetPlatform.(ReplyContextReconstructor)
-	if !ok {
-		return fmt.Errorf("platform %q does not support proactive messaging (heartbeat)", platformName)
-	}
-
-	replyCtx, err := rc.ReconstructReplyCtx(sessionKey)
-	if err != nil {
-		return fmt.Errorf("reconstruct reply context: %w", err)
-	}
-
-	if !silent {
-		e.send(targetPlatform, replyCtx, "💓 heartbeat")
-	}
-
-	msg := &Message{
-		SessionKey: sessionKey,
-		Platform:   platformName,
-		UserID:     "heartbeat",
-		UserName:   "heartbeat",
-		Content:    prompt,
-		ReplyCtx:   replyCtx,
-	}
-
-	session := e.sessions.GetOrCreateActive(sessionKey)
-	if !session.TryLock() {
-		return fmt.Errorf("session %q is busy", sessionKey)
-	}
-
-	e.processInteractiveMessage(targetPlatform, msg, session)
-	return nil
-}
-
 func (e *Engine) Start() error {
 	var startErrs []error
 	readyCount := 0
@@ -2337,7 +1472,12 @@ func (e *Engine) Stop() error {
 	e.stopping = true
 	e.platformLifecycleMu.Unlock()
 
-	// Cancel first so late lifecycle callbacks observe shutdown immediately.
+	// Let accepted turns finish delivery before canceling the shared context.
+	// In particular, a generated final reply must survive a simultaneous restart.
+	if !e.waitForAcceptedWork(25 * time.Second) {
+		slog.Warn("shutdown drain timed out; active turns will be interrupted")
+		e.notifyShutdownInterrupted()
+	}
 	e.cancel()
 
 	if e.observeCancel != nil {
@@ -2790,6 +1930,15 @@ func (e *Engine) startMessageRecallMonitor(sessionKey string) context.CancelFunc
 }
 
 func (e *Engine) handleMessage(p Platform, msg *Message) {
+	done, ok := e.trackWork(false)
+	if !ok {
+		// Do not silently acknowledge a message that cannot be processed.
+		if e.ctx.Err() == nil {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgShutdownRetry))
+		}
+		return
+	}
+	defer done()
 	if msg.Recalled {
 		e.handleMessageRecall(p, msg)
 		return
@@ -3023,15 +2172,17 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 			return
 		}
-		// Session is busy — try to queue the message for the running turn
-		// so the agent processes it immediately after the current turn ends.
-		if e.queueMessageForBusySession(p, msg, interactiveKey) {
+		// Session is busy — steer the active turn when supported, or queue
+		// the message for processing immediately after the current turn.
+		if e.deliverMessageForBusySession(p, msg, interactiveKey, session, sessions) {
 			// Race guard: the drain loop in processInteractiveMessageWith may
 			// have just finished (session unlocked) between our TryLock failure
 			// and the queue append. Re-try TryLock — if it succeeds, no one is
 			// draining the queue so we must start a processor ourselves.
 			if session.TryLock() {
-				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace)
+				if !e.launchAcceptedWork(func() { e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace) }) {
+					session.Unlock()
+				}
 			}
 			return
 		}
@@ -3070,7 +2221,11 @@ sessionLocked:
 		"session", session.ID,
 	)
 
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+	if !e.launchAcceptedWork(func() {
+		e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
+	}) {
+		session.Unlock()
+	}
 }
 
 func runMessageAccepted(msg *Message) {
@@ -3144,6 +2299,12 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 // the event loop sends it after the current turn's EventResult is received.
 // Returns true if the message was successfully queued, false otherwise.
 func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiveKey string) bool {
+	return e.deliverMessageForBusySession(p, msg, interactiveKey, nil, nil)
+}
+
+// deliverMessageForBusySession serializes steering and queue admission with the
+// turn drain. Acknowledged steering belongs to this turn, not a second EventResult.
+func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interactiveKey string, session *Session, sessions *SessionManager) bool {
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
 	if !hasState || state == nil {
@@ -3171,6 +2332,10 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	if e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs) {
 		snap := userMessageWatermarkSnapshotLocked(state)
 		e.logStaleUserMessageDropped("reject_before_queue", msg, interactiveKey, snap)
+		return true
+	}
+	// Do not overtake earlier input; startup queues drain after Send is ready.
+	if len(state.pendingMessages) == 0 && e.trySteerMessageLocked(state, p, msg, session, sessions) {
 		return true
 	}
 	if len(state.pendingMessages) >= e.maxQueuedMessages {
@@ -3690,6 +2855,12 @@ func (e *Engine) processInteractiveMessage(p Platform, msg *Message, session *Se
 // and workspaceDir so that multi-workspace mode can route to per-workspace agents.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY in the agent env; otherwise interactiveKey is used.
 func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session *Session, agent Agent, sessions *SessionManager, interactiveKey string, workspaceDir string, ccSessionKey string) {
+	done, ok := e.trackWork(true)
+	if !ok {
+		session.Unlock()
+		return
+	}
+	defer done()
 	// session.Unlock() is NOT deferred here — it is called explicitly in
 	// the drain loop below while holding state.mu to close the race window
 	// between "queue is empty" and "session unlocked". A deferred fallback
@@ -4612,7 +3783,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			state.mu.Unlock()
 
 			switch event.Type {
-			case EventText:
+			case EventText, EventProgress:
 				if event.Content != "" {
 					textParts = append(textParts, event.Content)
 				}
@@ -4804,6 +3975,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var cardToolCalls []cardToolEntry  // track tool calls for card content
 	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
+	var thinkingPreviewText strings.Builder
 
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
 		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
@@ -4815,18 +3987,18 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
-	state.mu.Unlock()
-
-	// Send instant confirmation reply if enabled and no streaming card is active.
-	// Streaming cards provide their own "processing" indicator, so instant reply
-	// is only needed when the platform doesn't support cards or card creation failed.
-	if e.instantReply.Enabled && streamCard == nil {
-		replyContent := e.instantReply.Content
-		if replyContent == "" {
-			replyContent = e.i18n.T(MsgStarting)
-		}
-		e.send(state.platform, state.replyCtx, replyContent)
+	thinkingProcessPreview := false
+	if pref, ok := state.platform.(ThinkingProcessPreviewPreference); ok {
+		thinkingProcessPreview = pref.UseThinkingProcessPreview() && streamCard == nil && e.display.CardMode != "rich" && sp.canPreview()
 	}
+	state.mu.Unlock()
+	defer func() {
+		if thinkingProcessPreview {
+			sp.discard()
+		}
+	}()
+
+	e.acknowledgeTurnStart(state.platform, state.replyCtx, sp, streamCard != nil)
 
 	// Idle timeout: resets on every received event (0 = disabled)
 	var idleTimer *time.Timer
@@ -4879,6 +4051,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
 				return
 			}
+			e.steerQueuedMessages(state, session, sessions)
 			continue
 		case <-idleCh:
 			slog.Error("agent session idle timeout: no events for too long, killing session",
@@ -5002,6 +4175,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			if isEllipsisOnly(event.Content) {
 				break
 			}
+			if thinkingProcessPreview {
+				if e.display.ThinkingMessages && event.Content != "" {
+					preview := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen))
+					if preview != "" {
+						if thinkingPreviewText.Len() > 0 {
+							thinkingPreviewText.WriteString("\n\n")
+						}
+						thinkingPreviewText.WriteString(preview)
+						sp.replacePreview(fmt.Sprintf(e.i18n.T(MsgThinking), thinkingPreviewText.String()))
+					}
+				}
+				break
+			}
 			if hasRichCard {
 				// When thinking messages are suppressed, skip card creation.
 				if !e.display.ThinkingMessages {
@@ -5092,6 +4278,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventToolUse:
 			toolCount++
+			if thinkingProcessPreview {
+				break
+			}
 			if hasRichCard {
 				// When tool messages are suppressed, skip card updates on tool events.
 				if !e.display.ToolMessages {
@@ -5221,6 +4410,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
+			if thinkingProcessPreview {
+				break
+			}
 			if e.display.ToolMessages {
 				result := strings.TrimSpace(event.ToolResult)
 				if result == "" {
@@ -5267,6 +4459,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 			}
 
+		case EventProgress:
+			// Public work summaries are independent of the private-thinking
+			// switch. Other display modes retain ordinary text behavior.
+			if thinkingProcessPreview {
+				preview := strings.TrimSpace(event.Content)
+				if preview != "" && !isEllipsisOnly(preview) {
+					if thinkingPreviewText.Len() > 0 {
+						thinkingPreviewText.WriteString("\n\n")
+					}
+					thinkingPreviewText.WriteString(preview)
+					sp.replacePreview(thinkingPreviewText.String())
+				}
+				break
+			}
+			fallthrough
 		case EventText:
 			content := event.Content
 			if e.display.HideAgentFooter {
@@ -5374,7 +4581,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							}
 						}
 					} else {
-						if !silentHold && sp.canPreview() {
+						if !silentHold && sp.canPreview() && !thinkingProcessPreview {
 							if releasedNow {
 								sp.appendText(peekSegment) // flush all held chunks at once
 							} else {
@@ -5426,22 +4633,26 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			// Flush accumulated text segment before permission prompt
-			previewActive := sp.canPreview()
-			if len(textParts) > segmentStart {
-				if !previewActive {
-					segment := strings.Join(textParts[segmentStart:], "")
-					if segment != "" {
-						for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
-							sendWorkspace(p, replyCtx, chunk)
+			// Preserve the temporary process card handle across questions.
+			if !thinkingProcessPreview {
+				previewActive := sp.canPreview()
+				if len(textParts) > segmentStart {
+					if !previewActive {
+						segment := strings.Join(textParts[segmentStart:], "")
+						if segment != "" {
+							for _, chunk := range SplitMessageCodeFenceAware(segment, maxPlatformMessageLen) {
+								sendWorkspace(p, replyCtx, chunk)
+							}
 						}
 					}
+					segmentStart = len(textParts)
+					silentHold = false
 				}
-				segmentStart = len(textParts)
-				silentHold = false
-			}
-			sp.freeze()
-			if previewActive {
-				sp.detachPreview() // keep frozen preview visible as permanent message
+				sp.freeze()
+				if previewActive {
+					sp.detachPreview() // keep frozen preview visible as permanent message
+				}
+
 			}
 
 			slog.Info("permission request",
@@ -5545,7 +4756,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages {
+			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages && !thinkingProcessPreview {
 				fullResponse = strings.Join(textParts, "")
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
@@ -5966,6 +5177,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
+				thinkingPreviewText.Reset()
+				thinkingProcessPreview = false
 
 				// Reset streaming card state for the next turn
 				streamCard = nil
@@ -5982,14 +5195,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 
-				// Send instant reply for queued turn if no streaming card is active.
-				if e.instantReply.Enabled && streamCard == nil {
-					replyContent := e.instantReply.Content
-					if replyContent == "" {
-						replyContent = e.i18n.T(MsgStarting)
+				if streamCard == nil {
+					if pref, ok := queued.platform.(ThinkingProcessPreviewPreference); ok {
+						thinkingProcessPreview = pref.UseThinkingProcessPreview() && e.display.CardMode != "rich" && sp.canPreview()
 					}
-					e.send(queued.platform, queued.replyCtx, replyContent)
 				}
+				e.acknowledgeTurnStart(queued.platform, queued.replyCtx, sp, streamCard != nil)
 
 				session.AddHistory("user", queued.content)
 				// Persist queued user message immediately (mirror of the
@@ -6053,7 +5264,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Platform:   p.Name(),
 					Error:      event.Error.Error(),
 				})
-				userMsg := fmt.Sprintf(e.i18n.T(MsgError), errMsg)
+				displayErr := errMsg
+				var localized *UserMessageError
+				if errors.As(event.Error, &localized) {
+					displayErr = localized.Localize(e.i18n.CurrentLang())
+				}
+				userMsg := fmt.Sprintf(e.i18n.T(MsgError), displayErr)
 				for _, h := range agentErrorHandlers {
 					if strings.Contains(errMsg, h.contains) {
 						userMsg = e.i18n.T(h.msgKey)
@@ -7771,147 +6987,6 @@ func defaultShellFlag() string {
 	return "-c"
 }
 
-// runShellWithProgress executes a shell command with live progress feedback.
-// Strategy: start the command, wait 500ms. If it finishes within that window,
-// just send the result directly (no intermediate messages). If it's still running,
-// send a progress message and keep updating until completion.
-func (e *Engine) runShellWithProgress(p Platform, replyCtx any, command string, workDir string, timeout time.Duration, maxOutput int) error {
-	cmdLabel := truncateStr(command, 60)
-
-	ctx, cancel := context.WithTimeout(e.ctx, timeout)
-	defer cancel()
-
-	cmd := shellExecCommand(ctx, e.shell, e.shellFlag, e.shellProfile, command)
-	cmd.Dir = workDir
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		errMsg := fmt.Sprintf("failed to start command: %v", err)
-		e.reply(p, replyCtx, fmt.Sprintf("❌ `%s`\n```\n%s\n```", cmdLabel, errMsg))
-		return err
-	}
-
-	// Read stdout and stderr concurrently
-	var mu sync.Mutex
-	var buf bytes.Buffer
-	doneCh := make(chan struct{})
-	var cmdWaitErr error
-
-	readPipe := func(r io.Reader) {
-		scanner := bufio.NewScanner(r)
-		scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
-		for scanner.Scan() {
-			mu.Lock()
-			if buf.Len() > 0 {
-				buf.WriteByte('\n')
-			}
-			buf.WriteString(scanner.Text())
-			mu.Unlock()
-		}
-	}
-
-	go func() {
-		// Pipes must be fully drained before cmd.Wait() per Go API contract.
-		var pipeWg sync.WaitGroup
-		pipeWg.Add(2)
-		go func() { defer pipeWg.Done(); readPipe(stdout) }()
-		go func() { defer pipeWg.Done(); readPipe(stderr) }()
-		pipeWg.Wait()
-		cmdWaitErr = cmd.Wait()
-		close(doneCh)
-	}()
-
-	// Wait a bit to see if the command finishes quickly
-	select {
-	case <-doneCh:
-		// Command finished within the quick window — send result directly
-		return e.finishShellCmd(p, replyCtx, cmd, &mu, &buf, cmdLabel, maxOutput, false, cmdWaitErr)
-	case <-ctx.Done():
-		// Timeout before even the quick window elapsed (very short timeout)
-		killAndWait(cmd, doneCh)
-		mu.Lock()
-		output := buf.String()
-		mu.Unlock()
-		e.send(p, replyCtx, e.formatShellTimeout(cmdLabel, output, maxOutput))
-		return fmt.Errorf("command timed out after %s", timeout)
-	case <-time.After(quickFinishTimeout):
-		// Still running — fall through to progress mode
-	}
-
-	// Command is long-running. Try to send a progress message.
-	var previewHandle any
-	var useUpdate bool
-	if _, ok := p.(MessageUpdater); ok {
-		if starter, ok := p.(PreviewStarter); ok {
-			mu.Lock()
-			output := buf.String()
-			mu.Unlock()
-			progressMsg := e.formatShellProgress(cmdLabel, output, maxOutput)
-			handle, err := starter.SendPreviewStart(e.ctx, replyCtx, progressMsg)
-			if err == nil && handle != nil {
-				previewHandle = handle
-				useUpdate = true
-			}
-		}
-	}
-
-	if !useUpdate {
-		// Platform doesn't support in-place updates — send a status message
-		e.send(p, replyCtx, fmt.Sprintf("⏳ `%s`", cmdLabel))
-	}
-
-	// Periodic updates (only for platforms that support UpdateMessage)
-	updateDone := make(chan struct{})
-	if useUpdate {
-		go func() {
-			ticker := time.NewTicker(2 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					mu.Lock()
-					output := buf.String()
-					mu.Unlock()
-					msg := e.formatShellProgress(cmdLabel, output, maxOutput)
-					_ = updaterFor(p).UpdateMessage(e.ctx, previewHandle, msg)
-				case <-updateDone:
-					return
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-	}
-
-	// Wait for completion or timeout
-	select {
-	case <-doneCh:
-		close(updateDone)
-		return e.finishShellCmd(p, replyCtx, cmd, &mu, &buf, cmdLabel, maxOutput, useUpdate, previewHandle, cmdWaitErr)
-	case <-ctx.Done():
-		close(updateDone)
-		killAndWait(cmd, doneCh)
-		mu.Lock()
-		output := buf.String()
-		mu.Unlock()
-		timeoutMsg := e.formatShellTimeout(cmdLabel, output, maxOutput)
-		if useUpdate {
-			_ = updaterFor(p).UpdateMessage(e.ctx, previewHandle, timeoutMsg)
-		} else {
-			e.send(p, replyCtx, timeoutMsg)
-		}
-		return fmt.Errorf("command timed out after %s", timeout)
-	}
-}
-
 func truncateRunes(s string, max int) string {
 	if max < 4 {
 		max = 4
@@ -7921,82 +6996,6 @@ func truncateRunes(s string, max int) string {
 		return s
 	}
 	return string(runes[:max-3]) + "..."
-}
-
-func (e *Engine) finishShellCmd(p Platform, replyCtx any, cmd *exec.Cmd, mu *sync.Mutex, buf *bytes.Buffer, cmdLabel string, maxOutput int, opts ...any) error {
-	var waitErr error
-	// Extract waitErr from opts if provided as the last error argument.
-	for _, o := range opts {
-		if err, ok := o.(error); ok {
-			waitErr = err
-		}
-	}
-
-	mu.Lock()
-	output := buf.String()
-	mu.Unlock()
-
-	exitCode := cmd.ProcessState.ExitCode()
-	exitOK := exitCode == 0
-
-	display := strings.TrimSpace(output)
-	if display == "" && exitOK {
-		display = "(no output)"
-	}
-	display = truncateRunes(display, maxOutput)
-
-	var finalMsg string
-	if exitOK {
-		finalMsg = fmt.Sprintf("✅ `%s`\n```\n%s\n```", cmdLabel, display)
-	} else {
-		// Prefer the wait error message when we have no captured output,
-		// since it often contains the actual failure reason.
-		if display == "" && waitErr != nil {
-			display = truncateRunes(waitErr.Error(), maxOutput)
-		}
-		finalMsg = fmt.Sprintf("❌ `%s` (exit code %d)\n```\n%s\n```", cmdLabel, exitCode, display)
-	}
-
-	// opts: [useUpdate bool, previewHandle any]
-	if len(opts) >= 2 {
-		if useUpdate, ok := opts[0].(bool); ok && useUpdate {
-			if handle := opts[1]; handle != nil {
-				_ = updaterFor(p).UpdateMessage(e.ctx, handle, finalMsg)
-				if !exitOK {
-					return fmt.Errorf("exit code %d", exitCode)
-				}
-				return nil
-			}
-		}
-	}
-
-	// No in-place update available, or command finished quickly — send final reply
-	e.reply(p, replyCtx, finalMsg)
-	if !exitOK {
-		return fmt.Errorf("exit code %d", exitCode)
-	}
-	return nil
-}
-
-func (e *Engine) formatShellProgress(cmdLabel, output string, maxOutput int) string {
-	display := truncateRunes(output, maxOutput)
-	return fmt.Sprintf("⏳ `%s`\n```\n%s\n```", cmdLabel, display)
-}
-
-func (e *Engine) formatShellTimeout(cmdLabel, output string, maxOutput int) string {
-	display := truncateRunes(output, maxOutput)
-	return fmt.Sprintf("⚠️ `%s` (timeout)\n```\n%s\n```", cmdLabel, display)
-}
-
-func killAndWait(cmd *exec.Cmd, doneCh <-chan struct{}) {
-	if cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
-	<-doneCh
-}
-
-func updaterFor(p Platform) MessageUpdater {
-	return p.(MessageUpdater)
 }
 
 func (e *Engine) cmdShell(p Platform, msg *Message, raw string) {
@@ -8616,7 +7615,13 @@ func (e *Engine) cmdUsage(p Platform, msg *Message) {
 
 	report, err := reporter.GetUsage(fetchCtx)
 	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgUsageFetchFailed, err))
+		slog.Warn("usage fetch failed", "error", err)
+		var localized *UserMessageError
+		if errors.As(err, &localized) {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgUsageFetchFailed, localized.Localize(e.i18n.CurrentLang())))
+		} else {
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgUsageFetchFailed, err))
+		}
 		return
 	}
 
@@ -8637,18 +7642,26 @@ func formatUsageReport(report *UsageReport, lang Language) string {
 	sb.WriteString(usageAccountLabel(lang))
 	sb.WriteString(accountDisplay(report))
 	sb.WriteString(formatUsageBlocks(report, lang))
+	if report.Credits != nil {
+		if bal := strings.TrimSpace(report.Credits.Balance); bal != "" {
+			sb.WriteString("\n\n")
+			sb.WriteString(bal)
+		}
+	}
 
 	return strings.TrimSpace(sb.String())
 }
 
 func formatUsageBlocks(report *UsageReport, lang Language) string {
-	primary, secondary := selectUsageWindows(report)
 	var sections []string
-	if primary != nil {
-		sections = append(sections, formatUsageBlock(lang, primary))
-	}
-	if secondary != nil {
-		sections = append(sections, formatUsageBlock(lang, secondary))
+	for _, bucket := range report.Buckets {
+		for i := range bucket.Windows {
+			block := formatUsageBlock(lang, &bucket.Windows[i])
+			if bucket.Name != "" && bucket.Name != "Usage" && bucket.Name != "Rate limit" {
+				block = strings.NewReplacer("[", "\\[", "]", "\\]", "*", "\\*", "_", "\\_", "`", "\\`").Replace(bucket.Name) + " · " + block
+			}
+			sections = append(sections, block)
+		}
 	}
 	if len(sections) == 0 {
 		return ""
@@ -10328,7 +9341,7 @@ func (e *Engine) processCompressEvents(state *interactiveState, session *Session
 		}
 
 		switch event.Type {
-		case EventText:
+		case EventText, EventProgress:
 			if !auto && event.Content != "" {
 				textParts = append(textParts, event.Content)
 			}
@@ -11856,6 +10869,7 @@ func (e *Engine) replyWithCard(p Platform, replyCtx any, card *Card) {
 		rendered := e.renderCardForPlatform(p, card)
 		if err := cs.ReplyCard(e.ctx, replyCtx, rendered); err != nil {
 			slog.Error("card reply failed", "platform", p.Name(), "error", err)
+			e.reply(p, replyCtx, rendered.RenderText())
 		}
 		return
 	}
@@ -13435,142 +12449,6 @@ func (e *Engine) executeProviderLink(sessionKey, name string) {
 	}
 }
 
-func (e *Engine) renderCronCard(sessionKey string, userID string) *Card {
-	if e.cronScheduler == nil {
-		return e.simpleCard(e.i18n.T(MsgCardTitleCron), "orange", e.i18n.T(MsgCronNotAvailable))
-	}
-
-	jobs := e.cronScheduler.Store().ListBySessionKey(sessionKey)
-	if len(jobs) == 0 {
-		return e.simpleCard(e.i18n.T(MsgCardTitleCron), "orange", e.i18n.T(MsgCronEmpty))
-	}
-
-	lang := e.i18n.CurrentLang()
-	now := time.Now()
-
-	cb := NewCard().Title(e.i18n.T(MsgCardTitleCron), "orange")
-	cb.Markdown(fmt.Sprintf(e.i18n.T(MsgCronListTitle), len(jobs)))
-
-	for _, j := range jobs {
-		status := "✅"
-		if !j.Enabled {
-			status = "⏸"
-		}
-
-		desc := j.Description
-		if desc == "" {
-			if j.IsShellJob() {
-				desc = "🖥 " + truncateStr(j.Exec, 60)
-			} else {
-				desc = truncateStr(j.Prompt, 60)
-			}
-		}
-		if j.Mute {
-			desc += " [mute]"
-		}
-
-		human := CronExprToHuman(j.CronExpr, lang)
-
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
-		sb.WriteString(e.i18n.Tf(MsgCronIDLabel, j.ID))
-		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
-		nextRun := e.cronScheduler.NextRun(j.ID)
-		if !nextRun.IsZero() {
-			fmtStr := cronTimeFormat(nextRun, now)
-			sb.WriteString(e.i18n.Tf(MsgCronNextRunLabel, nextRun.Format(fmtStr)))
-		}
-		if !j.LastRun.IsZero() {
-			fmtStr := cronTimeFormat(j.LastRun, now)
-			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, j.LastRun.Format(fmtStr)))
-			if j.LastError != "" {
-				sb.WriteString(e.i18n.Tf(MsgCronFailedSuffix, truncateStr(j.LastError, 40)))
-			}
-			sb.WriteString("\n")
-		}
-		cb.Markdown(sb.String())
-
-		var btns []CardButton
-		if j.Enabled {
-			btns = append(btns, DefaultBtn(e.i18n.T(MsgCronBtnDisable), fmt.Sprintf("act:/cron disable %s", j.ID)))
-		} else {
-			btns = append(btns, PrimaryBtn(e.i18n.T(MsgCronBtnEnable), fmt.Sprintf("act:/cron enable %s", j.ID)))
-		}
-		if j.Mute {
-			btns = append(btns, DefaultBtn(e.i18n.T(MsgCronBtnUnmute), fmt.Sprintf("act:/cron unmute %s", j.ID)))
-		} else {
-			btns = append(btns, DefaultBtn(e.i18n.T(MsgCronBtnMute), fmt.Sprintf("act:/cron mute %s", j.ID)))
-		}
-		btns = append(btns, DangerBtn(e.i18n.T(MsgCronBtnDelete), fmt.Sprintf("act:/cron delete %s", j.ID)))
-		cb.ButtonsEqual(btns...)
-	}
-
-	cb.Divider()
-	cb.Note(e.i18n.T(MsgCronCardHint))
-	cb.Buttons(e.cardBackButton())
-	return cb.Build()
-}
-
-func (e *Engine) renderTimerCard(sessionKey string, userID string) *Card {
-	if e.timerScheduler == nil {
-		return e.simpleCard(e.i18n.T(MsgCardTitleTimer), "blue", e.i18n.T(MsgTimerNotAvailable))
-	}
-
-	jobs := e.timerScheduler.Store().ListPending()
-	// Filter to current session
-	var filtered []*TimerJob
-	for _, j := range jobs {
-		if j.SessionKey == sessionKey {
-			filtered = append(filtered, j)
-		}
-	}
-	if len(filtered) == 0 {
-		return e.simpleCard(e.i18n.T(MsgCardTitleTimer), "blue", e.i18n.T(MsgTimerEmpty))
-	}
-
-	cb := NewCard().Title(e.i18n.T(MsgCardTitleTimer), "blue")
-	cb.Markdown(fmt.Sprintf(e.i18n.T(MsgTimerListTitle), len(filtered)))
-
-	for _, j := range filtered {
-		desc := j.Description
-		if desc == "" {
-			if j.IsShellJob() {
-				desc = "🖥 " + truncateStr(j.Exec, 60)
-			} else {
-				desc = truncateStr(j.Prompt, 60)
-			}
-		}
-		if j.Mute {
-			desc += " [mute]"
-		}
-
-		remaining := FormatTimerRemaining(j.ScheduledAt)
-
-		var sb strings.Builder
-		fmt.Fprintf(&sb, "⏰ %s\n", desc)
-		sb.WriteString(e.i18n.Tf(MsgTimerIDLabel, j.ID))
-		sb.WriteString(e.i18n.Tf(MsgTimerScheduledLabel, j.ScheduledAt.Format("2006-01-02 15:04"), remaining))
-		if j.LastError != "" {
-			sb.WriteString(e.i18n.Tf(MsgTimerFailedSuffix, truncateStr(j.LastError, 40)))
-		}
-		cb.Markdown(sb.String())
-
-		var btns []CardButton
-		if j.Mute {
-			btns = append(btns, DefaultBtn(e.i18n.T(MsgTimerBtnUnmute), fmt.Sprintf("act:/timer unmute %s", j.ID)))
-		} else {
-			btns = append(btns, DefaultBtn(e.i18n.T(MsgTimerBtnMute), fmt.Sprintf("act:/timer mute %s", j.ID)))
-		}
-		btns = append(btns, DangerBtn(e.i18n.T(MsgTimerBtnDelete), fmt.Sprintf("act:/timer delete %s", j.ID)))
-		cb.ButtonsEqual(btns...)
-	}
-
-	cb.Divider()
-	cb.Note(e.i18n.T(MsgTimerCardHint))
-	cb.Buttons(e.cardBackButton())
-	return cb.Build()
-}
-
 func (e *Engine) renderCommandsCard() *Card {
 	cmds := e.commands.ListAll()
 	if len(cmds) == 0 {
@@ -13842,656 +12720,6 @@ func (e *Engine) appendMemoryFile(p Platform, msg *Message, filePath, text strin
 }
 
 // ──────────────────────────────────────────────────────────────
-// /cron command
-// ──────────────────────────────────────────────────────────────
-
-func (e *Engine) cmdCron(p Platform, msg *Message, args []string) {
-	if e.cronScheduler == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronNotAvailable))
-		return
-	}
-
-	if len(args) == 0 {
-		if !supportsCards(p) {
-			e.cmdCronList(p, msg)
-			return
-		}
-		e.replyWithCard(p, msg.ReplyCtx, e.renderCronCard(msg.SessionKey, msg.UserID))
-		return
-	}
-
-	sub := matchSubCommand(strings.ToLower(args[0]), []string{
-		"add", "addexec", "list", "exec", "run", "trigger", "del", "delete", "rm", "remove", "enable", "disable", "mute", "unmute", "setup",
-	})
-	switch sub {
-	case "add":
-		e.cmdCronAdd(p, msg, args[1:])
-	case "addexec":
-		e.cmdCronAddExec(p, msg, args[1:])
-	case "list":
-		e.cmdCronList(p, msg)
-	case "exec", "run", "trigger":
-		e.cmdCronExec(p, msg, args[1:])
-	case "del", "delete", "rm", "remove":
-		e.cmdCronDel(p, msg, args[1:])
-	case "enable":
-		e.cmdCronToggle(p, msg, args[1:], true)
-	case "disable":
-		e.cmdCronToggle(p, msg, args[1:], false)
-	case "mute":
-		e.cmdCronMute(p, msg, args[1:], true)
-	case "unmute":
-		e.cmdCronMute(p, msg, args[1:], false)
-	case "setup":
-		e.cmdCronSetup(p, msg)
-	default:
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronUsage))
-	}
-}
-
-func (e *Engine) cmdCronAdd(p Platform, msg *Message, args []string) {
-	// /cron add <min> <hour> <day> <month> <weekday> <prompt...>
-	if len(args) < 6 {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronAddUsage))
-		return
-	}
-
-	cronExpr := strings.Join(args[:5], " ")
-	prompt := strings.Join(args[5:], " ")
-
-	job := &CronJob{
-		ID:         GenerateCronID(),
-		Project:    e.name,
-		SessionKey: msg.SessionKey,
-		CronExpr:   cronExpr,
-		Prompt:     prompt,
-		Enabled:    true,
-		CreatedAt:  time.Now(),
-	}
-
-	if err := e.cronScheduler.AddJob(job); err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
-
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronAdded), job.ID, cronExpr, truncateStr(prompt, 60)))
-}
-
-func (e *Engine) cmdCronAddExec(p Platform, msg *Message, args []string) {
-	if !e.isAdmin(msg.UserID) {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/cron addexec"))
-		return
-	}
-
-	// /cron addexec <min> <hour> <day> <month> <weekday> <shell command...>
-	if len(args) < 6 {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronAddExecUsage))
-		return
-	}
-
-	cronExpr := strings.Join(args[:5], " ")
-	shellCmd := strings.Join(args[5:], " ")
-
-	job := &CronJob{
-		ID:         GenerateCronID(),
-		Project:    e.name,
-		SessionKey: msg.SessionKey,
-		CronExpr:   cronExpr,
-		Exec:       shellCmd,
-		Enabled:    true,
-		CreatedAt:  time.Now(),
-	}
-
-	if err := e.cronScheduler.AddJob(job); err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
-
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronAddedExec), job.ID, cronExpr, truncateStr(shellCmd, 60)))
-}
-
-func (e *Engine) cmdCronList(p Platform, msg *Message) {
-	jobs := e.cronScheduler.Store().ListByProject(e.name)
-	if len(jobs) == 0 {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronEmpty))
-		return
-	}
-
-	lang := e.i18n.CurrentLang()
-	now := time.Now()
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(e.i18n.T(MsgCronListTitle), len(jobs)))
-	sb.WriteString("\n")
-	sb.WriteString("\n")
-
-	for i, j := range jobs {
-		if i > 0 {
-			sb.WriteString("\n")
-		}
-
-		status := "✅"
-		if !j.Enabled {
-			status = "⏸"
-		}
-		desc := j.Description
-		if desc == "" {
-			if j.IsShellJob() {
-				desc = "🖥 " + truncateStr(j.Exec, 60)
-			} else {
-				desc = truncateStr(j.Prompt, 60)
-			}
-		}
-		if j.Mute {
-			desc += " [mute]"
-		}
-		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
-
-		sb.WriteString(fmt.Sprintf("ID: %s\n", j.ID))
-
-		human := CronExprToHuman(j.CronExpr, lang)
-		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
-
-		nextRun := e.cronScheduler.NextRun(j.ID)
-		if !nextRun.IsZero() {
-			fmtStr := cronTimeFormat(nextRun, now)
-			sb.WriteString(e.i18n.Tf(MsgCronNextRunLabel, nextRun.Format(fmtStr)))
-		}
-
-		if !j.LastRun.IsZero() {
-			fmtStr := cronTimeFormat(j.LastRun, now)
-			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, j.LastRun.Format(fmtStr)))
-			if j.LastError != "" {
-				sb.WriteString(fmt.Sprintf(" (failed: %s)", truncateStr(j.LastError, 40)))
-			}
-			sb.WriteString("\n")
-		}
-	}
-
-	sb.WriteString(fmt.Sprintf("\n%s", e.i18n.T(MsgCronListFooter)))
-	e.reply(p, msg.ReplyCtx, sb.String())
-}
-
-func (e *Engine) cmdCronExec(p Platform, msg *Message, args []string) {
-	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronExecUsage))
-		return
-	}
-	id := args[0]
-	job := e.cronScheduler.store.Get(id)
-	if job == nil {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronNotFound), id))
-		return
-	}
-	if job.IsShellJob() && !e.isAdmin(msg.UserID) {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/cron exec"))
-		return
-	}
-	if err := e.cronScheduler.RunJobNow(id); err != nil {
-		switch {
-		case errors.Is(err, ErrCronJobNotFound):
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronNotFound), id))
-		case errors.Is(err, ErrCronProjectNotFound):
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronProjectUnavailable))
-		default:
-			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		}
-		return
-	}
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronTriggered), id))
-}
-
-func (e *Engine) cmdCronDel(p Platform, msg *Message, args []string) {
-	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronDelUsage))
-		return
-	}
-	id := args[0]
-	if e.cronScheduler.RemoveJob(id) {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronDeleted), id))
-	} else {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronNotFound), id))
-	}
-}
-
-func (e *Engine) cmdCronToggle(p Platform, msg *Message, args []string, enable bool) {
-	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronDelUsage))
-		return
-	}
-	id := args[0]
-	var err error
-	if enable {
-		err = e.cronScheduler.EnableJob(id)
-	} else {
-		err = e.cronScheduler.DisableJob(id)
-	}
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
-	if enable {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronEnabled), id))
-	} else {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronDisabled), id))
-	}
-}
-
-func (e *Engine) cmdCronMute(p Platform, msg *Message, args []string, mute bool) {
-	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgCronDelUsage))
-		return
-	}
-	id := args[0]
-	if !e.cronScheduler.Store().SetMute(id, mute) {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronNotFound), id))
-		return
-	}
-	if mute {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronMuted), id))
-	} else {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronUnmuted), id))
-	}
-}
-
-func (e *Engine) cmdCronSetup(p Platform, msg *Message) {
-	result, baseName, err := e.setupMemoryFile()
-	switch result {
-	case setupNative:
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSetupNative))
-	case setupNoMemory:
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgRelaySetupNoMemory))
-	case setupExists:
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgRelaySetupExists), baseName))
-	case setupError:
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-	case setupOK:
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgCronSetupOK), baseName))
-	}
-}
-
-// ──────────────────────────────────────────────────────────────
-// /timer command
-// ──────────────────────────────────────────────────────────────
-
-func (e *Engine) cmdTimer(p Platform, msg *Message, args []string) {
-	if e.timerScheduler == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTimerNotAvailable))
-		return
-	}
-
-	if len(args) == 0 {
-		if !supportsCards(p) {
-			e.cmdTimerList(p, msg)
-			return
-		}
-		e.replyWithCard(p, msg.ReplyCtx, e.renderTimerCard(msg.SessionKey, msg.UserID))
-		return
-	}
-
-	sub := matchSubCommand(strings.ToLower(args[0]), []string{
-		"add", "addexec", "list", "del", "delete", "rm", "remove", "mute", "unmute",
-	})
-	switch sub {
-	case "add":
-		e.cmdTimerAdd(p, msg, args[1:])
-	case "addexec":
-		e.cmdTimerAddExec(p, msg, args[1:])
-	case "list":
-		e.cmdTimerList(p, msg)
-	case "del", "delete", "rm", "remove":
-		e.cmdTimerDel(p, msg, args[1:])
-	case "mute":
-		e.cmdTimerMute(p, msg, args[1:], true)
-	case "unmute":
-		e.cmdTimerMute(p, msg, args[1:], false)
-	default:
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTimerUsage))
-	}
-}
-
-func (e *Engine) cmdTimerAdd(p Platform, msg *Message, args []string) {
-	// /timer add <delay_or_time> <prompt...>
-	if len(args) < 2 {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTimerAddUsage))
-		return
-	}
-
-	fireAt, err := ParseDelayOrTime(args[0])
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
-
-	prompt := strings.Join(args[1:], " ")
-
-	job := &TimerJob{
-		ID:          GenerateTimerID(),
-		Project:     e.name,
-		SessionKey:  msg.SessionKey,
-		ScheduledAt: fireAt,
-		Prompt:      prompt,
-		CreatedAt:   time.Now(),
-	}
-
-	if err := e.timerScheduler.AddJob(job); err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
-
-	remaining := FormatTimerRemaining(fireAt)
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTimerAdded), job.ID, remaining, truncateStr(prompt, 60)))
-}
-
-func (e *Engine) cmdTimerAddExec(p Platform, msg *Message, args []string) {
-	if !e.isAdmin(msg.UserID) {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgAdminRequired), "/timer addexec"))
-		return
-	}
-
-	// /timer addexec <delay_or_time> <shell command...>
-	if len(args) < 2 {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTimerAddExecUsage))
-		return
-	}
-
-	fireAt, err := ParseDelayOrTime(args[0])
-	if err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
-
-	shellCmd := strings.Join(args[1:], " ")
-
-	job := &TimerJob{
-		ID:          GenerateTimerID(),
-		Project:     e.name,
-		SessionKey:  msg.SessionKey,
-		ScheduledAt: fireAt,
-		Exec:        shellCmd,
-		CreatedAt:   time.Now(),
-	}
-
-	if err := e.timerScheduler.AddJob(job); err != nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
-		return
-	}
-
-	remaining := FormatTimerRemaining(fireAt)
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTimerAddedExec), job.ID, remaining, truncateStr(shellCmd, 60)))
-}
-
-func (e *Engine) cmdTimerList(p Platform, msg *Message) {
-	jobs := e.timerScheduler.Store().ListPending()
-	// Filter to current session
-	var filtered []*TimerJob
-	for _, j := range jobs {
-		if j.SessionKey == msg.SessionKey {
-			filtered = append(filtered, j)
-		}
-	}
-	if len(filtered) == 0 {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTimerEmpty))
-		return
-	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, e.i18n.T(MsgTimerListTitle), len(filtered))
-	sb.WriteString("\n")
-
-	for i, j := range filtered {
-		if i > 0 {
-			sb.WriteString("\n")
-		}
-		desc := j.Description
-		if desc == "" {
-			if j.IsShellJob() {
-				desc = "🖥 " + truncateStr(j.Exec, 60)
-			} else {
-				desc = truncateStr(j.Prompt, 60)
-			}
-		}
-		if j.Mute {
-			desc += " [mute]"
-		}
-		remaining := FormatTimerRemaining(j.ScheduledAt)
-		fmt.Fprintf(&sb, "⏰ %s (%s)\n", desc, remaining)
-		fmt.Fprintf(&sb, "ID: %s\n", j.ID)
-	}
-
-	fmt.Fprintf(&sb, "\n%s", e.i18n.T(MsgTimerListFooter))
-	e.reply(p, msg.ReplyCtx, sb.String())
-}
-
-func (e *Engine) cmdTimerDel(p Platform, msg *Message, args []string) {
-	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTimerDelUsage))
-		return
-	}
-	id := args[0]
-	if !e.timerScheduler.RemoveJob(id) {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTimerNotFound))
-		return
-	}
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTimerDeleted), id))
-}
-
-func (e *Engine) cmdTimerMute(p Platform, msg *Message, args []string, mute bool) {
-	if len(args) == 0 {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTimerMuteUsage))
-		return
-	}
-	id := args[0]
-	if !e.timerScheduler.SetMute(id, mute) {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgTimerNotFound))
-		return
-	}
-	if mute {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTimerMuted), id))
-	} else {
-		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTimerUnmuted), id))
-	}
-}
-
-// ──────────────────────────────────────────────────────────────
-// Heartbeat management commands
-// ──────────────────────────────────────────────────────────────
-
-func (e *Engine) cmdHeartbeat(p Platform, msg *Message, args []string) {
-	if e.heartbeatScheduler == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatNotAvailable))
-		return
-	}
-
-	status := e.heartbeatScheduler.Status(e.name)
-	if status == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatNotAvailable))
-		return
-	}
-
-	sub := "status"
-	if len(args) > 0 {
-		sub = matchSubCommand(strings.ToLower(args[0]), []string{
-			"status", "pause", "stop", "resume", "start", "run", "trigger", "interval",
-		})
-	}
-
-	switch sub {
-	case "status", "":
-		if supportsCards(p) {
-			e.replyWithCard(p, msg.ReplyCtx, e.renderHeartbeatCard())
-			return
-		}
-		e.cmdHeartbeatStatusText(p, msg, status)
-	case "pause", "stop":
-		e.heartbeatScheduler.Pause(e.name)
-		if supportsCards(p) {
-			e.replyWithCard(p, msg.ReplyCtx, e.renderHeartbeatCard())
-		} else {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatPaused))
-		}
-	case "resume", "start":
-		e.heartbeatScheduler.Resume(e.name)
-		if supportsCards(p) {
-			e.replyWithCard(p, msg.ReplyCtx, e.renderHeartbeatCard())
-		} else {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatResumed))
-		}
-	case "run", "trigger":
-		e.heartbeatScheduler.TriggerNow(e.name)
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatTriggered))
-	case "interval":
-		if len(args) < 2 {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatUsage))
-			return
-		}
-		mins, err := strconv.Atoi(args[1])
-		if err != nil || mins <= 0 {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatInvalidMins))
-			return
-		}
-		e.heartbeatScheduler.SetInterval(e.name, mins)
-		if supportsCards(p) {
-			e.replyWithCard(p, msg.ReplyCtx, e.renderHeartbeatCard())
-		} else {
-			e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgHeartbeatInterval), mins))
-		}
-	default:
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgHeartbeatUsage))
-	}
-}
-
-func (e *Engine) cmdHeartbeatStatusText(p Platform, msg *Message, st *HeartbeatStatus) {
-	stateStr, yesNo := e.heartbeatLocalizedHelpers()
-
-	lastRunStr := ""
-	if !st.LastRun.IsZero() {
-		lang := e.i18n.CurrentLang()
-		switch lang {
-		case LangChinese, LangTraditionalChinese:
-			lastRunStr = "上次执行: " + st.LastRun.Format("01-02 15:04:05") + "\n"
-		case LangJapanese:
-			lastRunStr = "最終実行: " + st.LastRun.Format("01-02 15:04:05") + "\n"
-		default:
-			lastRunStr = "Last run: " + st.LastRun.Format("01-02 15:04:05") + "\n"
-		}
-		if st.LastError != "" {
-			lastRunStr += "⚠️ " + truncateStr(st.LastError, 80) + "\n"
-		}
-	}
-
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgHeartbeatStatus),
-		stateStr(st.Paused),
-		st.IntervalMins,
-		yesNo(st.OnlyWhenIdle),
-		yesNo(st.Silent),
-		st.RunCount,
-		st.ErrorCount,
-		st.SkippedBusy,
-		lastRunStr,
-	))
-}
-
-func (e *Engine) heartbeatLocalizedHelpers() (stateStr func(paused bool) string, yesNo func(bool) string) {
-	lang := e.i18n.CurrentLang()
-	switch lang {
-	case LangChinese, LangTraditionalChinese:
-		stateStr = func(paused bool) string {
-			if paused {
-				return "⏸ 已暂停"
-			}
-			return "▶️ 运行中"
-		}
-		yesNo = func(b bool) string {
-			if b {
-				return "是"
-			}
-			return "否"
-		}
-	case LangJapanese:
-		stateStr = func(paused bool) string {
-			if paused {
-				return "⏸ 一時停止"
-			}
-			return "▶️ 実行中"
-		}
-		yesNo = func(b bool) string {
-			if b {
-				return "はい"
-			}
-			return "いいえ"
-		}
-	default:
-		stateStr = func(paused bool) string {
-			if paused {
-				return "⏸ paused"
-			}
-			return "▶️ running"
-		}
-		yesNo = func(b bool) string {
-			if b {
-				return "yes"
-			}
-			return "no"
-		}
-	}
-	return
-}
-
-func (e *Engine) renderHeartbeatCard() *Card {
-	if e.heartbeatScheduler == nil {
-		return e.simpleCard(e.i18n.T(MsgCardTitleHeartbeat), "purple", e.i18n.T(MsgHeartbeatNotAvailable))
-	}
-	st := e.heartbeatScheduler.Status(e.name)
-	if st == nil {
-		return e.simpleCard(e.i18n.T(MsgCardTitleHeartbeat), "purple", e.i18n.T(MsgHeartbeatNotAvailable))
-	}
-
-	stateStr, yesNo := e.heartbeatLocalizedHelpers()
-	lang := e.i18n.CurrentLang()
-
-	lastRunStr := ""
-	if !st.LastRun.IsZero() {
-		switch lang {
-		case LangChinese, LangTraditionalChinese:
-			lastRunStr = "上次执行: " + st.LastRun.Format("01-02 15:04:05") + "\n"
-		case LangJapanese:
-			lastRunStr = "最終実行: " + st.LastRun.Format("01-02 15:04:05") + "\n"
-		default:
-			lastRunStr = "Last run: " + st.LastRun.Format("01-02 15:04:05") + "\n"
-		}
-		if st.LastError != "" {
-			lastRunStr += "⚠️ " + truncateStr(st.LastError, 80) + "\n"
-		}
-	}
-
-	body := fmt.Sprintf(e.i18n.T(MsgHeartbeatStatus),
-		stateStr(st.Paused),
-		st.IntervalMins,
-		yesNo(st.OnlyWhenIdle),
-		yesNo(st.Silent),
-		st.RunCount,
-		st.ErrorCount,
-		st.SkippedBusy,
-		lastRunStr,
-	)
-
-	cb := NewCard().Title(e.i18n.T(MsgCardTitleHeartbeat), "purple").Markdown(body)
-
-	var actionBtns []CardButton
-	if st.Paused {
-		actionBtns = append(actionBtns, PrimaryBtn("▶️ Resume", "act:/heartbeat resume"))
-	} else {
-		actionBtns = append(actionBtns, DefaultBtn("⏸ Pause", "act:/heartbeat pause"))
-	}
-	actionBtns = append(actionBtns, DefaultBtn("💓 Run Now", "act:/heartbeat run"))
-	cb.Buttons(actionBtns...)
-
-	cb.Buttons(e.cardBackButton())
-
-	return cb.Build()
-}
-
-// ──────────────────────────────────────────────────────────────
 // Custom command execution & management
 // ──────────────────────────────────────────────────────────────
 
@@ -14533,7 +12761,11 @@ func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomComma
 	)
 
 	msg.Content = prompt
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+	if !e.launchAcceptedWork(func() {
+		e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+	}) {
+		session.Unlock()
+	}
 }
 
 // executeShellCommand runs a shell command and sends the output to the user.
@@ -14761,7 +12993,11 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 	)
 
 	msg.Content = prompt
-	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+	if !e.launchAcceptedWork(func() {
+		e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, workspaceDir, msg.SessionKey)
+	}) {
+		session.Unlock()
+	}
 }
 
 func (e *Engine) cmdSkills(p Platform, msg *Message) {
@@ -15786,7 +14022,7 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 	var textParts []string
 	for event := range agentSession.Events() {
 		switch event.Type {
-		case EventText:
+		case EventText, EventProgress:
 			if event.Content != "" {
 				textParts = append(textParts, event.Content)
 			}

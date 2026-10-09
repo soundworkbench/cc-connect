@@ -72,6 +72,11 @@ type claudeSession struct {
 	// when the session reuses the shared file (the common 99% case)
 	// or when there is nothing to append.
 	promptFilePath string
+
+	// Only readLoop owns pendingText. A following tool call identifies public
+	// commentary; a terminal result identifies the final answer. Do not reuse
+	// EventThinking: deployments can hide private reasoning independently.
+	pendingText []string
 }
 
 // StartupWarning implements core.StartupWarner. Returns a non-empty string
@@ -511,6 +516,7 @@ func (cs *claudeSession) startReadLoopWait(stdout io.ReadCloser) (<-chan error, 
 
 func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes.Buffer) {
 	err := <-waitErrCh
+	cs.flushPublicText(core.EventText)
 
 	cs.alive.Store(false)
 	if err != nil {
@@ -646,6 +652,9 @@ func parseClaudeUsage(usage map[string]any) (input, output, cacheCreation, cache
 }
 
 func (cs *claudeSession) handleAssistant(raw map[string]any) {
+	if parent, _ := raw["parent_tool_use_id"].(string); parent != "" {
+		return // Nested-agent output is not a public parent-turn status.
+	}
 	msg, ok := raw["message"].(map[string]any)
 	if !ok {
 		return
@@ -702,6 +711,7 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 		contentType, _ := item["type"].(string)
 		switch contentType {
 		case "tool_use":
+			cs.flushPublicText(core.EventProgress)
 			toolName, _ := item["name"].(string)
 			if toolName == "AskUserQuestion" {
 				continue
@@ -724,13 +734,23 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 			}
 		case "text":
 			if text, ok := item["text"].(string); ok && text != "" {
-				evt := core.Event{Type: core.EventText, Content: text}
-				select {
-				case cs.events <- evt:
-				case <-cs.ctx.Done():
-					return
-				}
+				cs.pendingText = append(cs.pendingText, text)
 			}
+		}
+	}
+}
+
+func (cs *claudeSession) flushPublicText(kind core.EventType) {
+	texts := cs.pendingText
+	cs.pendingText = nil
+	for _, text := range texts {
+		if cs.ctx.Err() != nil {
+			return
+		}
+		select {
+		case cs.events <- core.Event{Type: kind, Content: text}:
+		case <-cs.ctx.Done():
+			return
 		}
 	}
 }
@@ -790,6 +810,39 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 	}
 }
 
+// isNoopTaskNotificationResult recognizes CLI bookkeeping, not a model reply.
+// On resume, Claude Code reports orphaned tasks with shouldQuery=false and
+// emits an empty successful result before it even replays our user request.
+// That result must not finish the foreground turn (or reach the unsolicited
+// reader). Fail open for old/unknown frames, errors, actual model work, and
+// notification-triggered turns that absorbed one or more user messages.
+func isNoopTaskNotificationResult(raw map[string]any) bool {
+	origin, _ := raw["origin"].(map[string]any)
+	if origin["kind"] != "task-notification" || resultSubtype(raw) != "success" ||
+		raw["is_error"] != false || raw["result"] != "" ||
+		raw["num_turns"] != float64(0) || raw["duration_api_ms"] != float64(0) {
+		return false
+	}
+	if id := raw["user_message_uuid"]; id != nil && id != "" {
+		return false
+	}
+	for _, key := range []string{"user_message_uuids", "permission_denials", "errors"} {
+		if value := raw[key]; value != nil {
+			items, ok := value.([]any)
+			if !ok || len(items) != 0 {
+				return false
+			}
+		}
+	}
+	usage, _ := raw["usage"].(map[string]any)
+	for _, key := range []string{"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"} {
+		if usage[key] != float64(0) {
+			return false
+		}
+	}
+	return true
+}
+
 func (cs *claudeSession) handleResult(raw map[string]any) {
 	var content string
 	if result, ok := raw["result"].(string); ok {
@@ -797,6 +850,12 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	}
 	if sid, ok := raw["session_id"].(string); ok && sid != "" {
 		cs.sessionID.Store(sid)
+	}
+
+	if isNoopTaskNotificationResult(raw) {
+		// In particular, do not flush pendingText or overwrite foreground usage.
+		slog.Info("claudeSession: ignored no-op task notification result; continuing turn")
+		return
 	}
 
 	// Compaction events arrive as `type:"result"` with `subtype:"compact"`
@@ -808,6 +867,8 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	isCompaction := isCompactionResult(raw)
 	if isCompaction {
 		slog.Info("claudeSession: mid-turn compaction event; continuing turn", "subtype", resultSubtype(raw))
+	} else {
+		cs.flushPublicText(core.EventText)
 	}
 
 	// Aggregated usage across all sub-calls in this turn — used for billing-
@@ -867,6 +928,7 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 
 	toolName, _ := request["tool_name"].(string)
 	input, _ := request["input"].(map[string]any)
+	cs.flushPublicText(core.EventProgress)
 
 	if cs.autoApprove.Load() {
 		slog.Debug("claudeSession: auto-approving", "request_id", requestID, "tool", toolName)

@@ -120,7 +120,7 @@ func normalizeBackend(raw string) string {
 func normalizeAppServerURL(raw string) string {
 	url := strings.TrimSpace(raw)
 	if url == "" {
-		return "ws://127.0.0.1:3845"
+		return "stdio://"
 	}
 	if strings.EqualFold(url, "stdio") {
 		return "stdio://"
@@ -353,7 +353,6 @@ func readCodexCachedModels() []core.ModelOption {
 	return parseCodexModelsJSON(b)
 }
 
-
 // parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
 // or models_cache.json) into a deduplicated, filtered slice of ModelOption.
 // It is shared by readCodexCachedModels and readCodexModelCatalog.
@@ -398,7 +397,6 @@ func parseCodexModelsJSON(data []byte) []core.ModelOption {
 	}
 	return models
 }
-
 
 // readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
 // model_catalog_json setting, then reads and parses that JSON file.

@@ -406,6 +406,14 @@ type Agent interface {
 }
 
 // AgentSession represents a running interactive agent session with a persistent process.
+// AgentSessionSteerer optionally accepts input into the active turn.
+// true,nil means acknowledged; false,nil means definitely not accepted and safe
+// to queue. Any error means delivery is uncertain and MUST NOT be auto-replayed.
+// Implementations must bound the call and must not start a second turn.
+type AgentSessionSteerer interface {
+	Steer(prompt, messageID string, images []ImageAttachment, files []FileAttachment) (bool, error)
+}
+
 type AgentSession interface {
 	// Send sends a user message (with optional images and files) to the running
 	// agent process. messageID is the platform message ID; agents thread it

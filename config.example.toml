@@ -1597,6 +1597,10 @@ app_secret = "your-feishu-app-secret"
 # 需要安装：npm install -g @openai/codex
 # Codex uses `codex exec --json` under the hood.
 # Codex 底层使用 `codex exec --json` 命令。
+# To send additional messages while Codex is working, set backend = "app_server".
+# It uses stdio and turn/steer; acknowledged messages join the current turn.
+# 运行中继续补充消息：在下方 options 中设置 backend = "app_server"，使用 stdio + turn/steer。
+# 未确认送达的消息不会自动重发；不支持 steer 的后端仍在当前任务完成后处理排队消息。
 
 # [[projects]]
 # name = "my-codex-project"
@@ -1605,6 +1609,7 @@ app_secret = "your-feishu-app-secret"
 # type = "codex"
 #
 # [projects.agent.options]
+# backend = "app_server"  # optional; default "exec" / 可选，默认 exec
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
 #

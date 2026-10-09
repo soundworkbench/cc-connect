@@ -1,6 +1,6 @@
 # Bridge Platform Protocol Specification
 
-> Version: 1.0-draft  
+> Version: 1.0-draft\
 > Status: Draft — subject to change before implementation
 
 ## Overview
@@ -554,7 +554,7 @@ A card consists of an optional header and a list of elements:
 }
 ```
 
-`btn_type`: `"primary"`, `"default"`, `"danger"`.  
+`btn_type`: `"primary"`, `"default"`, `"danger"`.\
 `layout`: `"row"` (default), `"equal_columns"`.
 
 **List Item (Description + Button)**

@@ -6186,6 +6186,24 @@ func TestFormatUsageReport_SingleSevenDayWindowDoesNotDuplicate(t *testing.T) {
 	}
 }
 
+func TestFormatUsageReport_IncludesCreditsBalance(t *testing.T) {
+	report := &UsageReport{
+		AccountID: "已授权",
+		Plan:      "Grok 订阅",
+		Credits:   &UsageCredits{HasCredits: true, Balance: "订阅余量接口未接入，不能显示套餐剩余。"},
+	}
+	got := formatUsageReport(report, LangChinese)
+	if !strings.Contains(got, "账号：已授权 (Grok 订阅)") {
+		t.Fatalf("got %q", got)
+	}
+	if !strings.Contains(got, "订阅余量接口未接入") {
+		t.Fatalf("credits missing in %q", got)
+	}
+	if strings.Contains(got, "0分钟限额") {
+		t.Fatalf("should not invent a 0-minute window: %q", got)
+	}
+}
+
 func TestCmdCommands_UsesLegacyTextOnPlatformWithoutCardSupport(t *testing.T) {
 	p := &stubPlatformEngine{n: "plain"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)

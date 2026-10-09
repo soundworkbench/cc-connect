@@ -33,9 +33,10 @@ type Agent struct {
 	model                string
 	mode                 string
 	cmd                  string   // CLI binary name, default "opencode"
+	usageCmd             string   // official Grok client for OAuth-managed billing
 	cliExtraArgs         []string // extra args from cmd after the binary name
 	configEnv            []string // env vars from [projects.agent.options.env]
-	agentName            string // passed as --agent to opencode (for plugin-defined agents)
+	agentName            string   // passed as --agent to opencode (for plugin-defined agents)
 	providers            []core.ProviderConfig
 	activeIdx            int
 	sessionEnv           []string
@@ -70,6 +71,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	mode, _ := opts["mode"].(string)
 	mode = normalizeMode(mode)
 	cmd, extraArgs := core.ParseCmdOpts(opts, "opencode")
+	usageCmd, _ := opts["usage_cmd"].(string)
 	agentName, _ := opts["agent"].(string) // --agent flag for plugin-defined agents (#1210)
 	ccDataDir, _ := opts["cc_data_dir"].(string)
 	ccProject, _ := opts["cc_project"].(string)
@@ -88,6 +90,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		model:                model,
 		mode:                 mode,
 		cmd:                  cmd,
+		usageCmd:             usageCmd,
 		cliExtraArgs:         extraArgs,
 		configEnv:            core.ParseConfigEnv(opts),
 		agentName:            agentName,

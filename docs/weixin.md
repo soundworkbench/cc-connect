@@ -24,9 +24,9 @@ cc-connect weixin setup --project my-project
 
 终端会打印：
 
-1. **二维码**（终端 ASCII）以及 **可复制的 URL**（手机微信打开或扫码均可，取决于网关返回的链接形式）  
-2. 按提示在手机上 **确认登录**  
-3. 成功后，命令会把 **`token`（Bearer）**、**`base_url`**（若网关返回）、**`account_id`（ilink_bot_id）** 等写回 `config.toml`  
+1. **二维码**（终端 ASCII）以及 **可复制的 URL**（手机微信打开或扫码均可，取决于网关返回的链接形式）\
+2. 按提示在手机上 **确认登录**\
+3. 成功后，命令会把 **`token`（Bearer）**、**`base_url`**（若网关返回）、**`account_id`（ilink_bot_id）** 等写回 `config.toml`\
 4. 若当前 `allow_from` 为空且你使用了 `--set-allow-from-empty`（默认开启），会尝试填入扫码关联的 **微信用户 ID**，便于限制谁可以使用机器人
 
 ### 命令对照
@@ -85,8 +85,8 @@ token = "ilink_bot_bearer_token"       # 必填；扫码或 bind 写入
 
 ### `allow_from`
 
-- 空或 `"*"` 表示不限制发送者（**不安全**，仅建议本机调试）。  
-- 生产环境请填允许的 **ilink 用户 ID**（形如 `xxx@im.wechat`），多个用英文逗号分隔。  
+- 空或 `"*"` 表示不限制发送者（**不安全**，仅建议本机调试）。\
+- 生产环境请填允许的 **ilink 用户 ID**（形如 `xxx@im.wechat`），多个用英文逗号分隔。\
 - 扫码成功后，若开启默认的「空则回填」，会把扫码用户写入 `allow_from`（仍建议你核对后再上线）。
 
 ### `account_id` 与状态目录
@@ -99,16 +99,16 @@ token = "ilink_bot_bearer_token"       # 必填；扫码或 bind 写入
 
 ### `context_token`（首次对话）
 
-网关下发消息时可能带 `context_token`；cc-connect 会缓存并在回复时使用。  
+网关下发消息时可能带 `context_token`；cc-connect 会缓存并在回复时使用。\
 **首次连接**：请先启动 cc-connect，再用允许的微信账号 **给机器人发一条消息**，完成关联后再使用 `/new` 等指令。
 
 ---
 
 ## 能力与限制（摘要）
 
-- **文字、引用、语音转写文本**：与网关一致。  
-- **图片 / 文件 / 视频 / 语音文件**：支持从微信 CDN 下载并按 AES-128-ECB 解密后交给 Agent（需正确配置 `cdn_base_url` 等）。  
-- **出站图片与文件**：平台实现了 `ImageSender` / `FileSender`，可通过 `cc-connect send --image` / `--file` 等能力下发（需引擎侧已支持附件发送）。  
+- **文字、引用、语音转写文本**：与网关一致。\
+- **图片 / 文件 / 视频 / 语音文件**：支持从微信 CDN 下载并按 AES-128-ECB 解密后交给 Agent（需正确配置 `cdn_base_url` 等）。\
+- **出站图片与文件**：平台实现了 `ImageSender` / `FileSender`，可通过 `cc-connect send --image` / `--file` 等能力下发（需引擎侧已支持附件发送）。\
 - **语音 SILK**：无转写文字时可走 STT（需配置语音转写且通常依赖 ffmpeg）。
 
 ---
@@ -170,6 +170,6 @@ chat_id = "your_group_chat_id@chatroom"   # 群聊 ID 以 @chatroom 结尾
 
 ## 相关链接
 
-- 仓库内示例配置：[config.example.toml](../config.example.toml)  
-- 使用指南中的 CLI 摘要：[usage.zh-CN.md](./usage.zh-CN.md)（「微信个人号配置 CLI」）  
+- 仓库内示例配置：[config.example.toml](../config.example.toml)\
+- 使用指南中的 CLI 摘要：[usage.zh-CN.md](./usage.zh-CN.md)（「微信个人号配置 CLI」）\
 - OpenClaw 同类插件（参考实现）：`openclaw-weixin`

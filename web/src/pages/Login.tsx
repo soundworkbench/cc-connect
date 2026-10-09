@@ -109,7 +109,7 @@ export default function Login() {
               <div className="w-5 h-5 rounded-full bg-accent dark:shadow-[0_0_20px_rgba(66,255,156,0.4)]" />
             </div>
           </div>
-          
+
           <h1 className="text-2xl font-bold text-center text-gray-900 dark:text-white mb-1">{t('login.title')}</h1>
           <p className="text-sm text-center text-gray-500 dark:text-gray-400 mb-8">{t('login.subtitle')}</p>
 

@@ -1,6 +1,6 @@
 # Bridge 平台协议规范
 
-> 版本：1.0-draft  
+> 版本：1.0-draft\
 > 状态：草案 — 实现前可能调整
 
 ## 概述
@@ -554,7 +554,7 @@ token = "your-secret"     # 认证密钥，必填
 }
 ```
 
-`btn_type`：`"primary"`、`"default"`、`"danger"`。  
+`btn_type`：`"primary"`、`"default"`、`"danger"`。\
 `layout`：`"row"`（默认）、`"equal_columns"`。
 
 **列表项（描述 + 按钮）**

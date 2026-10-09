@@ -38,6 +38,7 @@ type opencodeSession struct {
 	wg                sync.WaitGroup
 	alive             atomic.Bool
 	expectingContinue atomic.Bool // true when compaction_continue received, waiting for next step
+	turnFailed        atomic.Bool
 	resultSent        atomic.Bool // true when EventResult has been sent for this turn
 }
 
@@ -79,6 +80,7 @@ func (s *opencodeSession) Send(prompt string, messageID string, images []core.Im
 	}
 
 	s.resultSent.Store(false)
+	s.turnFailed.Store(false)
 	s.expectingContinue.Store(false)
 
 	chatID := s.CurrentSessionID()
@@ -193,7 +195,6 @@ func (s *opencodeSession) buildRunArgs(prompt string, imagePaths []string, chatI
 
 func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {
 	defer s.wg.Done()
-	defer func() { _ = cmd.Wait() }()
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
@@ -213,6 +214,7 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 		s.handleEvent(raw)
 	}
 
+	waitErr := cmd.Wait() // Join before reading stderr or allowing the next turn.
 	if err := scanner.Err(); err != nil {
 		slog.Error("opencodeSession: scanner error", "error", err)
 		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("read stdout: %w", err)}
@@ -225,17 +227,22 @@ func (s *opencodeSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBu
 	}
 
 	stderrMsg := stderrBuf.String()
-	if stderrMsg != "" {
-		slog.Error("opencodeSession: process error", "stderr", truncate(stderrMsg, 500))
+	if waitErr != nil && !s.turnFailed.Load() {
 		if strings.Contains(stderrMsg, "Session not found") {
 			s.chatID.Store("")
 			slog.Warn("opencodeSession: cleared stale session ID")
 		}
-		evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
-		select {
-		case s.events <- evt:
-		case <-s.ctx.Done():
+		detail := truncate(strings.TrimSpace(stderrMsg), 1000)
+		if detail == "" {
+			detail = waitErr.Error()
 		}
+		s.handleError(map[string]any{"error": detail})
+		return
+	}
+	if stderrMsg != "" && waitErr == nil {
+		slog.Debug("opencodeSession: process diagnostic", "stderr", truncate(stderrMsg, 500))
+	}
+	if s.turnFailed.Load() {
 		return
 	}
 
@@ -414,6 +421,7 @@ func (s *opencodeSession) handleReasoning(raw map[string]any) {
 }
 
 func (s *opencodeSession) handleError(raw map[string]any) {
+	s.turnFailed.Store(true)
 	errMsg := extractErrorMessage(raw)
 	slog.Error("opencodeSession: agent error", "error", errMsg)
 	evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", errMsg)}
@@ -487,17 +495,15 @@ func (s *opencodeSession) handleStepFinish(raw map[string]any) {
 	}
 	slog.Debug("opencodeSession: step finished", "reason", reason, "session_id", s.CurrentSessionID())
 
-	if reason == "stop" {
-		s.sendEventResult()
-	}
+	// A stop event can precede final stdout data and process failure. readLoop
+	// sends the sole EventResult only after EOF and a successful process exit.
 }
 
 func (s *opencodeSession) sendEventResult() {
-	if s.resultSent.Load() {
+	if !s.resultSent.CompareAndSwap(false, true) {
 		slog.Debug("opencodeSession: EventResult already sent, skipping", "session_id", s.CurrentSessionID())
 		return
 	}
-	s.resultSent.Store(true)
 	sid := s.CurrentSessionID()
 	evt := core.Event{Type: core.EventResult, SessionID: sid, Done: true}
 	select {

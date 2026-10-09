@@ -173,6 +173,8 @@ const (
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueFull                 MsgKey = "queue_full"
+	MsgMessageSteered            MsgKey = "message_steered"
+	MsgMessageSteerUnconfirmed   MsgKey = "message_steer_unconfirmed"
 	MsgMessageQueued             MsgKey = "message_queued"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
 	MsgCurrentTools              MsgKey = "current_tools"
@@ -181,6 +183,8 @@ const (
 	MsgToolAllowFailed           MsgKey = "tool_allow_failed"
 	MsgToolAllowedNew            MsgKey = "tool_allowed_new"
 	MsgError                     MsgKey = "error"
+	MsgAgentTurnFailed           MsgKey = "agent_turn_failed"
+	MsgAgentTurnInterrupted      MsgKey = "agent_turn_interrupted"
 	MsgSessionNotFound           MsgKey = "session_not_found"
 	MsgFailedToStartAgentSession MsgKey = "failed_to_start_agent_session"
 	MsgFailedToDeleteSession     MsgKey = "failed_to_delete_session"
@@ -313,15 +317,19 @@ const (
 	MsgCompressNoSession    MsgKey = "compress_no_session"
 	MsgCompressDone         MsgKey = "compress_done"
 
-	MsgMemoryNotSupported MsgKey = "memory_not_supported"
-	MsgMemoryShowProject  MsgKey = "memory_show_project"
-	MsgMemoryShowGlobal   MsgKey = "memory_show_global"
-	MsgMemoryEmpty        MsgKey = "memory_empty"
-	MsgMemoryAdded        MsgKey = "memory_added"
-	MsgMemoryAddFailed    MsgKey = "memory_add_failed"
-	MsgMemoryAddUsage     MsgKey = "memory_add_usage"
-	MsgUsageNotSupported  MsgKey = "usage_not_supported"
-	MsgUsageFetchFailed   MsgKey = "usage_fetch_failed"
+	MsgMemoryNotSupported        MsgKey = "memory_not_supported"
+	MsgMemoryShowProject         MsgKey = "memory_show_project"
+	MsgMemoryShowGlobal          MsgKey = "memory_show_global"
+	MsgMemoryEmpty               MsgKey = "memory_empty"
+	MsgMemoryAdded               MsgKey = "memory_added"
+	MsgMemoryAddFailed           MsgKey = "memory_add_failed"
+	MsgMemoryAddUsage            MsgKey = "memory_add_usage"
+	MsgUsageNotSupported         MsgKey = "usage_not_supported"
+	MsgUsageFetchFailed          MsgKey = "usage_fetch_failed"
+	MsgUsageCLIUnavailable       MsgKey = "usage_cli_unavailable"
+	MsgUsageOnboardingIncomplete MsgKey = "usage_onboarding_incomplete"
+	MsgShutdownRetry             MsgKey = "shutdown_retry"
+	MsgShutdownInterrupted       MsgKey = "shutdown_interrupted"
 
 	// Inline strings previously hardcoded in engine.go
 	MsgStatusMode             MsgKey = "status_mode"
@@ -378,31 +386,31 @@ const (
 	MsgCronIDLabel               MsgKey = "cron_id_label"
 	MsgCronFailedSuffix          MsgKey = "cron_failed_suffix"
 
-	MsgTimerNotAvailable  MsgKey = "timer_not_available"
-	MsgTimerUsage         MsgKey = "timer_usage"
-	MsgTimerAddUsage      MsgKey = "timer_add_usage"
-	MsgTimerAdded         MsgKey = "timer_added"
-	MsgTimerAddedExec     MsgKey = "timer_added_exec"
-	MsgTimerAddExecUsage  MsgKey = "timer_addexec_usage"
-	MsgTimerEmpty         MsgKey = "timer_empty"
-	MsgTimerListTitle     MsgKey = "timer_list_title"
-	MsgTimerListFooter    MsgKey = "timer_list_footer"
-	MsgTimerDelUsage      MsgKey = "timer_del_usage"
-	MsgTimerMuteUsage     MsgKey = "timer_mute_usage"
-	MsgTimerDeleted       MsgKey = "timer_deleted"
-	MsgTimerNotFound      MsgKey = "timer_not_found"
-	MsgTimerMuted         MsgKey = "timer_muted"
-	MsgTimerUnmuted       MsgKey = "timer_unmuted"
-	MsgTimerCardHint      MsgKey = "timer_card_hint"
-	MsgTimerBtnMute       MsgKey = "timer_btn_mute"
-	MsgTimerBtnUnmute     MsgKey = "timer_btn_unmute"
-	MsgTimerBtnDelete     MsgKey = "timer_btn_delete"
-	MsgTimerIDLabel       MsgKey = "timer_id_label"
-	MsgTimerScheduledLabel MsgKey = "timer_scheduled_label"
-	MsgTimerFailedSuffix  MsgKey = "timer_failed_suffix"
-	MsgCommandsTagAgent          MsgKey = "commands_tag_agent"
-	MsgCommandsTagShell          MsgKey = "commands_tag_shell"
-	MsgUpgradeTimeoutSuffix      MsgKey = "upgrade_timeout_suffix"
+	MsgTimerNotAvailable    MsgKey = "timer_not_available"
+	MsgTimerUsage           MsgKey = "timer_usage"
+	MsgTimerAddUsage        MsgKey = "timer_add_usage"
+	MsgTimerAdded           MsgKey = "timer_added"
+	MsgTimerAddedExec       MsgKey = "timer_added_exec"
+	MsgTimerAddExecUsage    MsgKey = "timer_addexec_usage"
+	MsgTimerEmpty           MsgKey = "timer_empty"
+	MsgTimerListTitle       MsgKey = "timer_list_title"
+	MsgTimerListFooter      MsgKey = "timer_list_footer"
+	MsgTimerDelUsage        MsgKey = "timer_del_usage"
+	MsgTimerMuteUsage       MsgKey = "timer_mute_usage"
+	MsgTimerDeleted         MsgKey = "timer_deleted"
+	MsgTimerNotFound        MsgKey = "timer_not_found"
+	MsgTimerMuted           MsgKey = "timer_muted"
+	MsgTimerUnmuted         MsgKey = "timer_unmuted"
+	MsgTimerCardHint        MsgKey = "timer_card_hint"
+	MsgTimerBtnMute         MsgKey = "timer_btn_mute"
+	MsgTimerBtnUnmute       MsgKey = "timer_btn_unmute"
+	MsgTimerBtnDelete       MsgKey = "timer_btn_delete"
+	MsgTimerIDLabel         MsgKey = "timer_id_label"
+	MsgTimerScheduledLabel  MsgKey = "timer_scheduled_label"
+	MsgTimerFailedSuffix    MsgKey = "timer_failed_suffix"
+	MsgCommandsTagAgent     MsgKey = "commands_tag_agent"
+	MsgCommandsTagShell     MsgKey = "commands_tag_shell"
+	MsgUpgradeTimeoutSuffix MsgKey = "upgrade_timeout_suffix"
 
 	MsgCronScheduleLabel MsgKey = "cron_schedule_label"
 	MsgCronNextRunLabel  MsgKey = "cron_next_run_label"
@@ -737,6 +745,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "⏳ 前のリクエストを処理中です。`/ps <メッセージ>` で実行中のタスクに補足情報を送れます。",
 		LangSpanish:            "⏳ La solicitud anterior aún se está procesando. Use `/ps <mensaje>` para enviar un P.S. a la tarea en curso.",
 	},
+	MsgMessageSteered: {
+		LangEnglish:            "Additional message delivered to the current task.",
+		LangChinese:            "补充消息已送入当前任务。",
+		LangTraditionalChinese: "補充訊息已送入目前任務。",
+		LangJapanese:           "追加メッセージを現在のタスクに送信しました。",
+		LangSpanish:            "Mensaje adicional entregado a la tarea actual.",
+	},
+	MsgMessageSteerUnconfirmed: {
+		LangEnglish:            "Delivery of the additional message is unconfirmed. It was not resent automatically; check the next response before resending.",
+		LangChinese:            "补充消息送达尚未确认，未自动重发；请查看后续回复后再决定是否重发。",
+		LangTraditionalChinese: "補充訊息送達尚未確認，未自動重發；請查看後續回覆後再決定是否重發。",
+		LangJapanese:           "追加メッセージの到達を確認できません。自動再送はしていません。次の応答を確認してから再送してください。",
+		LangSpanish:            "La entrega del mensaje adicional no está confirmada. No se reenvió automáticamente; revise la siguiente respuesta antes de reenviarlo.",
+	},
 	MsgMessageQueued: {
 		LangEnglish:            "📬 Message received — will process after the current task finishes.",
 		LangChinese:            "📬 消息已收到，将在当前任务完成后处理。",
@@ -799,6 +821,20 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "❌ 錯誤: %v",
 		LangJapanese:           "❌ エラー: %v",
 		LangSpanish:            "❌ Error: %v",
+	},
+	MsgAgentTurnFailed: {
+		LangEnglish:            "This turn failed; it was not automatically retried%s",
+		LangChinese:            "本轮执行失败，未自动重试%s",
+		LangTraditionalChinese: "本輪執行失敗，未自動重試%s",
+		LangJapanese:           "このターンは失敗しました。自動再試行はしていません%s",
+		LangSpanish:            "Este turno falló; no se reintentó automáticamente%s",
+	},
+	MsgAgentTurnInterrupted: {
+		LangEnglish:            "This turn was interrupted; it was not automatically retried%s",
+		LangChinese:            "本轮已中断，未自动重试%s",
+		LangTraditionalChinese: "本輪已中斷，未自動重試%s",
+		LangJapanese:           "このターンは中断されました。自動再試行はしていません%s",
+		LangSpanish:            "Este turno se interrumpió; no se reintentó automáticamente%s",
 	},
 	MsgBackgroundAutoDenied: {
 		LangEnglish:            "⚠️ Background task requested permission for `%s` but was auto-denied (no active user turn). Send a message or use `/yolo` to approve future requests.",
@@ -2313,12 +2349,40 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "現在のエージェントは `/usage` をサポートしていません。",
 		LangSpanish:            "El agente actual no admite `/usage`.",
 	},
+	MsgShutdownRetry: {
+		LangEnglish:            "Restart in progress. Please resend your message after reconnecting.",
+		LangChinese:            "服务正在重启，这条消息尚未执行，请恢复连接后重发。",
+		LangTraditionalChinese: "服務正在重啟，這條訊息尚未執行，請恢復連線後重發。",
+		LangJapanese:           "再起動中です。このメッセージは未処理です。接続後に再送してください。",
+		LangSpanish:            "Reinicio en curso. El mensaje no se ha procesado; vuelve a enviarlo al reconectar.",
+	},
+	MsgShutdownInterrupted: {
+		LangEnglish:            "The restart grace period expired before this task finished. Work was interrupted; after reconnecting, ask to check its status before retrying actions.",
+		LangChinese:            "本次任务在重启等待期内尚未结束，执行将被中断。恢复后请先核对已执行的动作，再继续，避免重复操作。",
+		LangTraditionalChinese: "本次任務在重啟等待期內尚未結束，執行將被中斷。恢復後請先核對已執行的動作，再繼續，避免重複操作。",
+		LangJapanese:           "猶予時間内に処理が完了せず、再起動で中断されます。再接続後、重複実行を避けるため実行済みの操作を確認してください。",
+		LangSpanish:            "La tarea no terminó antes del reinicio. Se interrumpirá; comprueba lo ya ejecutado antes de reintentar para evitar duplicados.",
+	},
 	MsgUsageFetchFailed: {
 		LangEnglish:            "Failed to fetch usage: %v",
 		LangChinese:            "获取 usage 失败：%v",
 		LangTraditionalChinese: "取得 usage 失敗：%v",
 		LangJapanese:           "usage の取得に失敗しました: %v",
 		LangSpanish:            "No se pudo obtener usage: %v",
+	},
+	MsgUsageCLIUnavailable: {
+		LangEnglish:            "Configured usage CLI %q was not found.",
+		LangChinese:            "找不到已配置的用量查询程序 %q。",
+		LangTraditionalChinese: "找不到已設定的用量查詢程式 %q。",
+		LangJapanese:           "設定された使用量確認 CLI %q が見つかりません。",
+		LangSpanish:            "No se encontró el CLI de uso configurado %q.",
+	},
+	MsgUsageOnboardingIncomplete: {
+		LangEnglish:            "CLI onboarding is incomplete. Initialize this account's interactive CLI before using /usage; stored authentication may still be valid.",
+		LangChinese:            "命令行首次初始化尚未完成。请先完成当前账号的交互式初始化，再查询 /usage；这不代表已有授权失效。",
+		LangTraditionalChinese: "命令列首次初始化尚未完成。請先完成目前帳號的互動式初始化，再查詢 /usage；這不代表現有授權失效。",
+		LangJapanese:           "CLI の初期設定が未完了です。/usage の前にこのアカウントの対話式初期設定を完了してください。既存の認証は有効な場合があります。",
+		LangSpanish:            "La configuración inicial del CLI está incompleta. Complétala para esta cuenta antes de usar /usage; la autenticación existente puede seguir siendo válida.",
 	},
 	MsgMemoryAddUsage: {
 		LangEnglish: "Usage:\n" +

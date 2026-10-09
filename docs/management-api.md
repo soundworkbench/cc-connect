@@ -1,7 +1,7 @@
 # cc-connect Management API Specification
 
-> **Version:** 1.1-draft  
-> **Status:** Draft — subject to change before implementation  
+> **Version:** 1.1-draft\
+> **Status:** Draft — subject to change before implementation\
 > **Last Updated:** 2026-03-24
 
 ---

@@ -464,7 +464,16 @@ func (p *Platform) getBotOpenID() string {
 }
 
 func (p *Platform) KeepPreviewOnFinish() bool {
+	return false
+}
+
+func (p *Platform) StartPreviewImmediately() bool {
 	return p.useInteractiveCard
+}
+
+// Compact progress uses one temporary, editable card and recalls it on finish.
+func (p *Platform) UseThinkingProcessPreview() bool {
+	return p.useInteractiveCard && p.progressStyle == "compact"
 }
 
 func (p *Platform) Start(handler core.MessageHandler) error {
@@ -1617,6 +1626,18 @@ func (p *Platform) dispatchMessage(ctx context.Context, msgType, content string,
 			UserMessageTimeMs: createTimeMs,
 		})
 
+	case "interactive":
+		// Single forwarded cards arrive directly as interactive messages, not merge_forward.
+		text := stripMentions(extractInteractiveCardText(content), mentions, p.getBotOpenID())
+		p.flushImageBatchForSession(sessionKey)
+		p.dispatchCoreMessage(&core.Message{
+			SessionKey: sessionKey, Platform: p.platformName,
+			MessageID: messageID,
+			UserID:    userID, UserName: userName, ChatName: chatName,
+			Content: text, ExtraContent: quoted.text, Images: quoted.images,
+			ReplyCtx: rctx, UserMessageTimeMs: createTimeMs,
+		})
+
 	case "post":
 		textParts, images := p.parsePostContent(messageID, content)
 		text := stripMentions(strings.Join(textParts, "\n"), mentions, p.getBotOpenID())
@@ -2371,10 +2392,20 @@ func extractInteractiveCardText(content string) string {
 	// Try raw_card_content format: {"json_card": "<escaped JSON>", ...}
 	var wrapper struct {
 		JsonCard string `json:"json_card"`
+		UserDSL  string `json:"user_dsl"`
 	}
 	cardJSON := content
-	if json.Unmarshal([]byte(content), &wrapper) == nil && wrapper.JsonCard != "" {
-		cardJSON = wrapper.JsonCard
+	if json.Unmarshal([]byte(content), &wrapper) == nil {
+		if wrapper.JsonCard != "" {
+			cardJSON = wrapper.JsonCard
+		} else if wrapper.UserDSL != "" {
+			// Forwarded mobile cards carry their real body here; outer elements
+			// may contain only an "upgrade your client" compatibility placeholder.
+			var dsl map[string]json.RawMessage
+			if json.Unmarshal([]byte(wrapper.UserDSL), &dsl) == nil && dsl != nil {
+				cardJSON = wrapper.UserDSL
+			}
+		}
 	}
 
 	var card map[string]json.RawMessage
@@ -3095,7 +3126,7 @@ func buildReplyContent(content string) (msgType string, body string) {
 	// instead of a bare "@" avoids false positives on email addresses, URLs,
 	// and escaped characters.
 	hasMention := strings.Contains(content, `<at user_id=`) || strings.Contains(content, `<at id=`)
-	if !containsMarkdown(content) || hasMention {
+	if hasMention {
 		b, _ := json.Marshal(map[string]string{"text": content})
 		return larkim.MsgTypeText, string(b)
 	}

@@ -226,4 +226,3 @@ func TestPreflightRunAsUser_DescendantWarningsCapped(t *testing.T) {
 		t.Errorf("want '... and 72 more' in warning, got: %s", w)
 	}
 }
-

@@ -277,4 +277,3 @@ func TestVerifyRunAsUserCheap_CacheHit(t *testing.T) {
 		t.Fatalf("cached call made runner calls; want 2 total, got %d", len(runner.calls))
 	}
 }
-

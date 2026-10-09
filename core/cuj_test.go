@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -44,6 +45,28 @@ import (
 // Helper types: cujAgent + cujAgentSession give per-CUJ control over what the
 // agent "replies" for each user prompt, without bringing up a real LLM.
 // ---------------------------------------------------------------------------
+
+func TestCUJ_UsageScopedQuotaRefreshAndRecovery(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	a := &stubUsageAgent{report: scopedUsageFixture()}
+	e := NewEngine("test", a, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	defer e.Stop()
+	for turn := 0; turn < 3; turn++ {
+		if turn == 1 {
+			a.err = errors.New("quota temporarily unavailable")
+		}
+		if turn == 2 {
+			a.err = nil
+			a.report.Buckets[1].Windows[0].UsedPercent = 80
+		}
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", UserID: "user", Content: "/usage", ReplyCtx: context.Background()})
+	}
+	sent := p.getSent()
+	if len(sent) != 3 || !strings.Contains(sent[0], "Fable") || !strings.Contains(sent[0], "34%") ||
+		strings.Contains(sent[1], "34%") || !strings.Contains(sent[2], "Fable") || !strings.Contains(sent[2], "20%") {
+		t.Fatalf("scoped quota must refresh after a failed request: %v", sent)
+	}
+}
 
 // cujAgent is a controllable Agent that returns a configurable AgentSession
 // per StartSession call. Tests can mutate cujAgentSession.reply between
@@ -669,6 +692,227 @@ func TestCUJ_G1_LLMFailureSurfacesErrorToUser(t *testing.T) {
 	}
 }
 
+// queuedLifecycleSession exposes model-send boundaries without auto-finishing
+// turns, so two real user messages can arrive while the first remains busy.
+type queuedLifecycleSession struct {
+	*cujAgentSession
+	sent chan string
+}
+
+func (s *queuedLifecycleSession) Send(prompt, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.sent <- prompt
+	return nil
+}
+
+// Subcase of TestCUJ_PreviewLifecycleThreeTurns: first request starts, two
+// further requests queue, then all three complete on the same agent session.
+func testPreviewLifecycleQueuedTurns(t *testing.T, outcome string, instant, textPreview bool) {
+	p := &placeholderOutcomePlatform{outcome: outcome}
+	p.n = "lifecycle"
+	p.textPreview = textPreview
+	s := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 3)}
+	e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	cfg := DefaultStreamPreviewCfg()
+	cfg.Enabled = outcome != "disabled"
+	cfg.IntervalMs = 1
+	cfg.MinDeltaChars = 1
+	e.SetStreamPreviewCfg(cfg)
+	e.SetInstantReply(InstantReplyCfg{Enabled: instant, Content: "思考中…"})
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", ThinkingMessages: true, HideAgentFooter: true})
+	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
+	key := "lifecycle:queued-user"
+	wait := func(reason string, done func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for !done() {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: sent=%v", reason, p.getSent())
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	userSends := func(turn int) {
+		e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), UserID: "queued-user", MessageID: fmt.Sprintf("queued-m%d", turn), Content: fmt.Sprintf("request %d", turn), ReplyCtx: fmt.Sprintf("ctx-%d", turn)})
+	}
+	userSends(1)
+	select {
+	case <-s.sent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first request did not reach the agent")
+	}
+	userSends(2)
+	userSends(3)
+	queuedNotice := e.i18n.T(MsgMessageQueued)
+	wait("both later requests must visibly queue", func() bool {
+		n := 0
+		for _, text := range p.getSent() {
+			if text == queuedNotice {
+				n++
+			}
+		}
+		return n == 2
+	})
+	for turn := 1; turn <= 3; turn++ {
+		if turn > 1 {
+			select {
+			case <-s.sent:
+			case <-time.After(3 * time.Second):
+				t.Fatal("queued request did not reach the agent")
+			}
+		}
+		answer := fmt.Sprintf("answer %d", turn)
+		if outcome == "success" {
+			event := Event{Type: EventText, Content: answer}
+			if !textPreview {
+				event = Event{Type: EventThinking, Content: fmt.Sprintf("progress %d", turn)}
+			}
+			s.events <- event
+		}
+		s.events <- Event{Type: EventResult, Content: answer, Done: true}
+	}
+	wait("all queued replies must finish", func() bool {
+		for _, text := range p.getSent() {
+			if text == "answer 3" {
+				return !e.sessions.GetOrCreateActive(key).Busy()
+			}
+		}
+		return false
+	})
+	var answers []string
+	acknowledgements := 0
+	for _, text := range p.getSent() {
+		switch {
+		case text == "思考中…":
+			acknowledgements++
+		case text == queuedNotice:
+		case strings.HasPrefix(text, "answer "):
+			answers = append(answers, text)
+		default:
+			t.Errorf("unexpected standalone message: %q", text)
+		}
+	}
+	wantAcknowledgements := 0
+	if instant && outcome != "success" {
+		wantAcknowledgements = 3
+	}
+	if acknowledgements != wantAcknowledgements {
+		t.Errorf("standalone thinking replies=%d, want %d; sent=%v", acknowledgements, wantAcknowledgements, p.getSent())
+	}
+	if strings.Join(answers, "|") != "answer 1|answer 2|answer 3" {
+		t.Errorf("answers=%v", answers)
+	}
+	p.previewMu.Lock()
+	defer p.previewMu.Unlock()
+	if outcome == "success" {
+		if len(p.starts) != 3 || strings.Join(p.deletes, "|") != "card-1|card-2|card-3" {
+			t.Errorf("starts=%v recalls=%v", p.starts, p.deletes)
+		}
+	} else if len(p.starts) != 0 || len(p.deletes) != 0 {
+		t.Errorf("failed/disabled previews must not fabricate handles: starts=%v recalls=%v", p.starts, p.deletes)
+	}
+}
+
+// Scheduling commands must retain the same visible lifecycle after their
+// handlers and renderers move out of engine.go. Do not start background jobs.
+func TestCUJ_E7_ScheduledCommandLifecycle(t *testing.T) {
+	for _, kind := range []string{"cron", "timer"} {
+		for _, shell := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/shell=%t", kind, shell), func(t *testing.T) {
+				env := newCUJEnv(t)
+				t.Cleanup(func() { _ = env.engine.Stop() })
+				env.engine.SetAdminFrom("scheduler-user")
+				if kind == "cron" {
+					store, err := NewCronStore(env.tempDir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					scheduler := NewCronScheduler(store)
+					env.engine.SetCronScheduler(scheduler)
+					t.Cleanup(scheduler.Stop)
+				} else {
+					store, err := NewTimerStore(env.tempDir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					scheduler := NewTimerScheduler(store)
+					env.engine.SetTimerScheduler(scheduler)
+					t.Cleanup(scheduler.Stop)
+				}
+				send := func(command string) string {
+					t.Helper()
+					env.plat.clearSent()
+					env.userSends("scheduler-user", command)
+					env.waitFor(command, time.Second, func() bool { return len(env.plat.getSent()) > 0 })
+					return env.lastSent()
+				}
+				add, when := "add", "0 9 * * *"
+				if shell {
+					add = "addexec"
+				}
+				if kind == "timer" {
+					when = "24h"
+				}
+				created := send("/" + kind + " " + add + " " + when + " lifecycle-check")
+				_, idText, found := strings.Cut(created, "ID: `")
+				id, _, closed := strings.Cut(idText, "`")
+				if !found || !closed || id == "" || !strings.Contains(created, "lifecycle-check") {
+					t.Fatalf("creation did not expose the task and ID: %q", created)
+				}
+				if got := send("/" + kind + " list"); !strings.Contains(got, id) || !strings.Contains(got, "lifecycle-check") {
+					t.Fatalf("created task missing from list: %q", got)
+				}
+				muteKey, unmuteKey, deleteKey, emptyKey := MsgCronMuted, MsgCronUnmuted, MsgCronDeleted, MsgCronEmpty
+				if kind == "timer" {
+					muteKey, unmuteKey, deleteKey, emptyKey = MsgTimerMuted, MsgTimerUnmuted, MsgTimerDeleted, MsgTimerEmpty
+				}
+				for _, step := range []struct {
+					command string
+					key     MsgKey
+				}{{"mute", muteKey}, {"unmute", unmuteKey}} {
+					if got, want := send("/"+kind+" "+step.command+" "+id), env.engine.i18n.Tf(step.key, id); got != want {
+						t.Fatalf("%s reply = %q, want %q", step.command, got, want)
+					}
+					listed := send("/" + kind + " list")
+					if !strings.Contains(listed, id) || strings.Contains(listed, "[mute]") != (step.command == "mute") {
+						t.Fatalf("list did not reflect %s: %q", step.command, listed)
+					}
+				}
+				if got, want := send("/"+kind+" del "+id), env.engine.i18n.Tf(deleteKey, id); got != want {
+					t.Fatalf("delete reply = %q, want %q", got, want)
+				}
+				if got, want := send("/"+kind+" list"), env.engine.i18n.T(emptyKey); got != want {
+					t.Fatalf("deleted task still visible: %q, want %q", got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestCUJ_E8_HeartbeatCommandLifecycle(t *testing.T) {
+	env := newCUJEnv(t)
+	t.Cleanup(func() { _ = env.engine.Stop() })
+	scheduler := NewHeartbeatScheduler(env.tempDir)
+	scheduler.Register("test", HeartbeatConfig{Enabled: true, SessionKey: "test:heartbeat-user", IntervalMins: 30}, env.engine, env.tempDir)
+	env.engine.SetHeartbeatScheduler(scheduler)
+	t.Cleanup(scheduler.Stop)
+	for _, step := range []struct{ command, want string }{
+		{"/heartbeat", "▶️ running"},
+		{"/heartbeat pause", env.engine.i18n.T(MsgHeartbeatPaused)},
+		{"/heartbeat status", "⏸ paused"},
+		{"/heartbeat interval 45", env.engine.i18n.Tf(MsgHeartbeatInterval, 45)},
+		{"/heartbeat status", "Interval: 45 min"},
+		{"/heartbeat resume", env.engine.i18n.T(MsgHeartbeatResumed)},
+		{"/heartbeat status", "▶️ running"},
+	} {
+		env.plat.clearSent()
+		env.userSends("heartbeat-user", step.command)
+		env.waitFor(step.command, time.Second, func() bool { return len(env.plat.getSent()) > 0 })
+		if got := env.lastSent(); !strings.Contains(got, step.want) {
+			t.Fatalf("%s reply = %q, want %q", step.command, got, step.want)
+		}
+	}
+}
+
 // ===========================================================================
 // CUJ-E2 · A cron job created (programmatically by the agent or directly
 // via the store) shows up in /cron output for the same SessionKey.
@@ -1101,22 +1345,37 @@ func TestCUJ_A1_FirstMessageGetsReply(t *testing.T) {
 // prompts. Asserts the history-injection contract end-to-end.
 func TestCUJ_A2_MultiTurnAgentReceivesHistory(t *testing.T) {
 	env := newCUJEnv(t)
-	env.userSends("alex", "my name is alex")
-	env.waitFor("turn1 reply", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
-	env.userSends("alex", "what is my name")
-	env.waitFor("turn2 reply", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 2 })
+	defer env.engine.Stop()
+	inputs := []string{"my name is alex", "what is my name", "remember my name"}
+	for turn, input := range inputs {
+		env.userSends("alex", input)
+		// A queued-message acknowledgement is not the agent's final answer.
+		// Counting every platform message raced with the previous turn's cleanup.
+		env.waitFor(fmt.Sprintf("turn%d final reply", turn+1), 2*time.Second, func() bool {
+			replies := 0
+			for _, sent := range env.plat.getSent() {
+				if sent == "ok" {
+					replies++
+				}
+			}
+			return replies == turn+1
+		})
+	}
 
-	// Verify the agent has stored at least 2 user prompts; this guards
-	// against any regression that drops history from the agent's input.
+	// All three prompts must reach the same live agent session, in order.
 	env.agent.mu.Lock()
 	defer env.agent.mu.Unlock()
-	if len(env.agent.sessions) == 0 {
-		t.Fatal("agent did not receive a session")
+	if len(env.agent.sessions) != 1 {
+		t.Fatalf("agent received %d sessions, want 1", len(env.agent.sessions))
 	}
-	sess := env.agent.sessions[0]
-	prompts := sess.getSentPrompts()
-	if len(prompts) < 2 {
-		t.Fatalf("agent received %d prompts across 2 turns, want ≥2", len(prompts))
+	prompts := env.agent.sessions[0].getSentPrompts()
+	if len(prompts) != len(inputs) {
+		t.Fatalf("agent received %d prompts across %d turns", len(prompts), len(inputs))
+	}
+	for i, input := range inputs {
+		if !strings.Contains(prompts[i], input) {
+			t.Fatalf("turn%d prompt missing user input: %q", i+1, prompts[i])
+		}
 	}
 }
 
@@ -1866,39 +2125,49 @@ func TestCUJ_G4_AgentCrashReturnsErrorAndRecovers(t *testing.T) {
 // can fail) and we had no direct assertion that the error text actually
 // reaches the user's screen.
 func TestCUJ_G5_ToolFailureSurfacesToUser(t *testing.T) {
-	env := newCUJEnv(t)
-
-	// Establish a session.
-	env.userSends("g5", "hello")
-	env.waitFor("turn1", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
-	env.plat.clearSent()
-
-	// On the NEXT user turn, make the agent emit an EventError instead of
-	// a normal EventResult — this simulates a tool call (bash, edit, etc.)
-	// failing inside the agent.
-	env.agent.mu.Lock()
-	if len(env.agent.sessions) == 0 {
-		env.agent.mu.Unlock()
-		t.Fatalf("no agent session was started by turn 1")
-	}
-	sess := env.agent.sessions[len(env.agent.sessions)-1]
-	env.agent.mu.Unlock()
-
-	sess.mu.Lock()
-	sess.nextEventOverride = &Event{
-		Type:  EventError,
-		Error: errors.New("bash tool exited with code 1: permission denied"),
-		Done:  true,
-	}
-	sess.mu.Unlock()
-
-	env.userSends("g5", "run a tool that will fail")
-	env.waitFor("error reply visible", 2*time.Second, func() bool {
-		return len(env.plat.getSent()) >= 1
-	})
-
-	if !env.sentContains("permission denied") && !env.sentContains("bash tool exited") {
-		t.Fatalf("user did not see the underlying tool error in reply; got: %v", env.plat.getSent())
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"tool_failure", errors.New("bash tool exited with code 1: permission denied"), "permission denied"},
+		{"stream_disconnected", &UserMessageError{Key: MsgAgentTurnFailed, Args: []any{": stream disconnected before completion"}}, "本轮执行失败"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newCUJEnv(t)
+			defer env.engine.Stop()
+			env.engine.i18n.SetLang(LangChinese)
+			env.userSends("g5", "hello")
+			env.waitFor("first answer", 2*time.Second, func() bool { return env.sentContains("ok") })
+			env.plat.clearSent()
+			env.agent.mu.Lock()
+			sess := env.agent.sessions[0]
+			env.agent.mu.Unlock()
+			sess.mu.Lock()
+			sess.pendingEvents = []Event{
+				{Type: EventThinking, Content: "unfinished progress"},
+				{Type: EventToolUse, ToolName: "read", ToolInput: "test-only"},
+				{Type: EventError, Error: tc.err, Done: true},
+			}
+			sess.mu.Unlock()
+			env.userSends("g5", "run a task that will fail")
+			env.waitFor("failure reply visible", 2*time.Second, func() bool { return env.sentContains("❌") })
+			if !env.sentContains(tc.want) || env.sentContains("(空响应)") {
+				t.Fatalf("user did not see actual localized failure: %v", env.plat.getSent())
+			}
+			env.plat.clearSent()
+			sess.mu.Lock()
+			sess.reply = "NEXT_TURN_OK"
+			sess.mu.Unlock()
+			env.userSends("g5", "continue after checking previous changes")
+			env.waitFor("next turn recovers", 2*time.Second, func() bool { return env.sentContains("NEXT_TURN_OK") })
+			if env.sentContains("❌") || env.sentContains("(空响应)") || env.sentContains("unfinished progress") {
+				t.Fatalf("failed turn contaminated next answer: %v", env.plat.getSent())
+			}
+			if got := sess.getSentPrompts(); len(got) != 3 {
+				t.Fatalf("failure retried automatically or lost session: %v", got)
+			}
+		})
 	}
 }
 
@@ -2410,5 +2679,238 @@ func TestCUJ_H4_FeishuTopicsKeepWorkspaceBindingsIsolated(t *testing.T) {
 	sendTopicCommand("om_root_b", "/workspace")
 	if got := lastReply(); !strings.Contains(got, normalizeWorkspacePath(workspaceB)) {
 		t.Fatalf("topic B changed after topic A unbind: %q", got)
+	}
+}
+
+// Public progress must remain visible with private thinking disabled, across
+// three actual user turns; intermediate updates must precede the final reply.
+func testPreviewLifecyclePublicProgressThreeTurns(t *testing.T) {
+	p := &lifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "public-progress"}}
+	a := &cujAgent{}
+	e := NewEngine("test", a, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	cfg := DefaultStreamPreviewCfg()
+	cfg.IntervalMs, cfg.MinDeltaChars = 1, 1
+	e.SetStreamPreviewCfg(cfg)
+	e.SetDisplayConfig(DisplayCfg{Mode: "compact", ThinkingMessages: false, ToolMessages: false, HideAgentFooter: true})
+	defer e.Stop()
+	for turn := 1; turn <= 3; turn++ {
+		first, second, final := fmt.Sprintf("第%d轮正在检查。", turn), fmt.Sprintf("第%d轮正在验证。", turn), fmt.Sprintf("第%d轮完成。", turn)
+		events := []Event{
+			{Type: EventThinking, Content: "PRIVATE_ANALYSIS"},
+			{Type: EventType("progress"), Content: first},
+			{Type: EventToolUse, ToolName: "Read"},
+			{Type: EventType("progress"), Content: second},
+			{Type: EventToolUse, ToolName: "Read"},
+			{Type: EventResult, Content: final, Done: true},
+		}
+		a.mu.Lock()
+		if len(a.sessions) == 0 {
+			a.nextSessionEvents = events
+			a.nextSessionDelayMs = 100
+		} else {
+			s := a.sessions[0]
+			s.mu.Lock()
+			s.pendingEvents = events
+			s.pendingDelayMs = 100
+			s.mu.Unlock()
+		}
+		a.mu.Unlock()
+		e.ReceiveMessage(p, &Message{SessionKey: "public-progress:user", Platform: "public-progress", UserID: "user", MessageID: fmt.Sprint(turn), Content: "检查", ReplyCtx: "ctx"})
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			p.previewMu.Lock()
+			count := len(p.edits)
+			p.previewMu.Unlock()
+			if count >= turn*2 {
+				break
+			}
+			if len(p.getSent()) >= turn || time.Now().After(deadline) {
+				t.Fatalf("turn %d: no two progress updates before final; updates=%d", turn, count)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		p.previewMu.Lock()
+		latest := p.edits[len(p.edits)-1]
+		p.previewMu.Unlock()
+		if !strings.Contains(latest, first) || !strings.Contains(latest, second) || strings.Contains(latest, "PRIVATE_ANALYSIS") || strings.Contains(latest, final) {
+			t.Fatalf("bad public preview=%s", latest)
+		}
+		for len(p.getSent()) < turn || e.sessions.GetOrCreateActive("public-progress:user").Busy() {
+			if time.Now().After(deadline) {
+				t.Fatal("final reply timed out")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if p.getSent()[turn-1] != final {
+			t.Fatalf("final contains progress or duplicates: %v", p.getSent())
+		}
+		p.previewMu.Lock()
+		starts, deletes := len(p.starts), len(p.deletes)
+		p.previewMu.Unlock()
+		if starts != turn || deletes != turn {
+			t.Fatalf("starts=%d recalls=%d", starts, deletes)
+		}
+	}
+}
+
+func TestCUJ_Shell1_CommandsThreeActions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixtures")
+	}
+	p := &stubPlatformEngine{n: "shell-test"}
+	e := NewEngine("test", &shellWorkDirAgent{dir: t.TempDir()}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetAdminFrom("user")
+	defer e.Stop()
+	for i, tc := range []struct{ command, want string }{
+		{"printf first", "✅"},
+		{"exit 9", "exit code 9"},
+		{"sleep 0.7; printf final", "✅"},
+	} {
+		before := len(p.getSent())
+		e.ReceiveMessage(p, &Message{SessionKey: "shell-test:user", Platform: "shell-test", MessageID: fmt.Sprint(i), UserID: "user", Content: "/shell " + tc.command, ReplyCtx: "ctx"})
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			sent := p.getSent()
+			if len(sent) > before && strings.Contains(sent[len(sent)-1], tc.want) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("action %d: sent=%v", i+1, sent)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+// Steering is one user turn with multiple inputs, unlike the queued lifecycle CUJ.
+type steeringJourneySession struct {
+	*cujAgentSession
+	started  chan string
+	steered  chan string
+	accept   bool
+	steerErr error
+	ready    chan struct{}
+}
+
+func (s *steeringJourneySession) Send(prompt, _ string, _ []ImageAttachment, _ []FileAttachment) error {
+	s.started <- prompt
+	if s.ready != nil {
+		<-s.ready
+	}
+	return nil
+}
+
+func (s *steeringJourneySession) Steer(prompt, _ string, _ []ImageAttachment, _ []FileAttachment) (bool, error) {
+	if s.ready != nil {
+		select {
+		case <-s.ready:
+		default:
+			return false, nil
+		}
+	}
+	s.steered <- prompt
+	return s.accept, s.steerErr
+}
+
+func TestCUJ_ST1_SteeringContinuousMessages(t *testing.T) {
+	for _, outcome := range []string{"accepted", "rejected", "unconfirmed", "startup"} {
+		t.Run(outcome, func(t *testing.T) {
+			p := &stubPlatformEngine{n: "steering"}
+			s := &steeringJourneySession{cujAgentSession: newCUJAgentSession(), started: make(chan string, 8), steered: make(chan string, 8), accept: outcome == "accepted" || outcome == "startup"}
+			if outcome == "startup" {
+				s.ready = make(chan struct{})
+			}
+			if outcome == "unconfirmed" {
+				s.steerErr = errors.New("transport closed after write")
+			}
+			e := NewEngine("steering", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+			e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
+			t.Cleanup(func() { e.cancel(); _ = e.Stop() })
+			key := "steering:user"
+			send := func(n int) {
+				e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), UserID: "user", MessageID: fmt.Sprintf("m%d", n), Content: fmt.Sprintf("要求%d", n), ReplyCtx: fmt.Sprintf("r%d", n), UserMessageTimeMs: int64(1000 + n)})
+			}
+			wait := func(test func() bool) {
+				t.Helper()
+				deadline := time.Now().Add(3 * time.Second)
+				for !test() {
+					if time.Now().After(deadline) {
+						t.Fatalf("timeout; messages=%v", p.getSent())
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+			send(1)
+			select {
+			case <-s.started:
+			case <-time.After(3 * time.Second):
+				t.Fatal("initial turn not sent")
+			}
+			send(2)
+			send(3)
+			if outcome == "startup" {
+				close(s.ready)
+			}
+			notice := e.i18n.T(MsgMessageSteered)
+			if outcome == "rejected" {
+				notice = e.i18n.T(MsgMessageQueued)
+			}
+			if outcome == "unconfirmed" {
+				notice = e.i18n.T(MsgMessageSteerUnconfirmed)
+			}
+			wait(func() bool {
+				n := 0
+				for _, v := range p.getSent() {
+					if v == notice {
+						n++
+					}
+				}
+				return n == 2
+			})
+			if outcome != "rejected" {
+				if len(s.steered) != 2 {
+					t.Fatalf("running task received %d additions", len(s.steered))
+				}
+				if len(s.started) != 0 {
+					t.Fatal("addition incorrectly started a second turn")
+				}
+			}
+			s.events <- Event{Type: EventResult, Content: "已合并全部要求", Done: true}
+			if outcome == "rejected" {
+				for i := 0; i < 2; i++ {
+					select {
+					case <-s.started:
+					case <-time.After(3 * time.Second):
+						t.Fatal("rejected addition not queued")
+					}
+					s.events <- Event{Type: EventResult, Content: "已处理排队要求", Done: true}
+				}
+			}
+			wait(func() bool { return !e.sessions.GetOrCreateActive(key).Busy() })
+			if outcome != "rejected" && len(s.started) != 0 {
+				t.Fatal("steered input was replayed after final response")
+			}
+			history := e.sessions.GetOrCreateActive(key).GetHistory(0)
+			for n := 1; n <= 3; n++ {
+				count := 0
+				for _, h := range history {
+					if h.Role == "user" && h.Content == fmt.Sprintf("要求%d", n) {
+						count++
+					}
+				}
+				if count != 1 {
+					t.Fatalf("user message %d history count=%d", n, count)
+				}
+			}
+			seen := false
+			for _, text := range p.getSent() {
+				if strings.Contains(text, "已合并全部要求") {
+					seen = true
+				}
+			}
+			if !seen {
+				t.Fatal("one combined final answer was not delivered")
+			}
+		})
 	}
 }

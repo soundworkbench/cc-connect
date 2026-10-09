@@ -12,8 +12,8 @@ import (
 // InstanceLock provides a file-based exclusive lock to prevent multiple
 // cc-connect instances with the same config from running simultaneously.
 type InstanceLock struct {
-	file    *os.File
-	path    string
+	file     *os.File
+	path     string
 	acquired bool
 }
 
@@ -116,8 +116,26 @@ func KillExistingInstance(configPath string) bool {
 	lockName := fmt.Sprintf(".%s.lock", configBase)
 	lockPath := filepath.Join(configDir, lockName)
 
+	// A PID recorded on disk is not proof of a live lock owner. After a
+	// container restart it can identify our new process (or its proxy) instead.
+	// Probe the kernel lock first and never signal anything for an unlocked,
+	// stale file. AcquireInstanceLock will safely replace its diagnostic PID.
+	f, err := os.OpenFile(lockPath, os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == nil {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		return false
+	}
+	if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+		return false
+	}
+
 	pid := readPIDFromLockFile(lockPath)
-	if pid <= 0 {
+	if pid <= 1 || pid == os.Getpid() {
 		return false
 	}
 

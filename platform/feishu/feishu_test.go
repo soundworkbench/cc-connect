@@ -886,6 +886,13 @@ func TestCountMarkdownTables(t *testing.T) {
 	}
 }
 
+func TestBuildReplyContent_PlainTextUsesCard(t *testing.T) {
+	msgType, _ := buildReplyContent("你好，我是助手。")
+	if msgType != larkim.MsgTypeInteractive {
+		t.Fatalf("plain text should use interactive card, got %s", msgType)
+	}
+}
+
 func TestBuildReplyContent_FallbackWhenManyTables(t *testing.T) {
 	// Build content with 6 tables (exceeds the 5-table card limit).
 	var sb strings.Builder

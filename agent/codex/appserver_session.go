@@ -36,6 +36,8 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
+func (e *rpcError) Error() string { return strings.TrimSpace(e.Message) }
+
 type initResponse struct {
 	ProtocolVersion string `json:"protocolVersion"`
 }
@@ -176,10 +178,11 @@ type appServerSession struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 
-	stateMu      sync.Mutex
-	pendingMsgs  []string
-	currentTurn  string
-	preambleSent bool
+	stateMu       sync.Mutex
+	pendingMsgs   []string
+	currentTurn   string
+	completedTurn string
+	preambleSent  bool
 
 	runtimeMu sync.RWMutex
 	usage     *core.UsageReport
@@ -504,7 +507,10 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	}
 
 	s.stateMu.Lock()
-	s.currentTurn = resp.Turn.ID
+	// A fast turn can complete before this request goroutine receives its reply.
+	if s.completedTurn != resp.Turn.ID {
+		s.currentTurn = resp.Turn.ID
+	}
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 
@@ -1100,6 +1106,32 @@ func (s *appServerSession) handleResponse(resp rpcResponseEnvelope) {
 }
 
 func (s *appServerSession) handleNotification(method string, paramsRaw json.RawMessage) {
+	// The app-server also emits notifications for delegated agent threads.
+	// Only this session's thread may change its turn, output or context usage.
+	if strings.HasPrefix(method, "turn/") || strings.HasPrefix(method, "item/") || strings.HasPrefix(method, "thread/") || method == "error" {
+		var scope struct {
+			ThreadID string `json:"threadId"`
+			TurnID   string `json:"turnId"`
+		}
+		if json.Unmarshal(paramsRaw, &scope) != nil {
+			return
+		}
+		threadID := s.CurrentSessionID()
+		if scope.ThreadID != "" && scope.ThreadID != threadID {
+			return
+		}
+		if method != "error" && (threadID == "" || scope.ThreadID == "") {
+			return
+		}
+		if scope.TurnID != "" {
+			s.stateMu.Lock()
+			active := s.currentTurn
+			s.stateMu.Unlock()
+			if scope.TurnID != active {
+				return
+			}
+		}
+	}
 	switch method {
 	case "turn/started":
 		var notif turnNotification
@@ -1125,21 +1157,15 @@ func (s *appServerSession) handleNotification(method string, paramsRaw json.RawM
 
 	case "turn/completed":
 		var notif turnNotification
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil {
-			s.completeTurn()
+		if err := json.Unmarshal(paramsRaw, &notif); err == nil && notif.Turn.ID != "" {
+			s.finishTurnID(notif.Turn.ID, s.turnCompletionError(notif))
 		}
 
 	case "thread/status/changed":
-		var notif struct {
-			ThreadID string `json:"threadId"`
-			Status   struct {
-				Type string `json:"type"`
-			} `json:"status"`
-		}
-		if err := json.Unmarshal(paramsRaw, &notif); err == nil && notif.Status.Type == "idle" {
-			// In codex 0.125+, thread going idle signals turn completion.
-			s.completeTurn()
-		}
+		// Idle is a thread lifecycle update, not an authoritative turn result.
+		// In particular, child creation can emit idle while the parent works.
+		// Finalize only the matching turn/completed notification.
+		return
 
 	case "account/rateLimits/updated":
 		var notif appServerRateLimitsResponse
@@ -1508,16 +1534,64 @@ func rpcIDToInt64(v any) (int64, bool) {
 	return 0, false
 }
 
-func (s *appServerSession) completeTurn() {
+func (s *appServerSession) completeTurn() { s.completeTurnID("") }
+
+func (s *appServerSession) completeTurnID(expectedTurnID string) {
+	s.finishTurnID(expectedTurnID, nil)
+}
+
+// turn/completed is terminal even when the app-server process stays alive.
+// A failed/interrupted turn must never flush commentary as a successful answer.
+func (s *appServerSession) finishTurnID(expectedTurnID string, turnErr error) {
 	s.stateMu.Lock()
-	if s.currentTurn == "" {
+	if s.currentTurn == "" || (expectedTurnID != "" && expectedTurnID != s.currentTurn) {
 		s.stateMu.Unlock()
 		return
 	}
+	s.completedTurn = s.currentTurn
 	s.currentTurn = ""
+	msgs := append([]string(nil), s.pendingMsgs...)
+	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
-	s.flushPendingAsText()
+	if turnErr != nil {
+		s.emit(core.Event{Type: core.EventError, Error: turnErr, SessionID: s.CurrentSessionID(), Done: true})
+		return
+	}
+	for _, text := range msgs {
+		if strings.TrimSpace(text) != "" {
+			s.emit(core.Event{Type: core.EventText, Content: text})
+		}
+	}
 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+}
+
+func (s *appServerSession) turnCompletionError(notif turnNotification) error {
+	status := strings.TrimSpace(notif.Turn.Status)
+	// Accept a missing status for older servers; an explicit error always wins.
+	if (status == "" || status == "completed") && notif.Turn.Error == nil {
+		return nil
+	}
+	key := core.MsgAgentTurnFailed
+	if status == "interrupted" {
+		key = core.MsgAgentTurnInterrupted
+	}
+	detail := ""
+	if notif.Turn.Error != nil {
+		detail = strings.TrimSpace(notif.Turn.Error.Message)
+	}
+	if detail != "" {
+		// The child inherits both process and configured provider environments.
+		// Never echo known credentials if an upstream error includes them.
+		for _, entry := range append(os.Environ(), s.extraEnv...) {
+			name, value, _ := strings.Cut(entry, "=")
+			name = strings.ToUpper(name)
+			if strings.Contains(name, "KEY") || strings.Contains(name, "TOKEN") || strings.Contains(name, "SECRET") || strings.Contains(name, "PASSWORD") || strings.Contains(name, "PROXY") {
+				detail = core.RedactToken(detail, value)
+			}
+		}
+		detail = ": " + detail
+	}
+	return &core.UserMessageError{Key: key, Args: []any{detail}}
 }
 
 func (s *appServerSession) flushPendingAsThinking() {
@@ -1616,7 +1690,7 @@ func (s *appServerSession) requestWithTimeout(method string, params any, out any
 	select {
 	case resp := <-ch:
 		if resp.Error != nil {
-			return fmt.Errorf("%s", strings.TrimSpace(resp.Error.Message))
+			return resp.Error
 		}
 		if out != nil {
 			if err := json.Unmarshal(resp.Result, out); err != nil {

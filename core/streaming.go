@@ -145,6 +145,64 @@ type PreviewFinishPreference interface {
 	KeepPreviewOnFinish() bool
 }
 
+// ImmediatePreviewPreference is an optional interface for platforms that want
+// an editable placeholder sent immediately before the first content delta.
+type ImmediatePreviewPreference interface {
+	StartPreviewImmediately() bool
+}
+
+// ThinkingProcessPreviewPreference keeps progress on a single temporary card.
+type ThinkingProcessPreviewPreference interface {
+	UseThinkingProcessPreview() bool
+}
+
+// replacePreview edits ephemeral progress without mixing it into answer text.
+func (sp *streamPreview) replacePreview(text string) bool {
+	if strings.TrimSpace(text) == "" || !sp.canPreview() {
+		return false
+	}
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	sp.cancelTimerLocked()
+	if sp.transform != nil {
+		text = sp.transform(text)
+	}
+	if text == "" {
+		return false
+	}
+	if len([]rune(text)) > 12000 {
+		text = string([]rune(text)[len([]rune(text))-12000:])
+	}
+	if text == sp.lastSentText {
+		return true
+	}
+	if sp.previewMsgID == nil {
+		starter, ok := sp.platform.(PreviewStarter)
+		if !ok {
+			return false
+		}
+		handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, text)
+		if err != nil || handle == nil {
+			slog.Warn("progress preview start failed", "error", err)
+			return false
+		}
+		sp.previewMsgID = handle
+	} else {
+		updater, ok := sp.platform.(MessageUpdater)
+		if !ok {
+			return false
+		}
+		if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, text); err != nil {
+			slog.Warn("progress preview update failed", "error", err)
+			return false
+		}
+		sp.lastSentViaUpdate = true
+	}
+	sp.lastSentText = text
+	sp.lastSentAt = time.Now()
+	return true
+}
+
 func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx context.Context, transform func(string) string) *streamPreview {
 	return &streamPreview{
 		cfg:       cfg,
@@ -154,6 +212,72 @@ func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx contex
 		transform: transform,
 		timerStop: make(chan struct{}),
 	}
+}
+
+// acknowledgeTurnStart is shared by initial and queued turns. A successfully
+// created streaming card or preview already acknowledges the request; keep the
+// ordinary instant reply only as a fallback when neither is available.
+func (e *Engine) acknowledgeTurnStart(p Platform, replyCtx any, sp *streamPreview, hasStreamingCard bool) {
+	if hasStreamingCard {
+		return
+	}
+	if pref, ok := p.(ImmediatePreviewPreference); ok && pref.StartPreviewImmediately() {
+		if sp.startPlaceholder("思考中…") {
+			return
+		}
+	}
+	if e.instantReply.Enabled {
+		content := e.instantReply.Content
+		if content == "" {
+			content = e.i18n.T(MsgStarting)
+		}
+		e.send(p, replyCtx, content)
+	}
+}
+
+// startPlaceholder reports whether a visible placeholder was sent. Callers can
+// use it to avoid a second acknowledgement while retaining failure fallback.
+func (sp *streamPreview) startPlaceholder(text string) bool {
+	if strings.TrimSpace(text) == "" || !sp.canPreview() {
+		return false
+	}
+
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sp.degraded || sp.previewMsgID != nil {
+		return sp.previewMsgID != nil
+	}
+
+	if sp.transform != nil {
+		text = sp.transform(text)
+	}
+	if text == "" {
+		return false
+	}
+
+	if starter, ok := sp.platform.(PreviewStarter); ok {
+		handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, text)
+		if err != nil {
+			slog.Debug("stream preview: placeholder start failed, degrading", "error", err)
+			sp.degraded = true
+			return false
+		}
+		if handle == nil {
+			return false
+		}
+		sp.previewMsgID = handle
+	} else {
+		if err := sp.platform.Send(sp.ctx, sp.replyCtx, text); err != nil {
+			slog.Debug("stream preview: placeholder send failed", "error", err)
+			sp.degraded = true
+			return false
+		}
+		sp.previewMsgID = sp.replyCtx
+	}
+	sp.lastSentText = text
+	sp.lastSentViaUpdate = false
+	sp.lastSentAt = time.Now()
+	return true
 }
 
 // canPreview returns true if the platform supports message updating and is not disabled.
@@ -415,6 +539,22 @@ func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 	if sp.transform != nil {
 		finalText = sp.transform(finalText)
 	}
+	keepPreview := false
+	if pref, ok := sp.platform.(PreviewFinishPreference); ok {
+		keepPreview = pref.KeepPreviewOnFinish()
+	}
+
+	// Apply the finish policy before attempting recovery of a degraded preview.
+	if cleaner, ok := sp.platform.(PreviewCleaner); ok && !keepPreview && sp.previewMsgID != nil {
+		slog.Debug("stream preview finish: deleting preview (PreviewCleaner)")
+		if err := cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID); err != nil {
+			slog.Warn("stream preview finish: recall failed", "error", err)
+		} else {
+			sp.previewMsgID = nil
+		}
+		return false
+	}
+
 	if sp.previewMsgID == nil || sp.degraded {
 		if sp.previewMsgID != nil && sp.degraded {
 			// Try to recover degraded preview via UpdateMessage before falling back to delete
@@ -438,18 +578,6 @@ func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 			}
 		}
 		slog.Debug("stream preview finish: no active preview", "hasHandle", sp.previewMsgID != nil, "degraded", sp.degraded)
-		return false
-	}
-
-	keepPreview := false
-	if pref, ok := sp.platform.(PreviewFinishPreference); ok {
-		keepPreview = pref.KeepPreviewOnFinish()
-	}
-
-	// If platform wants to delete the preview and send fresh, let it.
-	if cleaner, ok := sp.platform.(PreviewCleaner); ok && !keepPreview {
-		slog.Debug("stream preview finish: deleting preview (PreviewCleaner)")
-		_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
 		return false
 	}
 

@@ -157,31 +157,12 @@ func TestHandleStepStart_SessionIDFromPart(t *testing.T) {
 	}
 }
 
-// TestHandleStepStopSendsEventResult verifies that handleStepFinish sends
-// an EventResult when reason="stop", signaling turn completion to the engine.
-func TestHandleStepStopSendsEventResult(t *testing.T) {
-	jsonData := `{"type":"step_finish","part":{"reason":"stop"}}`
-
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(jsonData), &raw); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	s := &opencodeSession{events: make(chan core.Event, 1), ctx: ctx}
-	s.handleStepFinish(raw)
-
-	select {
-	case evt := <-s.events:
-		if evt.Type != core.EventResult {
-			t.Errorf("event type = %q, want EventResult", evt.Type)
-		}
-		if !evt.Done {
-			t.Errorf("event.Done = false, want true")
-		}
-	default:
-		t.Error("expected EventResult to be sent when reason=stop")
+// A model step is not a process/turn completion. Wait for stdout to drain.
+func TestHandleStepStopWaitsForProcessExit(t *testing.T) {
+	s := &opencodeSession{events: make(chan core.Event, 2), ctx: context.Background()}
+	s.handleStepFinish(map[string]any{"part": map[string]any{"reason": "stop"}})
+	if len(s.events) != 0 {
+		t.Fatal("premature turn completion")
 	}
 }
 
@@ -227,8 +208,8 @@ func TestHandleStepDuplicateEventResultPrevented(t *testing.T) {
 		resultSent: atomic.Bool{},
 	}
 
-	s.handleStepFinish(raw)
-	s.handleStepFinish(raw)
+	s.sendEventResult()
+	s.sendEventResult()
 
 	count := 0
 	for len(s.events) > 0 {

@@ -195,8 +195,34 @@ func (m *mockKeepPreviewPlatform) KeepPreviewOnFinish() bool {
 	return true
 }
 
-func TestStreamPreview_FreezeDeletesOnFinish(t *testing.T) {
+func TestStreamPreview_PlaceholderThenFinishRecalls(t *testing.T) {
 	mp := &mockCleanerPlatform{}
+	cfg := StreamPreviewCfg{
+		Enabled:       true,
+		IntervalMs:    1,
+		MinDeltaChars: 1,
+		MaxChars:      500,
+	}
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.startPlaceholder("思考中…")
+	sp.appendText("你好，我是助手。")
+	time.Sleep(20 * time.Millisecond)
+
+	ok := sp.finish("你好，我是助手。", "")
+	if ok {
+		t.Fatal("finish should return false so caller sends a fresh final message")
+	}
+	if len(mp.deleted) != 1 {
+		t.Fatalf("deleted = %d, want 1", len(mp.deleted))
+	}
+	msgs := mp.getMessages()
+	if len(msgs) == 0 || msgs[0] != "start:思考中…" {
+		t.Fatalf("messages = %#v, want to start with 思考中…", msgs)
+	}
+}
+
+func TestStreamPreview_FreezeRecoversWhenKeepingPreview(t *testing.T) {
+	mp := &mockKeepPreviewPlatform{}
 	cfg := StreamPreviewCfg{
 		Enabled:       true,
 		IntervalMs:    50,
@@ -217,6 +243,24 @@ func TestStreamPreview_FreezeDeletesOnFinish(t *testing.T) {
 	ok := sp.finish("Hello World Final", "")
 	if !ok {
 		t.Error("finish should return true when degraded recovery via UpdateMessage succeeds")
+	}
+}
+
+// A recovered connection must not override the platform's recall/fresh-final policy.
+func TestStreamPreview_DegradedRespectsFinishPreference(t *testing.T) {
+	for _, degraded := range []bool{false, true} {
+		mp := &mockCleanerPlatform{}
+		sp := newStreamPreview(DefaultStreamPreviewCfg(), mp, "ctx", context.Background(), nil)
+		sp.startPlaceholder("thinking")
+		if degraded {
+			sp.freeze()
+		}
+		if sp.finish("final answer", "") {
+			t.Errorf("degraded=%t: final must be sent separately", degraded)
+		}
+		if len(mp.deleted) != 1 {
+			t.Errorf("degraded=%t: recalls=%d, want 1", degraded, len(mp.deleted))
+		}
 	}
 }
 

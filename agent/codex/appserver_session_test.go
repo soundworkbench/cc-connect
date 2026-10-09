@@ -75,7 +75,8 @@ func TestAppServerSession_HandleRateLimitsUpdatedCachesUsage(t *testing.T) {
 }
 
 func TestAppServerSession_HandleThreadTokenUsageUpdatedCachesContextUsage(t *testing.T) {
-	s := &appServerSession{}
+	s := &appServerSession{currentTurn: "turn-1"}
+	s.threadID.Store("thread-1")
 	raw, err := json.Marshal(appServerThreadTokenUsageNotification{
 		ThreadID: "thread-1",
 		TurnID:   "turn-1",
