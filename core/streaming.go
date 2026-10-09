@@ -133,7 +133,7 @@ type PreviewStarter interface {
 }
 
 // PreviewCleaner is an optional interface for platforms that need to clean up
-// the preview message after the final response is sent (e.g. Discord deletes
+// the preview message after a separate final response is sent (e.g. Discord deletes
 // the preview and sends a fresh message).
 type PreviewCleaner interface {
 	DeletePreviewMessage(ctx context.Context, previewHandle any) error
@@ -433,9 +433,6 @@ func (sp *streamPreview) freeze() {
 				text = string([]rune(text)[:maxChars]) + "…"
 			}
 			if text != "" {
-				if sp.transform != nil {
-					text = sp.transform(text)
-				}
 				_ = updater.UpdateMessage(sp.ctx, sp.previewMsgID, text)
 			}
 		}
@@ -506,7 +503,9 @@ func (sp *streamPreview) discard() {
 	if sp.previewMsgID != nil {
 		if cleaner, ok := sp.platform.(PreviewCleaner); ok {
 			slog.Debug("stream preview discard: deleting preview")
-			_ = cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID)
+			if err := cleaner.DeletePreviewMessage(sp.ctx, sp.previewMsgID); err != nil {
+				slog.Warn("stream preview discard: recall failed", "error", err)
+			}
 		}
 	}
 
@@ -695,4 +694,83 @@ func (sp *streamPreview) needsDoneReaction() bool {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 	return sp.previewMsgID != nil && sp.lastSentViaUpdate
+}
+
+// detachForFinal transfers cleanup ownership before a stop can discard the preview.
+func (sp *streamPreview) detachForFinal() *streamPreview {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	sp.cancelTimerLocked()
+	sp.degraded = true
+	final := newStreamPreview(sp.cfg, sp.platform, sp.replyCtx, sp.ctx, sp.transform)
+	final.previewMsgID, final.lastSentText = sp.previewMsgID, sp.lastSentText
+	sp.previewMsgID = nil
+	return final
+}
+
+// deliverFinal stops progress updates and sends every chunk before recalling the
+// placeholder. Detaching the handle keeps deferred cleanup and /stop from
+// deleting it during delivery or after a failed send.
+func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform, any, string) error, failureText string) bool {
+	sp.mu.Lock()
+	sp.cancelTimerLocked()
+	sp.degraded = true
+	handle, progress := sp.previewMsgID, sp.lastSentText
+	sp.previewMsgID = nil
+	select {
+	case <-sp.timerStop:
+	default:
+		close(sp.timerStop)
+	}
+	sp.mu.Unlock()
+	chunks := SplitMessageCodeFenceAware(body, maxPlatformMessageLen)
+	if strings.TrimSpace(body) == "" && strings.TrimSpace(footer) == "" {
+		chunks = nil // Duplicate suppression has no new message to deliver.
+	}
+	for i, chunk := range chunks {
+		if i == len(chunks)-1 && footer != "" {
+			if sender, ok := sp.platform.(StatusFooterSender); ok {
+				if err := sender.SendWithStatusFooter(sp.ctx, sp.replyCtx, chunk, footer); err == nil {
+					continue
+				} else {
+					slog.Warn("final response: structured footer send failed", "error", err)
+				}
+			}
+			chunk = appendReplyFooter(chunk, footer)
+		}
+		if err := sendFn(sp.platform, sp.replyCtx, chunk); err == nil {
+			continue
+		} else {
+			slog.Warn("final response: retrying failed chunk", "error", err, "chunk", i)
+		}
+		// Retry only the failed chunk; never resend the delivered prefix.
+		if err := sendFn(sp.platform, sp.replyCtx, chunk); err == nil {
+			continue
+		} else {
+			slog.Error("final response: retry failed; keeping progress card", "error", err, "chunk", i)
+		}
+		if handle != nil {
+			if updater, ok := sp.platform.(MessageUpdater); ok {
+				text := appendReplyFooter(progress, failureText)
+				if sp.transform != nil {
+					text = sp.transform(text)
+				}
+				if status, ok := sp.platform.(PreviewStatusUpdater); ok {
+					status.SetPreviewStatus(handle, CardStatusError)
+				}
+				if err := updater.UpdateMessage(sp.ctx, handle, text); err != nil {
+					slog.Warn("final response: failure notice update failed", "error", err)
+				}
+			}
+		}
+		return false
+	}
+	if handle != nil {
+		if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+			if err := cleaner.DeletePreviewMessage(sp.ctx, handle); err != nil {
+				slog.Warn("final response: recall failed", "error", err)
+			}
+		}
+	}
+	return true
 }

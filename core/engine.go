@@ -536,6 +536,7 @@ type interactiveState struct {
 	pending                  *pendingPermission
 	steerMessageIDs          map[string]bool // dedup admitted supplements in this session
 	steerWriteFailed         bool            // next queue admission follows a hard stdin write failure
+	activePreview            *streamPreview  // protected by mu; stop transfers cleanup ownership
 	pendingMessages          []queuedMessage // messages queued while session was busy
 	approveAll               bool            // when true, auto-approve all permission requests for this session
 	fromVoice                bool            // true if current turn originated from voice transcription
@@ -4036,12 +4037,29 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	if pref, ok := state.platform.(ThinkingProcessPreviewPreference); ok {
 		thinkingProcessPreview = pref.UseThinkingProcessPreview() && streamCard == nil && e.display.CardMode != "rich" && sp.canPreview()
 	}
+	state.activePreview = sp
+	if state.stopped {
+		sp.discard()
+	}
 	state.mu.Unlock()
 	defer func() {
 		if thinkingProcessPreview {
 			sp.discard()
 		}
+		state.mu.Lock()
+		if state.activePreview == sp {
+			state.activePreview = nil
+		}
+		state.mu.Unlock()
 	}()
+	terminalReply := func(p Platform, text string) {
+		if thinkingProcessPreview {
+			sp.deliverFinal(text, "", sendWorkspaceWithError, e.i18n.T(MsgFinalDeliveryFailed))
+		} else {
+			sp.discard()
+			e.send(p, replyCtx, text)
+		}
+	}
 
 	e.acknowledgeTurnStart(state.platform, state.replyCtx, sp, streamCard != nil)
 
@@ -4081,19 +4099,21 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			pendingSend = nil
 			if err != nil {
 				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
-				sp.discard()
+				if !thinkingProcessPreview {
+					sp.discard()
+				}
 				if stopTyping != nil {
 					stopTyping()
 					stopTyping = nil
 				}
-				e.notifyDroppedQueuedMessages(state, err)
 				if state.agentSession == nil || !state.agentSession.Alive() {
 					e.cleanupInteractiveState(sessionKey, state)
 				}
 				state.mu.Lock()
 				p := state.platform
 				state.mu.Unlock()
-				e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
+				terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError), err))
+				e.notifyDroppedQueuedMessages(state, err)
 				return
 			}
 			e.steerQueuedMessages(state, session, sessions)
@@ -4102,12 +4122,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			slog.Error("agent session idle timeout: no events for too long, killing session",
 				"session_key", sessionKey, "timeout", e.eventIdleTimeout, "elapsed", time.Since(turnStart))
 			cp.Finalize(ProgressCardStateFailed)
-			sp.discard()
+			if !thinkingProcessPreview {
+				sp.discard()
+			}
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-turnDeadlineCh:
@@ -4115,11 +4137,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			slog.Warn("agent turn exceeded max_turn_time: sending stop signal, will force-kill if needed",
 				"session_key", sessionKey, "max_turn_time", e.maxTurnTime, "elapsed", elapsed)
 			cp.Finalize(ProgressCardStateFailed)
-			sp.discard()
+			if !thinkingProcessPreview {
+				sp.discard()
+			}
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
-			e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError),
+			terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError),
 				fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
 
 			// Two-phase shutdown: first try a graceful stop so the agent can
@@ -5048,6 +5072,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						return
 					}
 				}
+			} else if thinkingProcessPreview {
+				body := fullResponse
+				if suppressDuplicate {
+					body = strings.TrimSpace(strings.TrimPrefix(fullResponse, baseResponse))
+				}
+				if !sp.deliverFinal(body, statusFooter, sendWorkspaceWithError, e.i18n.T(MsgFinalDeliveryFailed)) {
+					return
+				}
 			} else if toolCount > 0 && segmentStart > 0 {
 				// When tool calls happened and prior text was already surfaced in segments,
 				// only send the unsent remainder. When tool progress is hidden, tool events don't surface
@@ -5221,6 +5253,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+				state.mu.Lock()
+				state.activePreview = sp
+				if state.stopped {
+					sp.discard()
+				}
+				state.mu.Unlock()
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 				thinkingPreviewText.Reset()
 				thinkingProcessPreview = false
@@ -5288,7 +5326,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 		case EventError:
 			cp.Finalize(ProgressCardStateFailed)
-			sp.discard()
+			if !thinkingProcessPreview {
+				sp.discard()
+			}
 			state.mu.Lock()
 			state.eventsNeedResync = true
 			state.mu.Unlock()
@@ -5321,7 +5361,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						break
 					}
 				}
-				e.send(p, replyCtx, userMsg)
+				terminalReply(p, userMsg)
+			}
+			if event.Error == nil {
+				sp.discard()
 			}
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
@@ -5339,8 +5382,11 @@ channelClosed:
 	state.mu.Lock()
 	state.eventsNeedResync = true
 	state.mu.Unlock()
-	e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
-	e.cleanupInteractiveState(sessionKey, state)
+	defer e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
+	if len(textParts) == 0 {
+		sp.discard()
+	}
+	defer e.cleanupInteractiveState(sessionKey, state)
 
 	if len(textParts) > 0 {
 		state.mu.Lock()
@@ -5375,7 +5421,9 @@ channelClosed:
 			Content:    fullResponse,
 		})
 
-		if toolCount > 0 && segmentStart > 0 {
+		if thinkingProcessPreview {
+			sp.deliverFinal(fullResponse, "", sendWorkspaceWithError, e.i18n.T(MsgFinalDeliveryFailed))
+		} else if toolCount > 0 && segmentStart > 0 {
 			sp.discard()
 			if segmentStart < len(textParts) {
 				unsent := strings.Join(textParts[segmentStart:], "")
@@ -9093,20 +9141,51 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	// latest forked session, so resuming after /stop is safe and no longer
 	// triggers the recycling loop from issue #830.
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
-	if !e.stopInteractiveSession(iKey, p, msg.ReplyCtx) {
-		// Fallback: try suffix scan in case interactiveKeyForSessionKey
-		// resolved a different key than the one used to store the state
-		// (e.g. workspace binding lookup inconsistency).
-		if found := e.findInteractiveKeyForSession(msg.SessionKey); found != "" && found != iKey {
-			if e.stopInteractiveSession(found, p, msg.ReplyCtx) {
-				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
-				return
-			}
+	stopAndReply := func(key string) bool {
+		preview := e.detachInteractivePreview(key)
+		if !e.stopInteractiveSession(key, p, msg.ReplyCtx) {
+			return false
 		}
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
+		text := e.i18n.T(MsgExecutionStopped)
+		e.replyAfterPreview(p, msg.ReplyCtx, preview, text)
+		return true
+	}
+	if stopAndReply(iKey) {
 		return
 	}
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgExecutionStopped))
+	if found := e.findInteractiveKeyForSession(msg.SessionKey); found != "" && found != iKey {
+		if stopAndReply(found) {
+			return
+		}
+	}
+	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgNoExecution))
+}
+
+// detachInteractivePreview transfers ownership before cancellation signals let
+// the event loop clean up. No network request is made while engine locks are held.
+func (e *Engine) detachInteractivePreview(key string) *streamPreview {
+	e.interactiveMu.Lock()
+	defer e.interactiveMu.Unlock()
+	state := e.interactiveStates[key]
+	if state == nil {
+		return nil
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if pref, ok := state.platform.(ThinkingProcessPreviewPreference); ok && pref.UseThinkingProcessPreview() && state.activePreview != nil {
+		return state.activePreview.detachForFinal()
+	}
+	return nil
+}
+
+func (e *Engine) replyAfterPreview(p Platform, replyCtx any, preview *streamPreview, text string) {
+	if preview == nil {
+		e.reply(p, replyCtx, text)
+		return
+	}
+	preview.deliverFinal(text, "", func(_ Platform, _ any, text string) error {
+		return e.replyWithError(p, replyCtx, text)
+	}, e.i18n.T(MsgFinalDeliveryFailed))
 }
 
 // cmdCancel stops the current execution and starts a fresh session.
@@ -9120,6 +9199,8 @@ func (e *Engine) cmdCancel(p Platform, msg *Message) {
 	}
 
 	slog.Info("cmdCancel: stopping execution and creating new session", "session_key", msg.SessionKey)
+
+	preview := e.detachInteractivePreview(interactiveKey)
 
 	// Stop the current execution (like /stop)
 	stopped := e.stopInteractiveSession(interactiveKey, p, msg.ReplyCtx)
@@ -9137,7 +9218,7 @@ func (e *Engine) cmdCancel(p Platform, msg *Message) {
 	// Create a new session (like /new)
 	sessions.NewSession(msg.SessionKey, "")
 
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSessionCancelled))
+	e.replyAfterPreview(p, msg.ReplyCtx, preview, e.i18n.T(MsgSessionCancelled))
 }
 
 func (e *Engine) stopInteractiveSession(sessionKey string, quietPlatform Platform, quietReplyCtx any) bool {
@@ -9163,6 +9244,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	pending := state.pending
 	state.pending = nil
 	agentSession := state.agentSession
+	preview := state.activePreview
 	state.mu.Unlock()
 
 	// If the agent session supports graceful turn cancellation (e.g. ACP),
@@ -9173,6 +9255,9 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		// Don't markStopped — the session is still usable.
 		// Don't delete from interactiveStates — keep it alive.
 		e.interactiveMu.Unlock()
+		if preview != nil {
+			preview.discard()
+		}
 
 		if pending != nil {
 			pending.resolve()
@@ -9214,6 +9299,9 @@ normalCleanup:
 	state.markStopped()
 	delete(e.interactiveStates, sessionKey)
 	e.interactiveMu.Unlock()
+	if preview != nil {
+		preview.discard()
+	}
 
 	if pending != nil {
 		pending.resolve()

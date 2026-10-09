@@ -3111,3 +3111,57 @@ func TestCUJ_P2P2_ModelChangeIsLocalAndPersistent(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// Three user requests share a live session; requests 2 and 3 arrive while the
+// first is busy. Every final answer must precede its own recall, including queued turns.
+func TestCUJ_PR1_PreviewRecallAfterQueuedAnswers(t *testing.T) {
+	p := &finalOrderPlatform{failDeletes: 1}
+	s := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 3)}
+	e := newFinalOrderEngine(t, p, &controllableAgent{nextSession: s})
+	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
+	key := "order:queued"
+	for turn := 1; turn <= 3; turn++ {
+		e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), MessageID: fmt.Sprintf("m%d", turn), Content: fmt.Sprintf("request %d", turn), ReplyCtx: fmt.Sprintf("ctx%d", turn)})
+		if turn == 1 {
+			select {
+			case <-s.sent:
+			case <-time.After(3 * time.Second):
+				t.Fatal("first prompt missing")
+			}
+		}
+	}
+	for turn := 1; turn <= 3; turn++ {
+		if turn > 1 {
+			select {
+			case <-s.sent:
+			case <-time.After(3 * time.Second):
+				t.Fatal("queued prompt missing")
+			}
+		}
+		s.events <- Event{Type: EventResult, Content: fmt.Sprintf("answer %d", turn), Done: true}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for e.sessions.GetOrCreateActive(key).Busy() {
+		if time.Now().After(deadline) {
+			t.Fatal("queue hung")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	calls := p.snapshot()
+	var finals []string
+	deletes := 0
+	for _, call := range calls {
+		if strings.HasPrefix(call, "delete:") {
+			deletes++
+		}
+		if strings.HasPrefix(call, "send:answer ") {
+			if deletes != len(finals) {
+				t.Fatalf("answer did not precede its recall: %v", calls)
+			}
+			finals = append(finals, call)
+		}
+	}
+	if len(finals) != 3 || deletes != 3 || calls[len(calls)-1] != "delete:card-3" {
+		t.Fatal(calls)
+	}
+}
