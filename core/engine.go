@@ -8784,7 +8784,7 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 	}
 
 	switcher, ok := agent.(ReasoningEffortSwitcher)
-	if !ok {
+	if !ok || len(switcher.AvailableReasoningEfforts()) == 0 {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgReasoningNotSupported))
 		return
 	}
@@ -11948,7 +11948,7 @@ func (e *Engine) renderModelSwitchResultCard(target string, err error) *Card {
 
 func (e *Engine) renderReasoningCard() *Card {
 	switcher, ok := e.agent.(ReasoningEffortSwitcher)
-	if !ok {
+	if !ok || len(switcher.AvailableReasoningEfforts()) == 0 {
 		return e.simpleCard(e.i18n.T(MsgCardTitleReasoning), "orange", e.i18n.T(MsgReasoningNotSupported))
 	}
 

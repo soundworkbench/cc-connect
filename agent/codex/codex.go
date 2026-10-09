@@ -159,6 +159,8 @@ func normalizeReasoningEffort(raw string) string {
 		return "high"
 	case "xhigh", "x-high", "very-high":
 		return "xhigh"
+	case "max", "ultra":
+		return strings.ToLower(strings.TrimSpace(raw))
 	default:
 		return ""
 	}
@@ -206,7 +208,17 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "xhigh"}
+	model := a.GetModel()
+	a.mu.RLock()
+	home := a.codexHome
+	a.mu.RUnlock()
+	if home == "" {
+		home, _ = resolveCodexHome(nil)
+	}
+	if levels := cachedReasoningEfforts(home, model); len(levels) > 0 {
+		return levels
+	}
+	return modelReasoningEfforts(model)
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {

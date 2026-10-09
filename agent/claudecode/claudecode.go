@@ -283,6 +283,8 @@ func normalizeEffort(raw string) string {
 		return "medium"
 	case "high":
 		return "high"
+	case "xhigh", "x-high":
+		return "xhigh"
 	case "max":
 		return "max"
 	default:
@@ -353,7 +355,7 @@ func (a *Agent) GetReasoningEffort() string {
 }
 
 func (a *Agent) AvailableReasoningEfforts() []string {
-	return []string{"low", "medium", "high", "max"}
+	return modelReasoningEfforts(a.GetModel())
 }
 
 func (a *Agent) configuredModels() []core.ModelOption {
