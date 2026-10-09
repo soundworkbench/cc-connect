@@ -634,7 +634,7 @@ func (s *appServerSession) handleApprovalRequest(rawID json.RawMessage, method s
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
+	s.flushPendingAsProgress()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
@@ -681,7 +681,7 @@ func (s *appServerSession) handlePermissionsApproval(rawID json.RawMessage, para
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
+	s.flushPendingAsProgress()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
@@ -749,7 +749,7 @@ func (s *appServerSession) handleRequestUserInput(rawID json.RawMessage, paramsR
 	s.pendingApprovals[requestID] = ch
 	s.approvalsMu.Unlock()
 
-	s.flushPendingAsThinking()
+	s.flushPendingAsProgress()
 	s.emit(core.Event{
 		Type:         core.EventPermissionRequest,
 		RequestID:    requestID,
@@ -1223,12 +1223,12 @@ func (s *appServerSession) handleItemStarted(item map[string]any) {
 		return
 	}
 
-	s.flushPendingAsThinking()
+	s.flushPendingAsProgress()
 
 	switch itemType {
 	case "commandExecution":
 		command, _ := item["command"].(string)
-		s.emit(core.Event{Type: core.EventToolUse, ProgressID: codexProgressID(item), ToolName: "Bash", ToolInput: command})
+		s.emit(core.Event{Type: core.EventToolUse, ProgressID: codexProgressID(item), ToolName: "Bash", ToolInput: command, Metadata: map[string]any{"public_tool_progress": codexCommandProgress(command)}})
 
 	case "mcpToolCall":
 		server, _ := item["server"].(string)
@@ -1623,7 +1623,7 @@ func (s *appServerSession) turnCompletionError(notif turnNotification) error {
 	return &core.UserMessageError{Key: key, Args: []any{detail}}
 }
 
-func (s *appServerSession) flushPendingAsThinking() {
+func (s *appServerSession) flushPendingAsProgress() {
 	s.stateMu.Lock()
 	msgs := append([]string(nil), s.pendingMsgs...)
 	s.pendingMsgs = s.pendingMsgs[:0]
@@ -1631,7 +1631,7 @@ func (s *appServerSession) flushPendingAsThinking() {
 
 	for _, text := range msgs {
 		if strings.TrimSpace(text) != "" {
-			s.emit(core.Event{Type: core.EventThinking, Content: text})
+			s.emit(core.Event{Type: core.EventProgress, Content: text})
 		}
 	}
 }

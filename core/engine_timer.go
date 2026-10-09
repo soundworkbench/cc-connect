@@ -104,7 +104,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 					desc = truncateStr(job.Prompt, 40)
 				}
 			}
-			e.send(targetPlatform, replyCtx, fmt.Sprintf("⏰ %s", desc))
+			e.send(targetPlatform, replyCtx, scheduledStartNotice(desc))
 		}
 	}
 

@@ -435,8 +435,8 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	}
 }
 
-// flushPendingAsThinking emits all buffered agent_messages as EventThinking.
-func (cs *codexSession) flushPendingAsThinking() {
+// flushPendingAsProgress emits public interim messages through the Claude progress path.
+func (cs *codexSession) flushPendingAsProgress() {
 	if cs.ctx.Err() != nil {
 		return
 	}
@@ -444,7 +444,7 @@ func (cs *codexSession) flushPendingAsThinking() {
 		if cs.ctx.Err() != nil {
 			return
 		}
-		evt := core.Event{Type: core.EventThinking, Content: text}
+		evt := core.Event{Type: core.EventProgress, Content: text}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
@@ -494,13 +494,13 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 		return
 	}
 
-	// Any non-message item is a tool use; flush pending messages as thinking first.
-	cs.flushPendingAsThinking()
+	// A following tool classifies pending public messages as progress, not final text.
+	cs.flushPendingAsProgress()
 
 	switch itemType {
 	case "command_execution":
 		command, _ := item["command"].(string)
-		evt := core.Event{Type: core.EventToolUse, ProgressID: codexProgressID(item), ToolName: "Bash", ToolInput: command}
+		evt := core.Event{Type: core.EventToolUse, ProgressID: codexProgressID(item), ToolName: "Bash", ToolInput: command, Metadata: map[string]any{"public_tool_progress": codexCommandProgress(command)}}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
