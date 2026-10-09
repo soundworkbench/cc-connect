@@ -409,7 +409,8 @@ type Agent interface {
 // AgentSessionSteerer optionally accepts input into the active turn.
 // true,nil means acknowledged; false,nil means definitely not accepted and safe
 // to queue. Any error means delivery is uncertain and MUST NOT be auto-replayed.
-// Implementations must bound the call and must not start a second turn.
+// Implementations must bound the call and must not expose a second Engine turn.
+// Backends with queued streaming input must coalesce their native result frames.
 type AgentSessionSteerer interface {
 	Steer(prompt, messageID string, images []ImageAttachment, files []FileAttachment) (bool, error)
 }

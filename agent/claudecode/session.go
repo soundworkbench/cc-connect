@@ -77,6 +77,10 @@ type claudeSession struct {
 	// commentary; a terminal result identifies the final answer. Do not reuse
 	// EventThinking: deployments can hide private reasoning independently.
 	pendingText []string
+
+	inputMu     sync.Mutex
+	inputs      map[string]*claudeInput
+	inputActive bool
 }
 
 // StartupWarning implements core.StartupWarner. Returns a non-empty string
@@ -756,6 +760,7 @@ func (cs *claudeSession) flushPublicText(kind core.EventType) {
 }
 
 func (cs *claudeSession) handleUser(raw map[string]any) {
+	cs.acknowledgeInput(raw)
 	msg, ok := raw["message"].(map[string]any)
 	if !ok {
 		return
@@ -865,6 +870,10 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	// Done=true would make the engine's processInteractiveEvents return
 	// early and drop the rest of the turn (issue #481).
 	isCompaction := isCompactionResult(raw)
+	inputPending := false
+	if !isCompaction {
+		inputPending = cs.completeInputs(raw)
+	}
 	if isCompaction {
 		slog.Info("claudeSession: mid-turn compaction event; continuing turn", "subtype", resultSubtype(raw))
 	} else {
@@ -901,7 +910,7 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		Type:                     core.EventResult,
 		Content:                  content,
 		SessionID:                cs.CurrentSessionID(),
-		Done:                     !isCompaction,
+		Done:                     !isCompaction && !inputPending,
 		InputTokens:              inputTokens,
 		OutputTokens:             outputTokens,
 		CacheCreationInputTokens: cacheCreationTokens,
@@ -1002,16 +1011,16 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 // Images are sent as base64 in the multimodal content array.
 // Files are saved to local temp files and referenced in the text prompt
 // so Claude Code can read them with its built-in tools.
-func (cs *claudeSession) Send(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
+func (cs *claudeSession) buildUserInput(prompt string, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (map[string]any, error) {
 	if !cs.alive.Load() {
-		return fmt.Errorf("session process is not running")
+		return nil, fmt.Errorf("session process is not running")
 	}
 
 	if len(images) == 0 && len(files) == 0 {
-		return cs.writeJSON(map[string]any{
+		return map[string]any{
 			"type":    "user",
 			"message": map[string]any{"role": "user", "content": prompt},
-		})
+		}, nil
 	}
 
 	attachDir := filepath.Join(cs.workDir, ".cc-connect", "attachments")
@@ -1066,10 +1075,10 @@ func (cs *claudeSession) Send(prompt string, messageID string, images []core.Ima
 	}
 	parts = append(parts, map[string]any{"type": "text", "text": textPart})
 
-	return cs.writeJSON(map[string]any{
+	return map[string]any{
 		"type":    "user",
 		"message": map[string]any{"role": "user", "content": parts},
-	})
+	}, nil
 }
 
 func extFromMime(mime string) string {
