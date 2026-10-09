@@ -16,6 +16,11 @@ func (e *Engine) SetCronScheduler(cs *CronScheduler) {
 // It finds the platform that owns the session key, reconstructs a reply context,
 // and processes the message as if the user sent it.
 func (e *Engine) ExecuteCronJob(job *CronJob) error {
+	done, ok := e.trackWork(false)
+	if !ok {
+		return fmt.Errorf("engine is shutting down")
+	}
+	defer done()
 	e.hooks.Emit(HookEvent{
 		Event:      HookEventCronTriggered,
 		SessionKey: job.SessionKey,
@@ -132,6 +137,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		scheduledPrompt:  true,
 		scheduledInputID: "cron:" + job.ID + ":" + fmt.Sprint(time.Now().UnixNano()),
 		SessionKey:       sessionKey,
+		replySessionKey:  runSessionKey,
 		Platform:         platformName,
 		UserID:           "cron",
 		UserName:         "cron",

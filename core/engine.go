@@ -507,6 +507,8 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
+	replySessionKey   string
+	restored          *queueRecord
 	scheduledPrompt   bool
 	scheduledInputID  string
 	steerRetry        bool
@@ -528,6 +530,10 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
+	queueReady               <-chan struct{}
+	queueKey                 string
+	queueSessionID           string
+	queueRetired             bool
 	agentSession             AgentSession
 	platform                 Platform
 	replyCtx                 any
@@ -1438,6 +1444,9 @@ func (e *Engine) ActiveSessionKeys() []string {
 }
 
 func (e *Engine) Start() error {
+	if err := e.loadQueues(); err != nil {
+		return err
+	}
 	var startErrs []error
 	readyCount := 0
 	pendingCount := 0
@@ -1486,11 +1495,16 @@ func (e *Engine) Stop() error {
 	e.stopping = true
 	e.platformLifecycleMu.Unlock()
 
+	queueErr := e.flushQueues()
+
 	// Let accepted turns finish delivery before canceling the shared context.
 	// In particular, a generated final reply must survive a simultaneous restart.
 	if !e.waitForAcceptedWork(25 * time.Second) {
 		slog.Warn("shutdown drain timed out; active turns will be interrupted")
 		e.notifyShutdownInterrupted()
+	}
+	if err := e.flushQueues(); err != nil {
+		queueErr = errors.Join(queueErr, err)
 	}
 	e.cancel()
 
@@ -1500,6 +1514,9 @@ func (e *Engine) Stop() error {
 
 	// Stop platforms after cancellation so they can unwind against the closed context.
 	var errs []error
+	if queueErr != nil {
+		errs = append(errs, queueErr)
+	}
 	for _, p := range e.platforms {
 		if err := p.Stop(); err != nil {
 			errs = append(errs, fmt.Errorf("stop platform %s: %w", p.Name(), err))
@@ -1515,9 +1532,12 @@ func (e *Engine) Stop() error {
 	e.interactiveMu.Unlock()
 
 	for key, state := range states {
-		if state.agentSession != nil {
+		state.mu.Lock()
+		as := state.agentSession
+		state.mu.Unlock()
+		if as != nil {
 			slog.Debug("engine.Stop: closing agent session", "session", key)
-			state.agentSession.Close()
+			as.Close()
 		}
 	}
 
@@ -1572,6 +1592,7 @@ func (e *Engine) onPlatformReady(p Platform) {
 	}
 	slog.Info("platform ready", "project", e.name, "platform", p.Name())
 	e.initPlatformCapabilities(p)
+	e.resumeQueuesForPlatform(p)
 }
 
 func (e *Engine) markPlatformReady(p Platform) bool {
@@ -1730,7 +1751,7 @@ func (e *Engine) removeQueuedMessageByID(messageID string) (string, bool) {
 			state.mu.Unlock()
 			continue
 		}
-		filtered := pending[:0]
+		filtered := make([]queuedMessage, 0, len(pending))
 		removed := false
 		for _, queued := range pending {
 			if queued.messageID == messageID {
@@ -1741,6 +1762,12 @@ func (e *Engine) removeQueuedMessageByID(messageID string) (string, bool) {
 		}
 		if removed {
 			state.pendingMessages = filtered
+			if err := e.persistQueueLocked(state); err != nil {
+				state.pendingMessages = pending
+				slog.Error("queue: recall removal failed", "error", err)
+				state.mu.Unlock()
+				return "", false
+			}
 			state.mu.Unlock()
 			return sessionKey, true
 		}
@@ -2193,7 +2220,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Ensure an interactiveState entry exists before taking the session lock.
 	// Without this, concurrent messages can observe the session as busy during
 	// startup but still find no state to queue into.
-	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
+	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx, session)
+	e.setQueuedWorkspace(interactiveKey, resolvedWorkspace)
 	if !session.TryLock() {
 		if e.stopCurrentMessageIfRecalled(interactiveKey) {
 			if e.waitForSessionLock(session, recalledStopLockWait) {
@@ -2221,6 +2249,22 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 sessionLocked:
+	e.interactiveMu.Lock()
+	queuedState := e.interactiveStates[interactiveKey]
+	hasPending := false
+	if queuedState != nil {
+		queuedState.mu.Lock()
+		hasPending = len(queuedState.pendingMessages) > 0
+		queuedState.mu.Unlock()
+	}
+	e.interactiveMu.Unlock()
+	if hasPending {
+		e.deliverMessageForBusySession(p, msg, interactiveKey, session, sessions)
+		if !e.launchAcceptedWork(func() { e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace) }) {
+			session.Unlock()
+		}
+		return
+	}
 	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
 		session = rotated
 	}
@@ -2234,8 +2278,11 @@ sessionLocked:
 	// processor so messages arriving during session startup can be queued
 	// instead of dropped (issue #565). This is still needed after idle auto-
 	// reset because cleanupInteractiveState may remove the early placeholder.
-	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx)
+	e.ensureInteractiveStateForQueueing(interactiveKey, p, msg.ReplyCtx, session)
 	e.noteUserMessageAccepted(interactiveKey, msg.UserMessageTimeMs)
+	e.interactiveMu.Lock()
+	msg.executionState = e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
 	runMessageAccepted(msg)
 	slog.Debug("user message accepted for processing",
 		"platform", msg.Platform,
@@ -2335,11 +2382,20 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 // deliverMessageForBusySession serializes steering and queue admission with the
 // turn drain. Acknowledged steering belongs to this turn, not a second EventResult.
 func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interactiveKey string, session *Session, sessions *SessionManager) bool {
+	handled, err := e.admitBusyMessage(p, msg, interactiveKey, session, sessions)
+	if err != nil {
+		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+		return true
+	}
+	return handled
+}
+
+func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey string, session *Session, sessions *SessionManager) (bool, error) {
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
 	if !hasState || state == nil {
 		e.interactiveMu.Unlock()
-		return false
+		return false, nil
 	}
 	// Keep interactiveMu until state.mu is held. Otherwise a starting session can
 	// replace a placeholder state between lookup and queue append, losing the
@@ -2350,8 +2406,8 @@ func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interact
 
 	// Allow queueing when agentSession is nil (session is starting up,
 	// issue #565). Only reject if the session was established and died.
-	if state.agentSession != nil && !state.agentSession.Alive() {
-		return false
+	if state.stopped || state.queueRetired || (state.agentSession != nil && !state.agentSession.Alive()) {
+		return false, nil
 	}
 
 	// Only queue metadata — do NOT send to agent stdin yet.
@@ -2362,32 +2418,37 @@ func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interact
 	if e.isStaleUserMessageLocked(state, msg.UserMessageTimeMs) {
 		snap := userMessageWatermarkSnapshotLocked(state)
 		e.logStaleUserMessageDropped("reject_before_queue", msg, interactiveKey, snap)
-		return true
+		return true, nil
 	}
 	for _, q := range state.pendingMessages {
 		if (msg.MessageID != "" && q.messageID == msg.MessageID) || (msg.scheduledInputID != "" && q.scheduledInputID == msg.scheduledInputID) {
-			return true
+			return true, nil
 		}
 	}
 	if (msg.MessageID != "" && state.steerMessageIDs[msg.MessageID]) || (msg.scheduledInputID != "" && state.steerMessageIDs[msg.scheduledInputID]) {
-		return true
+		return true, nil
 	}
 	// Retry temporarily unavailable steering before admitting newer input.
 	e.steerQueuedMessagesLocked(state, session, sessions)
 	// Do not overtake earlier input; startup queues drain after Send is ready.
 	if len(state.pendingMessages) == 0 && e.trySteerMessageLocked(state, p, msg, session, sessions) {
-		return true
+		return true, nil
 	}
 	if !msg.scheduledPrompt && len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
-		return true // handled: queue-full reply sent
+		return true, nil // handled: queue-full reply sent
+	}
+	state.queueKey = interactiveKey
+	if session != nil && state.queueSessionID == "" {
+		state.queueSessionID = session.ID
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
+		replySessionKey:   msg.replySessionKey,
 		scheduledPrompt:   msg.scheduledPrompt,
 		scheduledInputID:  msg.scheduledInputID,
 		modeOverride:      msg.ModeOverride,
-		steerRetry:        !msg.scheduledPrompt && msg.ModeOverride == "" && !state.steerWriteFailed && len(msg.Files) == 0,
+		steerRetry:        e.dataDir == "" && !msg.scheduledPrompt && msg.ModeOverride == "" && !state.steerWriteFailed && len(msg.Files) == 0,
 		messageID:         msg.MessageID,
 		platform:          p,
 		replyCtx:          msg.ReplyCtx,
@@ -2402,6 +2463,11 @@ func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interact
 		channelKey:        msg.ChannelKey,
 		userMessageTimeMs: msg.UserMessageTimeMs,
 	})
+	if err := e.persistQueueLocked(state); err != nil {
+		state.pendingMessages = state.pendingMessages[:len(state.pendingMessages)-1]
+		slog.Error("queue: admission failed", "session", interactiveKey, "error", err)
+		return false, err
+	}
 	if msg.scheduledInputID != "" {
 		if state.steerMessageIDs == nil {
 			state.steerMessageIDs = make(map[string]bool)
@@ -2425,7 +2491,7 @@ func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interact
 		"queue_depth", queueDepth,
 	)
 	if msg.scheduledPrompt {
-		return true
+		return true, nil
 	}
 	if state.steerWriteFailed {
 		state.steerWriteFailed = false
@@ -2433,7 +2499,7 @@ func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interact
 	} else {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
 	}
-	return true
+	return true, nil
 }
 
 // ensureInteractiveStateForQueueing creates a placeholder interactiveState
@@ -2441,16 +2507,23 @@ func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interact
 // is still starting up to be queued instead of dropped (issue #565).
 // The placeholder has agentSession==nil; getOrCreateInteractiveStateWith will
 // replace it with a fully initialized state once the agent process is spawned.
-func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, replyCtx any) {
+func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, replyCtx any, session ...*Session) {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 	if _, ok := e.interactiveStates[key]; !ok {
 		e.interactiveStates[key] = &interactiveState{
+			queueKey:         key,
 			platform:         p,
 			replyCtx:         replyCtx,
 			eventsNeedResync: true,
 		}
 	}
+	state := e.interactiveStates[key]
+	state.mu.Lock()
+	if len(session) > 0 && state.queueSessionID == "" {
+		state.queueSessionID = session[0].ID
+	}
+	state.mu.Unlock()
 }
 
 // drainOrphanedQueue is called when a message was queued but the drain loop
@@ -2469,12 +2542,28 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	state, hasState := e.interactiveStates[interactiveKey]
 	e.interactiveMu.Unlock()
 
-	if !hasState || state == nil || state.agentSession == nil || !state.agentSession.Alive() {
-		if hasState && state != nil {
-			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
-		}
+	if !hasState || state == nil {
 		return
 	}
+	state.mu.Lock()
+	if state.stopped || state.queueRetired || (state.queueSessionID != "" && state.queueSessionID != session.ID) {
+		state.mu.Unlock()
+		return
+	}
+	needsStart := state.agentSession == nil || !state.agentSession.Alive()
+	if needsStart {
+		q, ok := e.popQueuedMessageLocked(state)
+		state.mu.Unlock()
+		if !ok {
+			return
+		}
+		unlocked = true // processInteractiveMessageWith takes ownership of the lock.
+		msg := queuedInput(q)
+		msg.executionState = state
+		e.processInteractiveMessageWith(q.platform, msg, session, agent, sessions, interactiveKey, workspaceDir, q.msgSessionKey)
+		return
+	}
+	state.mu.Unlock()
 
 	// Stop unsolicited reader before draining — drainPendingMessages reads
 	// from Events() and we must not have concurrent readers.
@@ -2956,7 +3045,10 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		state = e.interactiveStates[interactiveKey]
 		e.interactiveMu.Unlock()
 	} else {
-		state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+		state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg.executionState)
+	}
+	if state == nil || state.isStopped() {
+		return
 	}
 
 	e.installBackgroundTurnGate(state, session, interactiveKey)
@@ -2989,7 +3081,10 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
 
-	if state.agentSession == nil {
+	state.mu.Lock()
+	turnAgentSession := state.agentSession
+	state.mu.Unlock()
+	if turnAgentSession == nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
 		return
 	}
@@ -3004,7 +3099,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// Apply per-message permission mode override (e.g. cron jobs with mode = "bypassPermissions").
 	// Defer restores only when SetLiveMode succeeds for the override.
 	if msg.ModeOverride != "" {
-		if switcher, ok := state.agentSession.(LiveModeSwitcher); ok {
+		if switcher, ok := turnAgentSession.(LiveModeSwitcher); ok {
 			if switcher.SetLiveMode(msg.ModeOverride) {
 				defer func() {
 					defaultMode := "default"
@@ -3042,7 +3137,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	needResync := state.eventsNeedResync
 	state.mu.Unlock()
 	if needResync {
-		drainEvents(state.agentSession.Events())
+		drainEvents(turnAgentSession.Events())
 	}
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
@@ -3052,7 +3147,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.currentMessageID = msg.MessageID
 	state.fromVoice = msg.FromVoice
 	state.sideText = ""
-	as := state.agentSession // capture under lock to avoid race with cleanup
+	as := turnAgentSession // capture under lock to avoid race with cleanup
 	state.mu.Unlock()
 
 	// Run Send concurrently with processInteractiveEvents. Some agents block inside
@@ -3235,6 +3330,11 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 		return
 	}
 	existing.mu.Lock()
+	newState.queueKey = existing.queueKey
+	newState.queueSessionID = existing.queueSessionID
+	newState.queueReady = existing.queueReady
+	newState.workspaceDir = existing.workspaceDir
+	existing.queueRetired = true
 	newState.steerMessageIDs = existing.steerMessageIDs
 	if len(existing.pendingMessages) > 0 {
 		newState.pendingMessages = existing.pendingMessages
@@ -3245,11 +3345,14 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, expected ...*interactiveState) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
 	state, ok := e.interactiveStates[sessionKey]
+	if len(expected) > 0 && expected[0] != nil && (state != expected[0] || state.isStopped()) {
+		return expected[0]
+	}
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
 		// Verify the running agent session matches the current active session.
 		// After /new or /switch the active session changes, but the old agent
@@ -3328,7 +3431,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
 		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
 		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
+		newState.queueKey = sessionKey
 		state = newState
+		state.queueKey = sessionKey
+		state.queueSessionID = session.ID
 		e.interactiveStates[sessionKey] = state
 		return state
 	}
@@ -3393,6 +3499,8 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
+			state.queueKey = sessionKey
+			state.queueSessionID = session.ID
 			e.interactiveStates[sessionKey] = state
 			return state
 		}
@@ -3436,6 +3544,8 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	}
 	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 	state = newState
+	state.queueKey = sessionKey
+	state.queueSessionID = session.ID
 	e.interactiveStates[sessionKey] = state
 
 	slog.Info("session spawned", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "is_resume", isResume, "elapsed", startElapsed)
@@ -4046,6 +4156,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}()
 
 	state.mu.Lock()
+	turnAgentSession := state.agentSession
+	if turnAgentSession == nil || state.stopped {
+		state.mu.Unlock()
+		return
+	}
 	workspaceDir := state.workspaceDir
 	replyAgent := state.agent
 	if replyAgent == nil {
@@ -4135,7 +4250,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			restoreQueuedMode()
 		}
 	}()
-	events := state.agentSession.Events()
+	events := turnAgentSession.Events()
 	stopCh := state.stopSignal()
 	for {
 		var event Event
@@ -4163,7 +4278,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					stopTyping()
 					stopTyping = nil
 				}
-				if state.agentSession == nil || !state.agentSession.Alive() {
+				if turnAgentSession == nil || !turnAgentSession.Alive() {
 					e.cleanupInteractiveState(sessionKey, state)
 				}
 				state.mu.Lock()
@@ -4212,7 +4327,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		graceLoop:
 			for {
 				select {
-				case evt, ok := <-state.agentSession.Events():
+				case evt, ok := <-turnAgentSession.Events():
 					if !ok || (ok && evt.Done) {
 						// Agent exited cleanly; state is intact, resume will work.
 						slog.Info("agent exited gracefully after max_turn_time stop signal",
@@ -4331,7 +4446,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					})
 				}
 				if cardMessageID == nil {
-					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, turnAgentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 						if err != nil {
@@ -4341,7 +4456,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				} else if updater, ok := p.(MessageUpdater); ok {
-					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusThinking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, turnAgentSession, state.workspaceDir))
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update thinking card", "platform", p.Name(), "error", err)
 					}
@@ -4447,7 +4562,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					Summary: truncateIf(event.ToolInput, e.display.ToolMaxLen),
 				})
 				if cardMessageID == nil {
-					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, turnAgentSession, state.workspaceDir))
 					if starter, ok := p.(PreviewStarter); ok {
 						handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 						if err != nil {
@@ -4457,7 +4572,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						}
 					}
 				} else if updater, ok := p.(MessageUpdater); ok {
-					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+					card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, turnAgentSession, state.workspaceDir))
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 						slog.Debug("rich card: failed to update tool card", "platform", p.Name(), "error", err)
 					}
@@ -4580,7 +4695,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if hasRichCard {
 						toolSteps = mergeRichToolResult(toolSteps, event, result, e.display.ToolMaxLen)
 						if cardMessageID == nil {
-							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, turnAgentSession, state.workspaceDir))
 							if starter, ok := p.(PreviewStarter); ok {
 								handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 								if err != nil {
@@ -4590,7 +4705,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 								}
 							}
 						} else if updater, ok := p.(MessageUpdater); ok {
-							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+							card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, turnAgentSession, state.workspaceDir))
 							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 								slog.Debug("rich card: failed to update tool-result card", "platform", p.Name(), "error", err)
 							}
@@ -4668,7 +4783,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					if len(textParts) == 0 {
 						if hasRichCard {
 							if cardMessageID == nil && !silentHold {
-								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, turnAgentSession, state.workspaceDir))
 								if starter, ok := p.(PreviewStarter); ok {
 									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 									if err != nil {
@@ -4692,7 +4807,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 							// here using the accumulated partialText so the card emerges
 							// with the post-prefix content already in body.
 							if cardMessageID == nil {
-								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+								card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, turnAgentSession, state.workspaceDir))
 								if starter, ok := p.(PreviewStarter); ok {
 									handle, err := starter.SendPreviewStart(e.ctx, replyCtx, card)
 									if err != nil {
@@ -4727,7 +4842,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 									}
 								}
 								if !streamed {
-									card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, state.agentSession, state.workspaceDir))
+									card := buildResolvedRichCard(CardStatusWorking, "", toolSteps, partialText, true, e.composeRichStatusFooter(true, turnStart, e.agent, turnAgentSession, state.workspaceDir))
 									if updater, ok := p.(MessageUpdater); ok {
 										if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err == nil {
 											lastRichCardUpdate = time.Now()
@@ -4784,7 +4899,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if autoApprove && !isAskQuestion {
 				slog.Debug("auto-approving (approve-all)", "request_id", event.RequestID, "tool", event.ToolName)
-				_ = state.agentSession.RespondPermission(event.RequestID, PermissionResult{
+				_ = turnAgentSession.RespondPermission(event.RequestID, PermissionResult{
 					Behavior:     "allow",
 					UpdatedInput: event.ToolInputRaw,
 				})
@@ -4884,11 +4999,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 			cp.Finalize(ProgressCardStateCompleted)
-			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
+			// Use turnAgentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id
 			// to not be persisted to disk, breaking session resume on next startup.
-			if state != nil && state.agentSession != nil {
-				if currentID := state.agentSession.CurrentSessionID(); currentID != "" {
+			if state != nil && turnAgentSession != nil {
+				if currentID := turnAgentSession.CurrentSessionID(); currentID != "" {
 					wasEmpty := session.GetAgentSessionID() == ""
 					if session.GetAgentSessionID() != currentID {
 						session.SetAgentSessionID(currentID, e.agent.Name())
@@ -4995,7 +5110,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			var statusFooter string
 			var legacyStatusFooter string
 			if !isSilent {
-				footerContext := replyFooterContextText(replyFooterSessionContextUsage(state.agentSession), e.i18n)
+				footerContext := replyFooterContextText(replyFooterSessionContextUsage(turnAgentSession), e.i18n)
 				if e.showContextIndicator {
 					if sdkPlausible {
 						if text := contextIndicatorText(event.InputTokens); text != "" {
@@ -5005,9 +5120,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						footerContext = fmt.Sprintf("[ctx: ~%d%%]", selfPct)
 					}
 				}
-				if status := e.buildClaudeStatusLineFooter(replyAgent, state.agentSession, workspaceDir); status != "" {
+				if status := e.buildClaudeStatusLineFooter(replyAgent, turnAgentSession, workspaceDir); status != "" {
 					statusFooter = status
-				} else if footer := e.buildReplyFooter(replyAgent, state.agentSession, workspaceDir, footerContext); footer != "" {
+				} else if footer := e.buildReplyFooter(replyAgent, turnAgentSession, workspaceDir, footerContext); footer != "" {
 					statusFooter = footer
 					legacyStatusFooter = footer
 				}
@@ -5100,7 +5215,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						silentBody = strings.TrimRight(stripped, " \t\r\n")
 					}
 					if silentBody != "" || len(toolSteps) > 0 {
-						card := buildResolvedRichCard(CardStatusDone, "", toolSteps, silentBody, false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
+						card := buildResolvedRichCard(CardStatusDone, "", toolSteps, silentBody, false, e.composeRichStatusFooter(false, turnStart, e.agent, turnAgentSession, state.workspaceDir))
 						if updater, ok := p.(MessageUpdater); ok {
 							if err := updater.UpdateMessage(e.ctx, cardMessageID, card); err != nil {
 								slog.Debug("rich card: failed to finalize card on silent reply", "platform", p.Name(), "error", err)
@@ -5121,7 +5236,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				if splitter, ok := p.(MarkdownTableSplitter); ok {
 					parts = splitter.SplitMarkdownByTables(fullResponse, 5)
 				}
-				richStatusFooter := e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir)
+				richStatusFooter := e.composeRichStatusFooter(false, turnStart, e.agent, turnAgentSession, state.workspaceDir)
 				if legacyStatusFooter != "" {
 					richStatusFooter = formatElapsed(time.Since(turnStart), false, e.i18n.currentLang()) + "\n" + legacyStatusFooter
 				}
@@ -5250,10 +5365,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Check for queued messages — if present, continue the event loop
 			// for the next turn instead of returning.
 			state.mu.Lock()
-			droppedStale := 0
-			for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
-				state.pendingMessages = state.pendingMessages[1:]
-				droppedStale++
+			if state.stopped || state.queueRetired || e.isShuttingDown() {
+				state.mu.Unlock()
+				return
+			}
+			droppedStale, err := e.discardStaleQueuedMessagesLocked(state)
+			if err != nil {
+				slog.Error("queue: stale removal failed", "error", err)
+				state.mu.Unlock()
+				return
 			}
 			if droppedStale > 0 {
 				slog.Info("dropped stale queued user messages after completed turn",
@@ -5262,8 +5382,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				)
 			}
 			if len(state.pendingMessages) > 0 {
-				queued := state.pendingMessages[0]
-				state.pendingMessages = state.pendingMessages[1:]
+				queued, ok := e.popQueuedMessageLocked(state)
+				if !ok {
+					state.mu.Unlock()
+					return
+				}
 				remainingQueue := len(state.pendingMessages)
 				state.platform = queued.platform
 				state.replyCtx = queued.replyCtx
@@ -5287,7 +5410,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// Drain stale events before starting the next turn. Between
 				// EventResult and Send(), the only buffered events would be
 				// stale leftovers (e.g. a deferred EventError from cmd.Wait()).
-				drainEvents(state.agentSession.Events())
+				drainEvents(turnAgentSession.Events())
 
 				if pendingSend != nil {
 					if err := <-pendingSend; err != nil {
@@ -5298,7 +5421,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				queuedPrompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
 				state.mu.Lock()
-				as := state.agentSession // capture under lock to avoid race with cleanup
+				as := turnAgentSession // capture under lock to avoid race with cleanup
 				state.mu.Unlock()
 
 				if restoreQueuedMode != nil {
@@ -5431,7 +5554,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			state.eventsNeedResync = true
 			state.mu.Unlock()
 			if hasRichCard && cardMessageID != nil {
-				errCard := buildResolvedRichCard(CardStatusError, "", toolSteps, partialText, false, e.composeRichStatusFooter(false, turnStart, e.agent, state.agentSession, state.workspaceDir))
+				errCard := buildResolvedRichCard(CardStatusError, "", toolSteps, partialText, false, e.composeRichStatusFooter(false, turnStart, e.agent, turnAgentSession, state.workspaceDir))
 				if updater, ok := p.(MessageUpdater); ok {
 					if err := updater.UpdateMessage(e.ctx, cardMessageID, errCard); err != nil {
 						slog.Debug("rich card: failed to update error card", "platform", p.Name(), "error", err)
@@ -5467,7 +5590,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Only drop queued messages if the agent session is dead.
 			// Some agents (e.g. Codex) emit EventError for per-turn failures
 			// while keeping the session alive for subsequent turns.
-			if state.agentSession == nil || !state.agentSession.Alive() {
+			if turnAgentSession == nil || !turnAgentSession.Alive() {
 				e.notifyDroppedQueuedMessages(state, event.Error)
 			}
 			return
@@ -5597,11 +5720,23 @@ func mergeRichToolResult(steps []ToolStep, event Event, result string, maxLen in
 // messages can no longer be delivered to the agent.
 func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason error) {
 	state.mu.Lock()
+	if state.queueRetired || e.isShuttingDown() {
+		state.mu.Unlock()
+		return
+	}
 	remaining := state.pendingMessages
 	state.pendingMessages = nil
+	if err := e.persistQueueLocked(state); err != nil {
+		state.pendingMessages = remaining
+		slog.Error("queue: discard failed", "error", err)
+		state.mu.Unlock()
+		return
+	}
 	state.mu.Unlock()
 	for _, q := range remaining {
-		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
+		if q.platform != nil {
+			e.send(q.platform, q.replyCtx, e.i18n.Tf(MsgQueuedMessageDropped, reason, truncateStr(q.content, 80)))
+		}
 	}
 }
 
@@ -5612,15 +5747,20 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string) bool {
 	for {
 		state.mu.Lock()
+		if state.stopped || state.queueRetired || e.isShuttingDown() {
+			state.mu.Unlock()
+			return false
+		}
 		if len(state.pendingMessages) == 0 {
 			session.Unlock()
 			state.mu.Unlock()
 			return true
 		}
-		droppedStale := 0
-		for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
-			state.pendingMessages = state.pendingMessages[1:]
-			droppedStale++
+		droppedStale, err := e.discardStaleQueuedMessagesLocked(state)
+		if err != nil {
+			slog.Error("queue: stale removal failed", "error", err)
+			state.mu.Unlock()
+			return false
 		}
 		if droppedStale > 0 {
 			slog.Info("dropped stale queued user messages while draining",
@@ -5633,8 +5773,11 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			state.mu.Unlock()
 			return true
 		}
-		queued := state.pendingMessages[0]
-		state.pendingMessages = state.pendingMessages[1:]
+		queued, ok := e.popQueuedMessageLocked(state)
+		if !ok {
+			state.mu.Unlock()
+			return false
+		}
 		state.platform = queued.platform
 		state.replyCtx = queued.replyCtx
 		state.currentMessageID = queued.messageID
@@ -9245,7 +9388,7 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	stopAndReply := func(key string) bool {
 		preview := e.detachInteractivePreview(key)
-		if !e.stopInteractiveSession(key, p, msg.ReplyCtx) {
+		if !e.stopInteractiveSessionPreservingQueue(key) {
 			return false
 		}
 		text := e.i18n.T(MsgExecutionStopped)
@@ -9369,6 +9512,9 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		} else {
 			state.mu.Lock()
 			state.pendingMessages = nil
+			if err := e.persistQueueLocked(state); err != nil {
+				slog.Error("queue: clear failed", "error", err)
+			}
 			state.mu.Unlock()
 		}
 
@@ -9413,6 +9559,9 @@ normalCleanup:
 	} else {
 		state.mu.Lock()
 		state.pendingMessages = nil
+		if err := e.persistQueueLocked(state); err != nil {
+			slog.Error("queue: clear failed", "error", err)
+		}
 		state.mu.Unlock()
 	}
 	e.closeAgentSessionAsync(sessionKey, agentSession)
@@ -11537,7 +11686,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 
 	case "/stop":
-		e.stopInteractiveSession(interactiveKey, nil, nil)
+		e.stopInteractiveSessionPreservingQueue(interactiveKey)
 
 	case "/heartbeat":
 		if e.heartbeatScheduler == nil {

@@ -10,10 +10,14 @@ import (
 // prompt belongs to the shared FIFO. Scheduler success means accepted for
 // processing, not a separately collected model result.
 func (e *Engine) admitScheduledPrompt(p Platform, msg *Message, session *Session, sessions *SessionManager, agent Agent, key, workspace string) (bool, error) {
-	e.ensureInteractiveStateForQueueing(key, p, msg.ReplyCtx)
+	e.ensureInteractiveStateForQueueing(key, p, msg.ReplyCtx, session)
+	e.setQueuedWorkspace(key, workspace)
 	for {
 		if !msg.admissionDeadline.IsZero() && time.Now().After(msg.admissionDeadline) {
 			return false, fmt.Errorf("local assistant admission timed out")
+		}
+		if e.isShuttingDown() {
+			return false, fmt.Errorf("engine is shutting down")
 		}
 		if e.ctx.Err() != nil {
 			return false, e.ctx.Err()
@@ -26,6 +30,23 @@ func (e *Engine) admitScheduledPrompt(p Platform, msg *Message, session *Session
 				e.interactiveStates[key] = state
 			}
 			state.mu.Lock()
+			if len(state.pendingMessages) > 0 {
+				state.mu.Unlock()
+				e.interactiveMu.Unlock()
+				handled, err := e.admitBusyMessage(p, msg, key, session, sessions)
+				if err != nil || !handled {
+					session.Unlock()
+					if err != nil {
+						return true, err
+					}
+					return true, fmt.Errorf("queue admission failed")
+				}
+				if !e.launchAcceptedWork(func() { e.drainOrphanedQueue(session, sessions, key, agent, workspace) }) {
+					session.Unlock()
+				}
+				return true, nil
+			}
+			msg.executionState = state
 			duplicate := state.steerMessageIDs[msg.scheduledInputID]
 			if !duplicate {
 				if state.steerMessageIDs == nil {
@@ -41,7 +62,11 @@ func (e *Engine) admitScheduledPrompt(p Platform, msg *Message, session *Session
 			}
 			return false, nil
 		}
-		if e.deliverMessageForBusySession(p, msg, key, session, sessions) {
+		handled, err := e.admitBusyMessage(p, msg, key, session, sessions)
+		if err != nil {
+			return false, err
+		}
+		if handled {
 			slog.Info("scheduled prompt accepted into session queue", "session", msg.SessionKey, "input_id", msg.scheduledInputID)
 			// The preceding owner can release the session between TryLock and enqueue.
 			if session.TryLock() {
