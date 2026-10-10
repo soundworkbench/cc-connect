@@ -1748,6 +1748,7 @@ func TestCUJ_C2_PlanModeRequiresApproval(t *testing.T) {
 // CUJ-C5 · /stop halts current turn but DOES NOT switch session.
 func TestCUJ_C5_StopKeepsSameSession(t *testing.T) {
 	t.Run("StopContinuesQueuedMessages", testStopContinuesQueuedMessages)
+	t.Run("StopDuringAcceptedStartup", testStopDuringAcceptedStartup)
 	env := newCUJEnv(t)
 	key := "test:c5"
 	env.userSends("c5", "hello")
@@ -2292,6 +2293,7 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	pB := &stubPlatformEngine{n: "platB"}
 	agent := &cujAgent{}
 	e := NewEngine("test", agent, []Platform{pA, pB}, dir+"/sessions.json", LangEnglish)
+	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
 
 	// Fire 5 messages on each platform concurrently.
 	var wg sync.WaitGroup

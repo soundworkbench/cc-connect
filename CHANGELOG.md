@@ -2,6 +2,7 @@
 
 ## Unreleased (fork)
 
+- Acceptance callbacks can submit messages and `/stop` without deadlocking. Queued local assistant inputs recover under the activated session after daily rotation, and stopped preflight readers leave replacement turns alone.
 - `/stop` interrupts the current turn and continues queued messages in order after the old process closes.
 - Pending inputs persist in `data_dir/queues/` and resume when their platform becomes ready after restart. Shutdown flushes pending inputs and prevents another queued turn from starting.
 - Session resets, including `/new`, report the first 80 characters of each discarded queued input so users can resend it.

@@ -20,6 +20,10 @@ SIGTERM and SIGINT already call `Engine.Stop`. Stop rejects incoming work and ne
 
 Inputs delivered into `ReceiveMessage` by a bridge or assistant share the same queue as platform messages. Timer and cron prompts also use this queue, preserving muted replies, their permission modes, and thread-specific reply targets. The core HTTP `/send` endpoint sends outgoing platform messages; it does not submit an agent input.
 
+The local `/assistant/inject` API uses the same durable FIFO. Waiting assistant inputs recover after restart and continue after `/stop`. Daily `/assistant/rotate` starts a candidate and sends its handoff summary before activating the new session. Once activated, the candidate uses the new session ID and normal routing key for queue snapshots. The summary is already in flight and is not replayed on recovery. If `/stop` replaces the state before the preflight event reader starts, that reader exits without consuming the replacement process's events.
+
+Acceptance callbacks run after admission and queue locks are released. A callback can synchronously submit another message or `/stop`, including before the first agent process starts.
+
 Active-turn steering remains available for agents that accept supplements. Once an input joins a durable queue, it waits for its own turn rather than being promoted to a supplement. Without `data_dir`, queues retain their in-memory storage behavior while `/stop` still preserves them.
 
 ## Verification
@@ -27,9 +31,9 @@ Active-turn steering remains available for agents that accept supplements. Once 
 Run the core tests and user journeys:
 
 ```sh
-go test ./core/...
-go test ./core/ -run TestCUJ
-go test -race ./core/ -run 'TestQueuePersistence|TestCUJ_C5|TestCUJ_B1|TestScheduledPrompt|TestEngineStop|TestSteer'
+go test ./core/... -count=1 -timeout 10m
+go test ./core/ -run '^TestQueuePersistence_' -count=5 -timeout 10m
+go test -race ./core/... -run '(?i)(queue|stop|schedul|timer|cron|cuj|assistant|preflight|steer)' -count=1 -timeout 10m
 ```
 
-The regression tests cover restart order, current-input exclusion, shutdown, concurrent admission and duplicate message IDs, corrupt lines, large attachments, timer and assistant bridge inputs, write failures, `/stop` continuation, and `/new` discard previews.
+The regression tests cover restart order, current-input exclusion, shutdown, concurrent admission and duplicate message IDs, corrupt lines, large attachments, timer and assistant bridge inputs, write failures, `/stop` continuation, and `/new` discard previews. They also cover synchronous acceptance callbacks, real Unix API injection and rotation recovery, and stopped preflight readers.

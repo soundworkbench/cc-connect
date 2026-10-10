@@ -33,7 +33,6 @@ func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg 
 	}
 
 	if accepted || err != nil {
-		runMessageAccepted(msg)
 		session.TouchUserActivity()
 		session.AddHistory("user", msg.Content)
 		sessions.Save()

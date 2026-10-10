@@ -298,6 +298,10 @@ func TestProcessInteractiveEvents_SessionResetBeforeReaderStarts(t *testing.T) {
 }
 
 func TestQueuePersistence_StopDuringStartupDoesNotStartCancelledInput(t *testing.T) {
+	testStopDuringAcceptedStartup(t)
+}
+
+func testStopDuringAcceptedStartup(t *testing.T) {
 	dir := t.TempDir()
 	p := &queueTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
 	s := queueTestSession()
@@ -313,6 +317,94 @@ func TestQueuePersistence_StopDuringStartupDoesNotStartCancelledInput(t *testing
 	cc27WaitIdle(t, e, "test:user")
 	if len(s.sent) != 0 {
 		t.Fatal("cancelled input replayed")
+	}
+	visible := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(visible, e.i18n.T(MsgExecutionStopped)) || !strings.Contains(visible, "pending done") {
+		t.Fatalf("startup stop lost pending output: %s", visible)
+	}
+}
+
+func TestHandleMessage_SteeredAcceptanceCanReenterAndStop(t *testing.T) {
+	_, e, as, _, key := cc17Fixture(t)
+	p := e.platforms[0]
+	e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), MessageID: "first", Content: "current", ReplyCtx: key})
+	cc27Take(t, as.started)
+	accepted := make(chan struct{})
+	go func() {
+		e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), MessageID: "second", Content: "supplement", ReplyCtx: key, OnAccepted: func() {
+			e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), Content: "/stop", ReplyCtx: key})
+			close(accepted)
+		}})
+	}()
+	cc27Take(t, accepted)
+	if got := cc27Take(t, as.steered); got != "supplement" {
+		t.Fatal(got)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for as.Alive() {
+		if time.Now().After(deadline) {
+			t.Fatal("steered callback did not stop the process")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !strings.Contains(strings.Join(p.(*scheduledTestPlatform).getSent(), "\n"), e.i18n.T(MsgExecutionStopped)) {
+		t.Fatal("steered callback did not acknowledge stop")
+	}
+}
+
+func TestQueuePersistence_QueuedAcceptanceCanReenterAndStop(t *testing.T) {
+	p := &queueTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	first, next := queueTestSession(), queueTestSession()
+	e := queueTestEngine(t, t.TempDir(), p, first)
+	queueTestSend(e, p, "first", "current")
+	cc27Take(t, first.sent)
+	e.agent.(*controllableAgent).nextSession = next
+	accepted := make(chan struct{})
+	go func() {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", MessageID: "second", Content: "queued second", ReplyCtx: "ctx", OnAccepted: func() {
+			queueTestSend(e, p, "third", "queued third")
+			queueTestSend(e, p, "stop", "/stop")
+			close(accepted)
+		}})
+	}()
+	cc27Take(t, accepted)
+	if got := cc27Take(t, next.sent); got != "queued second" {
+		t.Fatal(got)
+	}
+	next.events <- Event{Type: EventResult, Content: "second answer", Done: true}
+	if got := cc27Take(t, next.sent); got != "queued third" {
+		t.Fatal(got)
+	}
+	next.events <- Event{Type: EventResult, Content: "third answer", Done: true}
+	cc27WaitIdle(t, e, "test:user")
+	visible := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(visible, "second answer") || !strings.Contains(visible, "third answer") || len(next.sent) != 0 {
+		t.Fatalf("queued callback lost or duplicated a turn: %s", visible)
+	}
+}
+
+func TestProcessInteractiveMessage_PreflightDoesNotAdoptReplacementAfterStop(t *testing.T) {
+	p := &queueTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}
+	s := queueTestSession()
+	e := queueTestEngine(t, t.TempDir(), p, s)
+	session := e.sessions.GetOrCreateActive("test:user")
+	if !session.TryLock() {
+		t.Fatal("session busy")
+	}
+	retired := &interactiveState{stopped: true, queueRetired: true}
+	replacement := &interactiveState{agentSession: s, currentMessageID: "next", eventsNeedResync: false}
+	e.interactiveStates["test:user"] = replacement
+	done := make(chan struct{})
+	go func() {
+		e.processInteractiveMessageWith(p, &Message{SessionKey: "test:user", preflightSent: true, historyPreseeded: true, executionState: retired}, session, e.agent, e.sessions, "test:user", "", "test:user")
+		close(done)
+	}()
+	cc27Take(t, done)
+	replacement.mu.Lock()
+	id := replacement.currentMessageID
+	replacement.mu.Unlock()
+	if id != "next" {
+		t.Fatalf("cancelled preflight adopted the next turn: message ID %q", id)
 	}
 }
 

@@ -2161,7 +2161,17 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	}
 
 	e.assistantAdmissionMu.Lock()
-	defer e.assistantAdmissionMu.Unlock()
+	var admissionRelease sync.Once
+	releaseAdmission := func() { admissionRelease.Do(e.assistantAdmissionMu.Unlock) }
+	defer releaseAdmission()
+	if callback := msg.OnAccepted; callback != nil {
+		msg.OnAccepted = func() {
+			// Routing is fixed once admitted. Callers may synchronously submit
+			// another message or /stop from their acceptance callback.
+			releaseAdmission()
+			callback()
+		}
+	}
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
 		if e.handleCommand(p, msg, content) {
 			return
@@ -2391,6 +2401,12 @@ func (e *Engine) deliverMessageForBusySession(p Platform, msg *Message, interact
 }
 
 func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey string, session *Session, sessions *SessionManager) (bool, error) {
+	accepted := false
+	defer func() {
+		if accepted {
+			runMessageAccepted(msg)
+		}
+	}()
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
 	if !hasState || state == nil {
@@ -2432,6 +2448,7 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 	e.steerQueuedMessagesLocked(state, session, sessions)
 	// Do not overtake earlier input; startup queues drain after Send is ready.
 	if len(state.pendingMessages) == 0 && e.trySteerMessageLocked(state, p, msg, session, sessions) {
+		accepted = true
 		return true, nil
 	}
 	if !msg.scheduledPrompt && len(state.pendingMessages) >= e.maxQueuedMessages {
@@ -2474,7 +2491,7 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 		}
 		state.steerMessageIDs[msg.scheduledInputID] = true
 	}
-	runMessageAccepted(msg)
+	accepted = true
 	queueDepth := len(state.pendingMessages)
 
 	slog.Debug("user message accepted into queue",
@@ -3041,9 +3058,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 	var state *interactiveState
 	if msg.preflightSent {
-		e.interactiveMu.Lock()
-		state = e.interactiveStates[interactiveKey]
-		e.interactiveMu.Unlock()
+		state = msg.executionState
 	} else {
 		state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg.executionState)
 	}

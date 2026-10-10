@@ -153,6 +153,156 @@ func TestAssistantRotatePreservesHistoryAndStartsSummary(t *testing.T) {
 		t.Fatal("rotation replay created another session")
 	}
 }
+
+func TestQueuePersistence_AssistantInjectUnixRestartAndStop(t *testing.T) {
+	api, e, as, c, key := cc17Fixture(t)
+	dir := filepath.Dir(e.sessions.StorePath())
+	e.SetDataDir(dir)
+	for _, id := range []string{"current", "second", "third"} {
+		status, result := cc17Post(t, c, "/assistant/inject", assistantRequest{Project: "project", SessionKey: key, RequestID: id, Message: id})
+		if status != 200 || result["queued"] != (id != "current") {
+			t.Fatalf("inject %s: status=%d result=%v", id, status, result)
+		}
+		if id == "current" {
+			cc27Take(t, as.started)
+		}
+	}
+	path := filepath.Join(dir, "queues", queueFileName(e.name, key))
+	records, err := readQueueFile(path, e.name)
+	if err != nil || len(records) != 2 || records[0].InputID != "assistant:second" || !records[0].Scheduled || records[1].Content != "third" {
+		t.Fatalf("assistant snapshot = %+v, %v", records, err)
+	}
+	e.cancel()
+	if err := e.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	p := &queueTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "local"}}
+	first, next := queueTestSession(), queueTestSession()
+	e2 := NewEngine("project", &controllableAgent{nextSession: first}, []Platform{p}, e.sessions.StorePath(), LangEnglish)
+	e2.SetDataDir(dir)
+	e2.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
+	t.Cleanup(func() { e2.cancel(); _ = e2.Stop() })
+	api.RegisterEngine("project", e2)
+	if err := e2.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if got := cc27Take(t, first.sent); got != "second" {
+		t.Fatalf("restart replayed current or lost FIFO: %q", got)
+	}
+	e2.agent.(*controllableAgent).nextSession = next
+	e2.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), Content: "/stop", ReplyCtx: key})
+	if got := cc27Take(t, next.sent); got != "third" {
+		t.Fatalf("stop lost pending assistant input: %q", got)
+	}
+	status, _ := cc17Post(t, c, "/assistant/inject", assistantRequest{Project: "project", SessionKey: key, RequestID: "fourth", Message: "fourth"})
+	if status != 200 {
+		t.Fatalf("post-stop inject status=%d", status)
+	}
+	next.events <- Event{Type: EventResult, Content: "third answer", Done: true}
+	if got := cc27Take(t, next.sent); got != "fourth" {
+		t.Fatal(got)
+	}
+	next.events <- Event{Type: EventResult, Content: "fourth answer", Done: true}
+	cc27WaitIdle(t, e2, key)
+	visible := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(visible, "third answer") || !strings.Contains(visible, "fourth answer") || len(next.sent) != 0 || len(first.sent) != 0 {
+		t.Fatalf("assistant stop/restart lost or duplicated output: %s", visible)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("completed assistant snapshot remains: %v", err)
+	}
+}
+
+func TestQueuePersistence_AssistantRotationRestartRestoresPromotedSession(t *testing.T) {
+	_, e, as, c, key := cc17Fixture(t)
+	dir := filepath.Dir(e.sessions.StorePath())
+	e.SetDataDir(dir)
+	old := e.sessions.GetOrCreateActive(key)
+	old.AddHistory("assistant", cc17Summary)
+	e.sessions.Save()
+	status, result := cc17Post(t, c, "/assistant/rotate", assistantRequest{Project: "project", SessionKey: key, RequestID: "rotation", ExpectedSessionID: old.ID, ExpectedHistoryCount: 1, Summary: cc17Summary})
+	if status != 200 {
+		t.Fatalf("rotate status=%d", status)
+	}
+	if got := cc27Take(t, as.started); !strings.Contains(got, cc17Summary) {
+		t.Fatalf("preflight summary missing: %q", got)
+	}
+	freshID := result["session_id"].(string)
+	for _, id := range []string{"second", "third"} {
+		status, result := cc17Post(t, c, "/assistant/inject", assistantRequest{Project: "project", SessionKey: key, RequestID: id, Message: id})
+		if status != 200 || result["queued"] != true {
+			t.Fatalf("inject status=%d result=%v", status, result)
+		}
+	}
+	path := filepath.Join(dir, "queues", queueFileName(e.name, key))
+	records, err := readQueueFile(path, e.name)
+	if err != nil || len(records) != 2 || records[0].SessionID != freshID || records[0].Key != key {
+		t.Fatalf("rotation queue retained provisional identity: %+v, %v", records, err)
+	}
+	e.cancel()
+	if err := e.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	p := &queueTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "local"}}
+	s := queueTestSession()
+	e2 := NewEngine("project", &controllableAgent{nextSession: s}, []Platform{p}, e.sessions.StorePath(), LangEnglish)
+	e2.SetDataDir(dir)
+	e2.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
+	t.Cleanup(func() { e2.cancel(); _ = e2.Stop() })
+	if err := e2.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"second", "third"} {
+		if got := cc27Take(t, s.sent); got != id {
+			t.Fatalf("rotation recovery FIFO: got %q want %q", got, id)
+		}
+		s.events <- Event{Type: EventResult, Content: id + " answer", Done: true}
+	}
+	cc27WaitIdle(t, e2, key)
+	if e2.sessions.ActiveSessionID(key) != freshID || e2.sessions.FindByID(old.ID).HistoryLen() != 1 || len(s.sent) != 0 {
+		t.Fatal("rotation recovery changed history or replayed summary")
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, "queues", "*.jsonl"))
+	if err != nil || len(paths) != 0 {
+		t.Fatalf("rotation left an orphaned queue snapshot: %v, %v", paths, err)
+	}
+}
+
+func TestQueuePersistence_AssistantRotationStopContinuesQueue(t *testing.T) {
+	_, e, as, c, key := cc17Fixture(t)
+	e.SetDataDir(filepath.Dir(e.sessions.StorePath()))
+	old := e.sessions.GetOrCreateActive(key)
+	old.AddHistory("assistant", cc17Summary)
+	status, result := cc17Post(t, c, "/assistant/rotate", assistantRequest{Project: "project", SessionKey: key, RequestID: "rotate-stop", ExpectedSessionID: old.ID, ExpectedHistoryCount: 1, Summary: cc17Summary})
+	if status != 200 {
+		t.Fatalf("rotate status=%d", status)
+	}
+	cc27Take(t, as.started)
+	for _, id := range []string{"second", "third"} {
+		status, result := cc17Post(t, c, "/assistant/inject", assistantRequest{Project: "project", SessionKey: key, RequestID: id, Message: id})
+		if status != 200 || result["queued"] != true {
+			t.Fatalf("inject status=%d result=%v", status, result)
+		}
+	}
+	next := queueTestSession()
+	e.agent.(*controllableAgent).nextSession = next
+	p := e.platforms[0].(*scheduledTestPlatform)
+	e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), Content: "/stop", ReplyCtx: key})
+	for _, id := range []string{"second", "third"} {
+		if got := cc27Take(t, next.sent); got != id {
+			t.Fatalf("stop after rotation FIFO: got %q want %q", got, id)
+		}
+		next.events <- Event{Type: EventResult, Content: id + " answer", Done: true}
+	}
+	cc27WaitIdle(t, e, key)
+	visible := strings.Join(p.getSent(), "\n")
+	if e.sessions.ActiveSessionID(key) != result["session_id"] || old.HistoryLen() != 1 || len(next.sent) != 0 || len(as.started) != 0 || !strings.Contains(visible, "second answer") || !strings.Contains(visible, "third answer") {
+		t.Fatalf("rotation stop lost history or output: %s", visible)
+	}
+	if err := e.Stop(); err != nil {
+		t.Fatal(err)
+	}
+}
 func TestAssistantRotateRejectsBusyStaleForgedAndWriteFailure(t *testing.T) {
 	_, e, _, c, key := cc17Fixture(t)
 	old := e.sessions.GetOrCreateActive(key)
