@@ -1,5 +1,14 @@
 ﻿# Changelog
 
+## Unreleased (fork)
+
+- Acceptance callbacks can submit messages and `/stop` without deadlocking. Queued local assistant inputs recover under the activated session after daily rotation, and stopped preflight readers leave replacement turns alone.
+- `/stop` interrupts the current turn and continues queued messages in order after the old process closes.
+- Pending inputs persist in `data_dir/queues/` and resume when their platform becomes ready after restart. Shutdown flushes pending inputs and prevents another queued turn from starting.
+- Session resets, including `/new`, report the first 80 characters of each discarded queued input so users can resend it.
+
+See [durable message queues](docs/queued-messages.md) for storage and recovery behavior.
+
 ## v1.5.0 (2026-08-16)
 
 First stable release of the v1.5.0 series since v1.4.1. Stabilizes beta.1 → beta.5 (~93 commits) including production P1 fixes (#1693 / #1686).

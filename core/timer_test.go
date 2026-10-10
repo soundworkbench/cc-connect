@@ -17,11 +17,11 @@ func TestParseDelayOrTime_Relative(t *testing.T) {
 		{"1h30m", false},
 		{"2h30m15s", false},
 		{"500ms", false},
-		{"0s", true},       // zero = not positive
-		{"-1h", true},      // negative
-		{"", true},         // empty
-		{"garbage", true},  // invalid
-		{"2", true},        // bare number
+		{"0s", true},      // zero = not positive
+		{"-1h", true},     // negative
+		{"", true},        // empty
+		{"garbage", true}, // invalid
+		{"2", true},       // bare number
 	}
 
 	for _, tt := range tests {
@@ -233,8 +233,8 @@ func TestTimerScheduler_FiresOnTime(t *testing.T) {
 
 	sched := NewTimerScheduler(store)
 
-	// Register a stub engine
-	engine := &Engine{name: "test"}
+	// Register an engine with stub external boundaries
+	engine := newTestEngine()
 	sched.RegisterEngine("test", engine)
 
 	// We can't easily test ExecuteTimerJob without a full engine setup,
@@ -289,7 +289,7 @@ func TestTimerScheduler_Cancellation(t *testing.T) {
 	}
 
 	sched := NewTimerScheduler(store)
-	sched.RegisterEngine("test", &Engine{name: "test"})
+	sched.RegisterEngine("test", newTestEngine())
 
 	job := &TimerJob{
 		ID:          "cancel1",
@@ -345,7 +345,7 @@ func TestTimerScheduler_Recovery(t *testing.T) {
 
 	// Simulate restart: create new scheduler from same store
 	sched := NewTimerScheduler(store)
-	sched.RegisterEngine("test", &Engine{name: "test"})
+	sched.RegisterEngine("test", newTestEngine())
 
 	if err := sched.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -385,7 +385,7 @@ func TestTimerScheduler_StaleJobSkipped(t *testing.T) {
 	}
 
 	sched := NewTimerScheduler(store)
-	sched.RegisterEngine("test", &Engine{name: "test"})
+	sched.RegisterEngine("test", newTestEngine())
 
 	if err := sched.Start(); err != nil {
 		t.Fatalf("Start: %v", err)

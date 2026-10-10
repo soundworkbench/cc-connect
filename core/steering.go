@@ -7,7 +7,9 @@ import (
 
 // state.mu must be held, keeping admission/history ordered with the turn drain.
 func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg *Message, session *Session, sessions *SessionManager) bool {
-	if msg.scheduledPrompt || msg.ModeOverride != "" || session == nil || sessions == nil || state.stopped || state.pending != nil {
+	e.platformLifecycleMu.Lock()
+	defer e.platformLifecycleMu.Unlock()
+	if e.stopping || e.ctx.Err() != nil || state.queueRetired || msg.scheduledPrompt || msg.ModeOverride != "" || session == nil || sessions == nil || state.stopped || state.pending != nil {
 		return false
 	}
 	if msg.MessageID != "" && state.steerMessageIDs[msg.MessageID] {
@@ -31,7 +33,6 @@ func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg 
 	}
 
 	if accepted || err != nil {
-		runMessageAccepted(msg)
 		session.TouchUserActivity()
 		session.AddHistory("user", msg.Content)
 		sessions.Save()
@@ -74,10 +75,18 @@ func (e *Engine) steerQueuedMessagesLocked(state *interactiveState, session *Ses
 		if !q.steerRetry {
 			return
 		}
+		old := state.pendingMessages
+		if _, ok := e.popQueuedMessageLocked(state); !ok {
+			return
+		}
 		msg := &Message{Content: q.content, MessageID: q.messageID, Images: q.images, Files: q.files,
 			UserID: q.userID, UserName: q.userName, Platform: q.msgPlatform, SessionKey: q.msgSessionKey,
 			ChannelKey: q.channelKey, ReplyCtx: q.replyCtx, UserMessageTimeMs: q.userMessageTimeMs}
 		if !e.trySteerMessageLocked(state, q.platform, msg, session, sessions) {
+			state.pendingMessages = old
+			if err := e.persistQueueLocked(state); err != nil {
+				slog.Error("queue: steering retry persistence failed", "error", err)
+			}
 			if state.steerWriteFailed {
 				state.pendingMessages[0].steerRetry = false
 				state.steerWriteFailed = false
@@ -85,7 +94,6 @@ func (e *Engine) steerQueuedMessagesLocked(state *interactiveState, session *Ses
 			}
 			return
 		}
-		state.pendingMessages = state.pendingMessages[1:]
 	}
 }
 

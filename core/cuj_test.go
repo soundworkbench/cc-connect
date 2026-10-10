@@ -704,6 +704,62 @@ func (s *queuedLifecycleSession) Send(prompt, _ string, _ []ImageAttachment, _ [
 	return nil
 }
 
+func testStopContinuesQueuedMessages(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	first := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 4)}
+	next := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 4)}
+	var starts int
+	a := &controllableAgent{startSessionFn: func(context.Context, string) (AgentSession, error) {
+		starts++
+		if starts == 1 {
+			return first, nil
+		}
+		return next, nil
+	}}
+	e := NewEngine("queue-stop", a, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
+	send := func(id, content string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: p.Name(), MessageID: id, Content: content, ReplyCtx: "ctx"})
+	}
+	send("first", "current input")
+	cc27Take(t, first.sent)
+	send("second", "queued two")
+	send("third", "queued three")
+	send("stop", "/stop")
+	if got := cc27Take(t, next.sent); !strings.Contains(got, "queued two") {
+		t.Fatal(got)
+	}
+	next.events <- Event{Type: EventResult, Content: "answer two", Done: true}
+	if got := cc27Take(t, next.sent); !strings.Contains(got, "queued three") {
+		t.Fatal(got)
+	}
+	next.events <- Event{Type: EventResult, Content: "answer three", Done: true}
+	cc27WaitIdle(t, e, "test:user")
+	visible := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(visible, "answer two") || !strings.Contains(visible, "answer three") || strings.Contains(visible, "session reset") {
+		t.Fatalf("queued answers missing after stop: %s", visible)
+	}
+}
+
+func testNewListsDiscardedQueuedInput(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	s := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 4)}
+	e := NewEngine("queue-new", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
+	send := func(id, content string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: p.Name(), MessageID: id, Content: content, ReplyCtx: "ctx"})
+	}
+	send("one", "当前轮")
+	cc27Take(t, s.sent)
+	queued := strings.Repeat("排", 80) + "后面的秘密尾巴"
+	send("two", queued)
+	send("new", "/new")
+	visible := strings.Join(p.getSent(), "\n")
+	if !strings.Contains(visible, strings.Repeat("排", 80)) || strings.Contains(visible, "秘密尾巴") {
+		t.Fatalf("discarded input preview incorrect: %s", visible)
+	}
+}
+
 // Subcase of TestCUJ_PreviewLifecycleThreeTurns: first request starts, two
 // further requests queue, then all three complete on the same agent session.
 func testPreviewLifecycleQueuedTurns(t *testing.T, outcome string, instant, textPreview bool) {
@@ -1494,6 +1550,7 @@ func TestCUJ_A6_A7_CoveredByPlatformLayer(t *testing.T) {
 
 // CUJ-B1 · /new creates a fresh session independent from the previous one.
 func TestCUJ_B1_NewCreatesIndependentSession(t *testing.T) {
+	t.Run("NewListsDiscardedQueuedInput", testNewListsDiscardedQueuedInput)
 	env := newCUJEnv(t)
 	key := "test:b1"
 	env.userSends("b1", "first message")
@@ -1690,6 +1747,8 @@ func TestCUJ_C2_PlanModeRequiresApproval(t *testing.T) {
 
 // CUJ-C5 · /stop halts current turn but DOES NOT switch session.
 func TestCUJ_C5_StopKeepsSameSession(t *testing.T) {
+	t.Run("StopContinuesQueuedMessages", testStopContinuesQueuedMessages)
+	t.Run("StopDuringAcceptedStartup", testStopDuringAcceptedStartup)
 	env := newCUJEnv(t)
 	key := "test:c5"
 	env.userSends("c5", "hello")
@@ -2234,6 +2293,7 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	pB := &stubPlatformEngine{n: "platB"}
 	agent := &cujAgent{}
 	e := NewEngine("test", agent, []Platform{pA, pB}, dir+"/sessions.json", LangEnglish)
+	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
 
 	// Fire 5 messages on each platform concurrently.
 	var wg sync.WaitGroup

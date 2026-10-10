@@ -388,13 +388,16 @@ func (s *APIServer) handleAssistantRotate(w http.ResponseWriter, r *http.Request
 	}
 	e.cleanupInteractiveState(iKey)
 	e.interactiveMu.Lock()
+	candidate.mu.Lock()
+	candidate.queueKey = iKey
+	candidate.queueSessionID = fresh.ID
+	candidate.workspaceDir = workspace
+	candidate.eventsNeedResync = false
+	candidate.mu.Unlock()
 	delete(e.interactiveStates, candidateKey)
 	e.interactiveStates[iKey] = candidate
 	e.interactiveMu.Unlock()
-	candidate.mu.Lock()
-	candidate.eventsNeedResync = false
-	candidate.mu.Unlock()
-	msg := &Message{SessionKey: req.SessionKey, Platform: p.Name(), UserID: "assistant", UserName: "assistant", Content: req.Summary, ReplyCtx: ctx, scheduledPrompt: true, scheduledInputID: "rotation:" + req.RequestID, historyPreseeded: true, preflightSent: true}
+	msg := &Message{SessionKey: req.SessionKey, Platform: p.Name(), UserID: "assistant", UserName: "assistant", Content: req.Summary, ReplyCtx: ctx, scheduledPrompt: true, scheduledInputID: "rotation:" + req.RequestID, historyPreseeded: true, preflightSent: true, executionState: candidate}
 	go func() {
 		defer done()
 		e.processInteractiveMessageWith(p, msg, fresh, agent, sessions, iKey, workspace, req.SessionKey)

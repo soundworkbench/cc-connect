@@ -16,6 +16,11 @@ func (e *Engine) SetTimerScheduler(ts *TimerScheduler) {
 // notification (unless muted), and either runs a shell command or injects a
 // synthetic message into the agent session.
 func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
+	done, ok := e.trackWork(false)
+	if !ok {
+		return fmt.Errorf("engine is shutting down")
+	}
+	defer done()
 	e.hooks.Emit(HookEvent{
 		Event:      HookEventTimerTriggered,
 		SessionKey: job.SessionKey,
@@ -127,6 +132,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		scheduledPrompt:  true,
 		scheduledInputID: "timer:" + job.ID + ":" + fmt.Sprint(job.ScheduledAt.UnixNano()),
 		SessionKey:       sessionKey,
+		replySessionKey:  runSessionKey,
 		Platform:         platformName,
 		UserID:           "timer",
 		UserName:         "timer",

@@ -195,6 +195,7 @@ const (
 	MsgMessageSteered            MsgKey = "message_steered"
 	MsgMessageSteerUnconfirmed   MsgKey = "message_steer_unconfirmed"
 	MsgMessageQueued             MsgKey = "message_queued"
+	MsgQueuedMessageDropped      MsgKey = "queued_message_dropped"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
 	MsgCurrentTools              MsgKey = "current_tools"
 	MsgCurrentSession            MsgKey = "current_session"
@@ -820,6 +821,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "📬 訊息已收到，將在目前任務完成後處理。",
 		LangJapanese:           "📬 メッセージを受信しました。現在のタスク完了後に処理します。",
 		LangSpanish:            "📬 Mensaje recibido — se procesará después de que termine la tarea actual.",
+	},
+	MsgQueuedMessageDropped: {
+		LangEnglish:            "❌ Queued message discarded (%v). Resend if needed:\n%s",
+		LangChinese:            "❌ 排队消息已丢弃（%v）。如需继续，请重发：\n%s",
+		LangTraditionalChinese: "❌ 排隊訊息已捨棄（%v）。如需繼續，請重傳：\n%s",
+		LangJapanese:           "❌ 待機中のメッセージを破棄しました（%v）。必要なら再送してください：\n%s",
+		LangSpanish:            "❌ Mensaje en cola descartado (%v). Reenvíelo si es necesario:\n%s",
 	},
 	MsgQueueFull: {
 		LangEnglish:            "📬 Message queue is full (%d pending). Please wait for current tasks to complete.",
