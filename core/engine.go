@@ -4252,9 +4252,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	// Max turn time: absolute wall-clock cap that does NOT reset on events.
 	// Prevents long-running tool calls from blocking the session forever (#1091).
+	// Each queued message drained by this loop is its own turn and restarts it.
+	var turnDeadlineTimer *time.Timer
 	var turnDeadlineCh <-chan time.Time
 	if e.maxTurnTime > 0 {
-		turnDeadlineTimer := time.NewTimer(e.maxTurnTime)
+		turnDeadlineTimer = time.NewTimer(e.maxTurnTime)
 		defer turnDeadlineTimer.Stop()
 		turnDeadlineCh = turnDeadlineTimer.C
 	}
@@ -5464,6 +5466,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				segmentStart = 0
 				toolCount = 0
 				turnStart = time.Now()
+				if turnDeadlineTimer != nil {
+					if !turnDeadlineTimer.Stop() {
+						select {
+						case <-turnDeadlineTimer.C:
+						default:
+						}
+					}
+					turnDeadlineTimer.Reset(e.maxTurnTime)
+				}
 				firstEventLogged = false
 				waitStart = time.Now()
 				// Reassign the local replyCtx parameter to the queued message's
