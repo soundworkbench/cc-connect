@@ -91,12 +91,6 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		}
 	}
 
-	// Wrap platform to discard all outgoing messages when muted
-	effectivePlatform := targetPlatform
-	if job.Mute {
-		effectivePlatform = &mutePlatform{targetPlatform}
-	}
-
 	// Notify user that a cron job is executing (unless silent/muted)
 	// Note: this notification uses targetPlatform directly, not the tracking wrapper,
 	// so it won't count as a "meaningful delivery" for empty response detection.
@@ -119,7 +113,11 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	if job.IsShellJob() {
-		return e.executeCronShell(effectivePlatform, replyCtx, job)
+		shellPlatform := targetPlatform
+		if job.Mute {
+			shellPlatform = &mutePlatform{targetPlatform}
+		}
+		return e.executeCronShell(shellPlatform, replyCtx, job)
 	}
 
 	content := job.Prompt
@@ -135,6 +133,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 
 	msg := &Message{
 		scheduledPrompt:  true,
+		scheduledMute:    job.Mute,
 		scheduledInputID: "cron:" + job.ID + ":" + fmt.Sprint(time.Now().UnixNano()),
 		SessionKey:       sessionKey,
 		replySessionKey:  runSessionKey,
@@ -197,7 +196,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 			iKey = workspaceDir + ":" + iKey
 		}
 		prevHistLen := session.HistoryLen()
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
+		e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
 		e.cleanupInteractiveState(iKey)
 		// Empty-response detection via session history delta: processInteractiveMessageWith
 		// always adds a "user" entry (prevHistLen+1), then an "assistant" entry on success
@@ -216,13 +215,13 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	if workspaceDir != "" {
 		iKey = workspaceDir + ":" + sessionKey
 	}
-	queued, admissionErr := e.admitScheduledPrompt(effectivePlatform, msg, session, sessions, agent, iKey, workspaceDir)
+	queued, admissionErr := e.admitScheduledPrompt(targetPlatform, msg, session, sessions, agent, iKey, workspaceDir)
 	e.assistantAdmissionMu.Unlock()
 	if queued || admissionErr != nil {
 		return admissionErr
 	}
 	prevHistLen := session.HistoryLen()
-	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
+	e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
 	// Same empty-response detection as the useNewSession path above.
 	if !job.Mute && session.HistoryLen() < prevHistLen+2 {
 		return fmt.Errorf("cron job %q produced an empty response", job.ID)

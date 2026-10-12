@@ -45,17 +45,16 @@ func (q queuedMessage) record(project string, state *interactiveState) queueReco
 	if replyKey == "" {
 		replyKey = q.msgSessionKey
 	}
-	_, muted := q.platform.(*mutePlatform)
 	return queueRecord{Project: project, Key: state.queueKey, SessionID: state.queueSessionID,
 		Workspace: state.workspaceDir, Platform: q.platform.Name(), ReplySessionKey: replyKey,
-		Muted: muted, Scheduled: q.scheduledPrompt, InputID: q.scheduledInputID,
+		Muted: q.scheduledMute, Scheduled: q.scheduledPrompt, InputID: q.scheduledInputID,
 		MessageID: q.messageID, SessionKey: q.msgSessionKey, Content: q.content,
 		Images: q.images, Files: q.files, Mode: q.modeOverride, FromVoice: q.fromVoice,
 		UserID: q.userID, UserName: q.userName, ChannelKey: q.channelKey, UserMessageTimeMs: q.userMessageTimeMs}
 }
 
 func (r queueRecord) queued() queuedMessage {
-	return queuedMessage{scheduledPrompt: r.Scheduled, scheduledInputID: r.InputID,
+	return queuedMessage{scheduledPrompt: r.Scheduled, scheduledMute: r.Muted, scheduledInputID: r.InputID,
 		messageID: r.MessageID, msgPlatform: r.Platform, msgSessionKey: r.SessionKey,
 		replySessionKey: r.ReplySessionKey, content: r.Content, images: r.Images, files: r.Files,
 		modeOverride: r.Mode, fromVoice: r.FromVoice, userID: r.UserID, userName: r.UserName,
@@ -225,7 +224,7 @@ func (e *Engine) flushQueues() error {
 }
 
 func queuedInput(q queuedMessage) *Message {
-	return &Message{scheduledPrompt: q.scheduledPrompt, scheduledInputID: q.scheduledInputID,
+	return &Message{scheduledPrompt: q.scheduledPrompt, scheduledMute: q.scheduledMute, scheduledInputID: q.scheduledInputID,
 		replySessionKey: q.replySessionKey, Platform: q.msgPlatform, SessionKey: q.msgSessionKey,
 		MessageID: q.messageID, Content: q.content, ReplyCtx: q.replyCtx, Images: q.images,
 		Files: q.files, FromVoice: q.fromVoice, UserID: q.userID, UserName: q.userName,
@@ -253,9 +252,7 @@ func (e *Engine) resumeQueuesForPlatform(p Platform) {
 				continue
 			}
 			q.platform, q.replyCtx = p, replyCtx
-			if q.restored.Muted {
-				q.platform = &mutePlatform{p}
-			}
+			q.scheduledMute = q.restored.Muted
 		}
 		if len(state.pendingMessages) > 0 && state.pendingMessages[0].platform != nil {
 			keys = append(keys, key)

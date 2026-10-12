@@ -233,7 +233,7 @@ func TestQueuePersistence_TimerAndAssistantInputsRestore(t *testing.T) {
 	s2.events <- Event{Type: EventResult, Content: "assistant answer", Done: true}
 	cc27WaitIdle(t, e2, "test:user")
 	visible := strings.Join(p.getSent(), "\n")
-	if strings.Contains(visible, "muted timer answer") || !strings.Contains(visible, "assistant answer") {
+	if !strings.Contains(visible, "muted timer answer") || !strings.Contains(visible, "assistant answer") {
 		t.Fatal(visible)
 	}
 }

@@ -510,6 +510,7 @@ type queuedMessage struct {
 	replySessionKey   string
 	restored          *queueRecord
 	scheduledPrompt   bool
+	scheduledMute     bool
 	scheduledInputID  string
 	steerRetry        bool
 	modeOverride      string
@@ -2463,6 +2464,7 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
 		replySessionKey:   msg.replySessionKey,
 		scheduledPrompt:   msg.scheduledPrompt,
+		scheduledMute:     msg.scheduledMute,
 		scheduledInputID:  msg.scheduledInputID,
 		modeOverride:      msg.ModeOverride,
 		steerRetry:        e.dataDir == "" && !msg.scheduledPrompt && msg.ModeOverride == "" && !state.steerWriteFailed && len(msg.Files) == 0,
@@ -3100,7 +3102,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	turnAgentSession := state.agentSession
 	state.mu.Unlock()
 	if turnAgentSession == nil {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
+		if !msg.scheduledMute {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgFailedToStartAgentSession))
+		}
 		return
 	}
 	e.cancelAgentSessionIdleClose(state)
@@ -3181,7 +3185,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		}()
 	}
 
-	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
+	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, msg.scheduledMute)
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
@@ -4134,13 +4138,14 @@ var agentErrorHandlers = []agentErrorHandler{
 	{"Session not found", MsgSessionNotFound},
 }
 
-func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
+func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, mutedNotices ...bool) {
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
 		state.mu.Unlock()
 	}
 
+	muteScheduledNotices := len(mutedNotices) > 0 && mutedNotices[0]
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
@@ -4199,13 +4204,23 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var thinkingPreviewText strings.Builder
 	var toolProgressRows []string
 
-	if scp, ok := state.platform.(StreamingCardPlatform); ok {
-		if sc, err := scp.CreateStreamingCard(e.ctx, state.replyCtx); err != nil {
-			slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
-		} else {
-			streamCard = sc
-			slog.Info("streaming card created for turn", "session", sessionKey)
+	streamCardAttempted := false
+	startStreamCard := func(p Platform, replyCtx any) {
+		if streamCardAttempted {
+			return
 		}
+		streamCardAttempted = true
+		if scp, ok := p.(StreamingCardPlatform); ok {
+			sc, err := scp.CreateStreamingCard(e.ctx, replyCtx)
+			if err != nil {
+				slog.Warn("streaming card creation failed, falling back to normal messages", "error", err)
+			} else {
+				streamCard = sc
+			}
+		}
+	}
+	if !muteScheduledNotices {
+		startStreamCard(state.platform, state.replyCtx)
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
 	sp.progressI18n = e.i18n
@@ -4231,6 +4246,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		state.mu.Unlock()
 	}()
 	terminalReply := func(p Platform, text string) {
+		if muteScheduledNotices {
+			sp.discard()
+			return
+		}
 		if thinkingProcessPreview {
 			sp.deliverFinal(text, "", sendWorkspaceWithError, e.i18n.T(MsgFinalDeliveryFailed))
 		} else {
@@ -4239,7 +4258,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 	}
 
-	e.acknowledgeTurnStart(state.platform, state.replyCtx, sp, streamCard != nil)
+	if !muteScheduledNotices {
+		e.acknowledgeTurnStart(state.platform, state.replyCtx, sp, streamCard != nil)
+	}
 
 	// Idle timeout: resets on every received event (0 = disabled)
 	var idleTimer *time.Timer
@@ -4267,6 +4288,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			restoreQueuedMode()
 		}
 	}()
+	ensureAgentStreamCard := func(p Platform) {
+		if muteScheduledNotices && !streamCardAttempted {
+			startStreamCard(p, replyCtx)
+			if streamCard != nil {
+				thinkingProcessPreview = false
+			}
+		}
+	}
 	events := turnAgentSession.Events()
 	stopCh := state.stopSignal()
 	for {
@@ -4438,6 +4467,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					break // Private thinking never enters append history, even if enabled.
 				}
 				if e.display.ThinkingMessages && event.Content != "" {
+					ensureAgentStreamCard(p)
 					preview := strings.TrimSpace(truncateIf(event.Content, e.display.ThinkingMaxLen))
 					if preview != "" {
 						if thinkingPreviewText.Len() > 0 {
@@ -4621,6 +4651,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				silentHold = false
 			}
 			if e.display.ToolMessages {
+				ensureAgentStreamCard(p)
 				// --- StreamingCard path ---
 				if streamCard != nil && !streamCard.Failed() {
 					toolInput := event.ToolInput
@@ -4782,6 +4813,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				prevHold := silentHold
 				silentHold = couldBeSilentPrefix(peekSegment)
 				releasedNow := prevHold && !silentHold
+				if !silentHold {
+					ensureAgentStreamCard(p)
+				}
 
 				handledByStreamCard := false
 				if streamCard != nil && !streamCard.Failed() {
@@ -5052,7 +5086,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			} else if fullResponse == "" && len(textParts) > 0 {
 				fullResponse = strings.Join(textParts, "")
 			}
-			if fullResponse == "" {
+			if fullResponse == "" && !muteScheduledNotices {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
 
@@ -5093,7 +5127,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
 
-			isSilent := isSilentReply(baseResponse)
+			isSilent := (muteScheduledNotices && strings.TrimSpace(baseResponse) == "") || isSilentReply(baseResponse)
 			if !isSilent {
 				if stripped, ok := stripTrailingSilent(baseResponse); ok {
 					if strings.TrimSpace(stripped) == "" {
@@ -5106,6 +5140,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			if !isSilent {
+				ensureAgentStreamCard(p)
 				e.hooks.Emit(HookEvent{
 					Event:      HookEventMessageSent,
 					SessionKey: sessionKey,
@@ -5405,6 +5440,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return
 				}
 				remainingQueue := len(state.pendingMessages)
+				muteScheduledNotices = queued.scheduledMute
 				state.platform = queued.platform
 				state.replyCtx = queued.replyCtx
 				state.currentMessageID = queued.messageID
@@ -5512,17 +5548,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 				// Reset streaming card state for the next turn
 				streamCard = nil
+				streamCardAttempted = false
 				cardToolCalls = nil
 				cardThinkingText = ""
 				cardAnswerText.Reset()
 
-				// Try to create a new streaming card for the queued turn
-				if scp, ok := queued.platform.(StreamingCardPlatform); ok {
-					if sc, err := scp.CreateStreamingCard(e.ctx, queued.replyCtx); err != nil {
-						slog.Warn("streaming card creation failed for queued turn", "error", err)
-					} else {
-						streamCard = sc
-					}
+				if !muteScheduledNotices {
+					startStreamCard(queued.platform, queued.replyCtx)
 				}
 
 				if streamCard == nil {
@@ -5530,7 +5562,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						thinkingProcessPreview = pref.UseThinkingProcessPreview() && e.display.CardMode != "rich" && sp.canPreview()
 					}
 				}
-				e.acknowledgeTurnStart(queued.platform, queued.replyCtx, sp, streamCard != nil)
+				if !muteScheduledNotices {
+					e.acknowledgeTurnStart(queued.platform, queued.replyCtx, sp, streamCard != nil)
+				}
 
 				session.AddHistory("user", queued.content)
 				// Persist queued user message immediately (mirror of the
@@ -5563,7 +5597,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Add a "done" reaction after the final answer when supported. Skip
 			// silent turns and rich card mode (the card itself shows done status).
-			if !isSilent && !hasRichCard {
+			if !muteScheduledNotices && !isSilent && !hasRichCard {
 				if doneTI, ok := p.(TypingIndicatorDone); ok {
 					doneReaction = func() { doneTI.AddDoneReaction(replyCtx) }
 				}
@@ -5760,7 +5794,7 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	}
 	state.mu.Unlock()
 	for _, q := range remaining {
-		if q.platform != nil {
+		if q.platform != nil && !q.scheduledMute {
 			e.send(q.platform, q.replyCtx, e.i18n.Tf(MsgQueuedMessageDropped, reason, truncateStr(q.content, 80)))
 		}
 	}
@@ -5818,7 +5852,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
 		state.mu.Unlock()
 		if as == nil || !as.Alive() {
-			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
+			if !queued.scheduledMute {
+				e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
+			}
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false
 		}
@@ -5843,7 +5879,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx)
+		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx, queued.scheduledMute)
 		if restoreMode != nil {
 			restoreMode()
 		}

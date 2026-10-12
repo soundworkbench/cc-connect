@@ -31,7 +31,7 @@ type CronJob struct {
 	Description string    `json:"description"`
 	Enabled     bool      `json:"enabled"`
 	Silent      *bool     `json:"silent,omitempty"`       // suppress start notification; nil = use global default
-	Mute        bool      `json:"mute,omitempty"`         // suppress ALL messages (start + result); job runs silently
+	Mute        bool      `json:"mute,omitempty"`         // suppress scheduler notices; agent output is delivered
 	SessionMode string    `json:"session_mode,omitempty"` // "" or "reuse" = share active session; "new_per_run" = fresh session each run
 	Mode        string    `json:"mode,omitempty"`         // permission mode override for this job; "" = use project default
 	TimeoutMins *int      `json:"timeout_mins,omitempty"` // nil = default 30m wait; 0 = no limit; >0 = minutes
@@ -723,15 +723,13 @@ func (cs *CronScheduler) runJob(job *CronJob, manual bool) {
 	}
 }
 
-// mutePlatform wraps a Platform and discards all outgoing messages.
-// Used for muted cron jobs that should execute without sending chat messages.
+// mutePlatform discards shell-job output. It must never enter an agent session.
 type mutePlatform struct {
 	Platform
 }
 
 func (m *mutePlatform) Reply(_ context.Context, _ any, _ string) error { return nil }
 func (m *mutePlatform) Send(_ context.Context, _ any, _ string) error  { return nil }
-
 
 func GenerateCronID() string {
 	b := make([]byte, 4)

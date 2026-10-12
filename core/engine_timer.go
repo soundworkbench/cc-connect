@@ -89,11 +89,6 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		}
 	}
 
-	effectivePlatform := targetPlatform
-	if job.Mute {
-		effectivePlatform = &mutePlatform{targetPlatform}
-	}
-
 	// Notify user unless muted or silent
 	if !job.Mute {
 		silent := false
@@ -114,7 +109,11 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	}
 
 	if job.IsShellJob() {
-		return e.executeTimerShell(effectivePlatform, replyCtx, job)
+		shellPlatform := targetPlatform
+		if job.Mute {
+			shellPlatform = &mutePlatform{targetPlatform}
+		}
+		return e.executeTimerShell(shellPlatform, replyCtx, job)
 	}
 
 	content := job.Prompt
@@ -130,6 +129,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 
 	msg := &Message{
 		scheduledPrompt:  true,
+		scheduledMute:    job.Mute,
 		scheduledInputID: "timer:" + job.ID + ":" + fmt.Sprint(job.ScheduledAt.UnixNano()),
 		SessionKey:       sessionKey,
 		replySessionKey:  runSessionKey,
@@ -189,7 +189,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		if workspaceDir != "" {
 			iKey = workspaceDir + ":" + iKey
 		}
-		e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
+		e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
 		e.cleanupInteractiveState(iKey)
 		return nil
 	}
@@ -200,12 +200,12 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	if workspaceDir != "" {
 		iKey = workspaceDir + ":" + sessionKey
 	}
-	queued, admissionErr := e.admitScheduledPrompt(effectivePlatform, msg, session, sessions, agent, iKey, workspaceDir)
+	queued, admissionErr := e.admitScheduledPrompt(targetPlatform, msg, session, sessions, agent, iKey, workspaceDir)
 	e.assistantAdmissionMu.Unlock()
 	if queued || admissionErr != nil {
 		return admissionErr
 	}
-	e.processInteractiveMessageWith(effectivePlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
+	e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
 	return nil
 }
 

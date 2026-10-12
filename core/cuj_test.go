@@ -871,6 +871,7 @@ func testPreviewLifecycleQueuedTurns(t *testing.T, outcome string, instant, text
 // Scheduling commands must retain the same visible lifecycle after their
 // handlers and renderers move out of engine.go. Do not start background jobs.
 func TestCUJ_E7_ScheduledCommandLifecycle(t *testing.T) {
+	t.Run("MutedAttachmentLifecycle", testMutedAttachmentCommandLifecycle)
 	for _, kind := range []string{"cron", "timer"} {
 		for _, shell := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/shell=%t", kind, shell), func(t *testing.T) {
