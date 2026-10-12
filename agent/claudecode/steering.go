@@ -95,7 +95,11 @@ func (cs *claudeSession) SteerAsync(prompt, messageID string, images []core.Imag
 	if encoded > claudeInlineImageLimit {
 		return nil, nil
 	}
-	cs.inputMu.Lock()
+	// Send can hold inputMu for the entire first-write timeout. Engine calls
+	// steering while holding lifecycle locks, so busy input must take the queue.
+	if !cs.inputMu.TryLock() {
+		return nil, nil
+	}
 	if !cs.inputActive || !cs.alive.Load() {
 		cs.inputMu.Unlock()
 		return nil, nil
