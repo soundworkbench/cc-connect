@@ -76,22 +76,23 @@ func TestSteerAsync_LargeImageFallsBackToQueue(t *testing.T) {
 	if receipt != nil || err != nil {
 		t.Fatalf("large image must not be steered inline: receipt=%v err=%v", receipt, err)
 	}
-	if cs.partialInput != nil {
-		t.Fatal("no partial frame may be left behind")
+	if !cs.Alive() {
+		t.Fatal("attachment fallback must keep the original stream usable")
 	}
 	finish(cs, first["uuid"])
 }
 
-func TestSend_AbandonedPartialFrameClosesSession(t *testing.T) {
+func TestSend_AfterPartialWriteCannotReuseStream(t *testing.T) {
 	closed := &atomic.Bool{}
 	cs, _ := steerFixture(t)
-	cs.partialInput = &claudePartialInput{id: "x", messageID: "old", prompt: "old", tail: []byte("}\n")}
 	cs.stdin = partialPipe{closed: closed}
-	err := cs.Send("new", "m-new", nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "session closed") {
-		t.Fatalf("want session-closed error, got %v", err)
+	if err := cs.Send("old", "m-old", nil, nil); err == nil {
+		t.Fatal("expected partial write failure")
 	}
-	if !closed.Load() || cs.partialInput != nil {
-		t.Fatal("abandoned partial frame must close stdin and clear state")
+	if cs.Alive() || !closed.Load() {
+		t.Fatal("partial write must invalidate session and close stdin")
+	}
+	if err := cs.Send("new", "m-new", nil, nil); err == nil {
+		t.Fatal("next message must not reuse a partial stdin stream")
 	}
 }

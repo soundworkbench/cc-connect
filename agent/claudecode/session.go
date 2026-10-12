@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -79,10 +80,12 @@ type claudeSession struct {
 	pendingText        []string
 	pendingProgressIDs []string
 
-	inputMu      sync.Mutex
-	inputs       map[string]*claudeInput
-	inputActive  bool
-	partialInput *claudePartialInput // incomplete frame, guarded by inputMu
+	inputMu           sync.Mutex
+	inputs            map[string]*claudeInput
+	inputActive       bool
+	firstWriteTimeout time.Duration
+	firstWriteDone    bool // guarded by stdinMu
+	inputFailure      atomic.Pointer[core.InputWriteError]
 }
 
 // StartupWarning implements core.StartupWarner. Returns a non-empty string
@@ -1164,17 +1167,32 @@ func (cs *claudeSession) RespondPermission(requestID string, result core.Permiss
 }
 
 func (cs *claudeSession) writeJSON(v any) error {
-	cs.stdinMu.Lock()
-	defer cs.stdinMu.Unlock()
-
 	data, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	if _, err := cs.stdin.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("write stdin: %w", err)
+	_, err = cs.writeInputBytes(append(data, '\n'), false)
+	return err
+}
+
+func (cs *claudeSession) InputFailure() *core.InputWriteError { return cs.inputFailure.Load() }
+
+func (cs *claudeSession) invalidateInput(n, total int, err error) error {
+	failure := &core.InputWriteError{WrittenBytes: n, TotalBytes: total, Err: err}
+	cs.inputFailure.Store(failure)
+	cs.alive.Store(false)
+	slog.Error("claudeSession: stdin write failed", "session", cs.CurrentSessionID(), "written_bytes", n, "total_bytes", total, "error", err)
+	if closeErr := cs.stdin.Close(); closeErr != nil && !errors.Is(closeErr, os.ErrClosed) {
+		slog.Warn("claudeSession: close failed stdin", "session", cs.CurrentSessionID(), "error", closeErr)
 	}
-	return nil
+	if killErr := forceKillCmd(cs.cmd); killErr != nil {
+		slog.Error("claudeSession: kill failed input process", "session", cs.CurrentSessionID(), "error", killErr)
+	}
+	if cs.cancel != nil {
+		cs.cancel()
+	}
+	slog.Warn("claudeSession: input process terminated; restart required", "session", cs.CurrentSessionID(), "written_bytes", n, "total_bytes", total)
+	return failure
 }
 
 func isClaudeEditTool(toolName string) bool {
@@ -1281,10 +1299,15 @@ func (cs *claudeSession) Close() error {
 	// Phase 1: Close stdin to signal EOF. Claude Code exits cleanly on
 	// stdin close, running Stop hooks (e.g. claude-mem session summary).
 	cs.stdinMu.Lock()
-	if err := cs.stdin.Close(); err != nil {
+	if err := cs.stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 		slog.Warn("claudeSession: close stdin", "error", err)
 	}
 	cs.stdinMu.Unlock()
+
+	if cs.inputFailure.Load() != nil {
+		<-cs.done
+		return nil
+	}
 
 	graceful := cs.gracefulStopTimeout
 	if graceful <= 0 {

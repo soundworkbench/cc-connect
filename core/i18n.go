@@ -205,6 +205,7 @@ const (
 	MsgIntermediateContent       MsgKey = "intermediate_content"
 	MsgFinalDeliveryFailed       MsgKey = "final_delivery_failed"
 	MsgError                     MsgKey = "error"
+	MsgPromptNotDelivered        MsgKey = "prompt_not_delivered"
 	MsgAgentTurnFailed           MsgKey = "agent_turn_failed"
 	MsgAgentTurnInterrupted      MsgKey = "agent_turn_interrupted"
 	MsgSessionNotFound           MsgKey = "session_not_found"
@@ -891,6 +892,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "最終訊息傳送失敗，已保留進度資訊。",
 		LangJapanese:           "最終メッセージの送信に失敗しました。進捗を保持しました。",
 		LangSpanish:            "No se pudo enviar el mensaje final. Se conservó el progreso.",
+	},
+	MsgPromptNotDelivered: {
+		LangEnglish:            "Your previous message was not delivered completely. The agent process was stopped and will restart for your next message. Please resend.",
+		LangChinese:            "上一条消息未完整送达，代理进程已结束，下条消息将重新启动。请重发上一条消息。",
+		LangTraditionalChinese: "上一則訊息未完整送達，代理程序已結束，下則訊息將重新啟動。請重傳上一則訊息。",
+		LangJapanese:           "前のメッセージを完全に送信できませんでした。エージェントのプロセスを終了し、次のメッセージで再起動します。再送してください。",
+		LangSpanish:            "Tu mensaje anterior no se entregó por completo. Se detuvo el proceso del agente y se reiniciará con el siguiente mensaje. Vuelve a enviarlo.",
 	},
 	MsgError: {
 		LangEnglish:            "❌ Error: %v",

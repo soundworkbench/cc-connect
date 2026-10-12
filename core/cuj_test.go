@@ -657,6 +657,7 @@ type startSessionError struct{ msg string }
 func (e *startSessionError) Error() string { return e.msg }
 
 func TestCUJ_G1_LLMFailureSurfacesErrorToUser(t *testing.T) {
+	t.Run("stdin_failure_restarts_with_resume", testCUJInputWriteFailureRecovery)
 	plat := &stubPlatformEngine{n: "test"}
 	agent := &failingAgent{}
 	agent.failNext.Set(true)
@@ -3341,4 +3342,56 @@ func chineseToolProgressJourney(t *testing.T, mode string) {
 			t.Fatalf("starts=%d recalls=%d", starts, deletes)
 		}
 	}
+}
+
+type inputFailureCUJSession struct{ *cujAgentSession }
+
+func (s *inputFailureCUJSession) Send(prompt, messageID string, images []ImageAttachment, files []FileAttachment) error {
+	if strings.Contains(prompt, "break-input") {
+		s.closed.Set(true)
+		close(s.events)
+		return &InputWriteError{WrittenBytes: 4096, TotalBytes: 65536, Err: errors.New("broken pipe")}
+	}
+	return s.cujAgentSession.Send(prompt, messageID, images, files)
+}
+func (s *inputFailureCUJSession) Close() error {
+	if !s.closed.Get() {
+		s.closed.Set(true)
+		close(s.events)
+	}
+	return nil
+}
+
+type inputFailureCUJAgent struct{ cujAgent }
+
+func (a *inputFailureCUJAgent) StartSession(ctx context.Context, id string) (AgentSession, error) {
+	as, err := a.cujAgent.StartSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	s := as.(*cujAgentSession)
+	a.mu.Lock()
+	if len(a.sessions) > 1 {
+		s.reply = "recovered on new process with resume=" + id
+	}
+	a.mu.Unlock()
+	return &inputFailureCUJSession{s}, nil
+}
+
+func testCUJInputWriteFailureRecovery(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	a := &inputFailureCUJAgent{}
+	e := NewEngine("test", a, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	defer e.Stop()
+	env := &cujEnv{t: t, engine: e, plat: p}
+	env.userSends("write-failure", "hello")
+	env.waitFor("first reply", time.Second, func() bool { return len(p.getSent()) > 0 })
+	env.userSends("write-failure", "break-input")
+	env.waitFor("explicit resend notice", time.Second, func() bool {
+		return strings.Contains(strings.Join(p.getSent(), "\n"), "Please resend")
+	})
+	env.userSends("write-failure", "retry")
+	env.waitFor("new process resumes", time.Second, func() bool {
+		return strings.Contains(strings.Join(p.getSent(), "\n"), "recovered on new process with resume=cuj-agent-session")
+	})
 }
