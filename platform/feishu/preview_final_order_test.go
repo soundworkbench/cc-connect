@@ -125,7 +125,12 @@ func TestPreviewLifecycleFinalHTTPOrder(t *testing.T) {
 				case <-time.After(4 * time.Second):
 					t.Fatal("no prompt")
 				}
-				wait("placeholder", func() bool { v := read(); return len(v) > 0 && v[0] == "card" })
+				// The progress placeholder is created lazily on the first visible text
+				// (silent turns must leave no card behind), so drive one progress line first.
+				if scenario != "silent" {
+					s.events <- core.Event{Type: core.EventText, Content: "进度"}
+					wait("placeholder", func() bool { v := read(); return len(v) > 0 && v[0] == "card" })
+				}
 				if scenario == "queued" {
 					receive("m2", "queued work")
 					wait("queue notice", func() bool { return len(read()) >= 2 })
@@ -153,6 +158,7 @@ func TestPreviewLifecycleFinalHTTPOrder(t *testing.T) {
 					case <-time.After(4 * time.Second):
 						t.Fatal("queue not drained")
 					}
+					s.events <- core.Event{Type: core.EventText, Content: "进度"}
 					wait("second placeholder", func() bool { mu.Lock(); defer mu.Unlock(); return cards == 2 })
 					s.events <- core.Event{Type: core.EventResult, Content: "answer two", Done: true}
 				}
@@ -163,7 +169,7 @@ func TestPreviewLifecycleFinalHTTPOrder(t *testing.T) {
 					"retry": {"card", "send", "send", "delete"}, "send_failed": {"card", "send", "send", "update"},
 					"recall_failed": {"card", "send", "delete"},
 					"queued":        {"card", "send", "send", "delete", "card", "send", "delete"},
-					"silent":        {"card", "delete"}, "error": {"card", "send", "delete"}, "closed": {"card", "send", "delete"}, "stop": {"card", "send", "delete"}, "cancel": {"card", "send", "delete"},
+					"silent":        {}, "error": {"card", "send", "delete"}, "closed": {"card", "send", "delete"}, "stop": {"card", "send", "delete"}, "cancel": {"card", "send", "delete"},
 				}[scenario]
 				if order == core.FinalReplyRecallFirst {
 					if replacement, ok := map[string][]string{
