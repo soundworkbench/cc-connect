@@ -77,8 +77,9 @@ func (e *Engine) holdIdleMessage(p Platform, msg *Message, session *Session, ses
 		return false, nil
 	}
 	e.interactiveMu.Lock()
-	state := e.interactiveStates[key]
+	state := e.ensureInteractiveStateForQueueingLocked(key, p, msg.ReplyCtx, session)
 	state.mu.Lock()
+	state.workspaceDir = workspace
 	hold := &queueHold{until: time.Now().Add(e.queueBatch.Hold), wake: make(chan struct{}, 1)}
 	state.hold = hold
 	if state.stopCh == nil {

@@ -2879,6 +2879,8 @@ func (s *steeringJourneySession) Steer(prompt, _ string, _ []ImageAttachment, _ 
 
 func TestCUJ_ST1_SteeringContinuousMessages(t *testing.T) {
 	t.Run("queued-batch-hold", testQueueBatchJourney)
+	t.Run("queued-batch-recall", func(t *testing.T) { testQueueBatchAfterStateRemoval(t, true) })
+	t.Run("queued-batch-idle-close", func(t *testing.T) { testQueueBatchAfterStateRemoval(t, false) })
 	for _, outcome := range []string{"accepted", "rejected", "unconfirmed", "startup", "write-failed"} {
 		t.Run(outcome, func(t *testing.T) {
 			p := &stubPlatformEngine{n: "steering"}
@@ -3376,5 +3378,69 @@ func testQueueBatchJourney(t *testing.T) {
 	}
 	if seen != 1 || len(s.deliveries) != 0 {
 		t.Fatalf("user replies=%v extra turns=%d", p.getSent(), len(s.deliveries))
+	}
+}
+
+func testQueueBatchAfterStateRemoval(t *testing.T, recall bool) {
+	base := &batchPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, routes: make(chan any, 100), merged: make(chan any, 100)}
+	var p Platform = base
+	if recall {
+		p = &reviewRecallPlatform{base}
+	}
+	first := &batchSession{cujAgentSession: newCUJAgentSession(), deliveries: make(chan batchDelivery, 100)}
+	next := &batchSession{cujAgentSession: newCUJAgentSession(), deliveries: make(chan batchDelivery, 100)}
+	starts := make(chan AgentSession, 2)
+	starts <- first
+	starts <- next
+	agent := &controllableAgent{startSessionFn: func(context.Context, string) (AgentSession, error) { return <-starts, nil }}
+	e := NewEngine("batch-removal", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	e.SetDataDir(t.TempDir())
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
+	cfg := DefaultQueueBatchConfig()
+	cfg.Hold = time.Hour
+	e.SetQueueBatchConfig(cfg)
+	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
+	if !recall {
+		e.SetAgentSessionIdleTimeout(10 * time.Millisecond)
+	}
+	e.ReceiveMessage(p, batchMessage(0))
+	cc27Take(t, first.deliveries)
+	if !recall {
+		first.events <- Event{Type: EventResult, Content: "先前答复", Done: true}
+		cc27WaitIdle(t, e, "test:user")
+		deadline := time.Now().Add(time.Second)
+		for !first.closed.Get() && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if !first.closed.Get() {
+			t.Fatal("idle agent did not close")
+		}
+	}
+	relay := batchMessage(1)
+	relay.Source = "relay"
+	e.ReceiveMessage(p, relay)
+	if sent := base.getSent(); !strings.Contains(strings.Join(sent, "\n"), e.i18n.T(MsgMessageQueued)) {
+		t.Fatalf("relay not visibly accepted after state removal: %v", sent)
+	}
+	select {
+	case d := <-next.deliveries:
+		t.Fatalf("relay ran before wake: %+v", d)
+	default:
+	}
+	e.ReceiveMessage(p, batchMessage(2))
+	d := cc27Take(t, next.deliveries)
+	if strings.Index(d.prompt, "内容1") < 0 || strings.Index(d.prompt, "内容2") <= strings.Index(d.prompt, "内容1") {
+		t.Fatalf("relay lost or reordered after state removal: %q", d.prompt)
+	}
+	next.events <- Event{Type: EventResult, Content: "撤回或空闲关闭后统一答复", Done: true}
+	cc27WaitIdle(t, e, "test:user")
+	count := 0
+	for _, sent := range base.getSent() {
+		if sent == "撤回或空闲关闭后统一答复" {
+			count++
+		}
+	}
+	if count != 1 || len(next.deliveries) != 0 {
+		t.Fatalf("user replies=%v extra turns=%d", base.getSent(), len(next.deliveries))
 	}
 }

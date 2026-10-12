@@ -2271,7 +2271,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 sessionLocked:
 	e.interactiveMu.Lock()
-	queuedState := e.interactiveStates[interactiveKey]
+	// Recall and idle cleanup can remove the startup placeholder before we own
+	// the session lock. Re-establish it before choosing queue admission.
+	queuedState := e.ensureInteractiveStateForQueueingLocked(interactiveKey, p, msg.ReplyCtx, session)
 	hasPending := false
 	if queuedState != nil {
 		queuedState.mu.Lock()
@@ -2469,7 +2471,9 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 		accepted = true
 		return true, nil
 	}
-	if !msg.scheduledPrompt && len(state.pendingMessages) >= e.maxQueuedMessages {
+	// max_depth limits input waiting behind a running turn. An idle hold has
+	// not started a turn yet; immediate input must join its FIFO before waking it.
+	if state.hold == nil && !msg.scheduledPrompt && len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
 		return true, nil // handled: queue-full reply sent
@@ -2548,6 +2552,11 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, replyCtx any, session ...*Session) {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
+	e.ensureInteractiveStateForQueueingLocked(key, p, replyCtx, session...)
+}
+
+// The caller holds interactiveMu until any subsequent state.mu acquisition.
+func (e *Engine) ensureInteractiveStateForQueueingLocked(key string, p Platform, replyCtx any, session ...*Session) *interactiveState {
 	if _, ok := e.interactiveStates[key]; !ok {
 		e.interactiveStates[key] = &interactiveState{
 			queueKey:         key,
@@ -2562,6 +2571,7 @@ func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, reply
 		state.queueSessionID = session[0].ID
 	}
 	state.mu.Unlock()
+	return state
 }
 
 // drainOrphanedQueue is called when a message was queued but the drain loop
@@ -3746,6 +3756,7 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 		state.stopped ||
 		state.eventsNeedResync ||
 		state.pending != nil ||
+		state.hold != nil ||
 		len(state.pendingMessages) > 0 {
 		state.mu.Unlock()
 		e.interactiveMu.Unlock()

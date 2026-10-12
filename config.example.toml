@@ -8,16 +8,7 @@
 # Example: token = "${TELEGRAM_BOT_TOKEN}" / 所有字符串值都支持 ${VAR_NAME} 环境变量替换。
 # 例如：token = "${TELEGRAM_BOT_TOKEN}"
 #
-# Each # Merge consecutive queued inputs for one session into one agent turn.
-# This top-level section applies to every project. Restart to apply changes.
-[queue_batch]
-enabled = true
-max_messages = 20
-max_chars = 20000                  # Unicode characters, including source/time markers
-hold_seconds = 60                 # idle automation wait; 0 disables waiting
-immediate_sources = ["human"]      # add "relay", "timer", "cron", "assistant" as needed
-
-[[projects]] entry binds one code directory to its own agent + platforms.
+# Each [[projects]] entry binds one code directory to its own agent + platforms.
 # A single cc-connect process can manage multiple projects simultaneously.
 # 每个 [[projects]] 将一个代码目录绑定到独立的 agent 和平台。
 # 单个 cc-connect 进程可以同时管理多个项目。
@@ -66,6 +57,15 @@ immediate_sources = ["human"]      # add "relay", "timer", "cron", "assistant" a
 # 调大可发送更大文件；/send 请求体上限会随之按 base64 膨胀自动放大。
 # 也可用环境变量 CC_MAX_ATTACHMENT_SIZE_MB 覆盖（同样单位 MiB；设置后优先级高于本配置项）。
 # max_attachment_size_mb = 50
+
+# Merge consecutive queued inputs for one session into one agent turn.
+# This top-level section applies to every project. Restart to apply changes.
+[queue_batch]
+enabled = true
+max_messages = 20
+max_chars = 20000                  # Unicode characters, including source/time markers
+hold_seconds = 60                 # idle automation wait; 0 disables waiting
+immediate_sources = ["human"]      # add "relay", "timer", "cron", "assistant" as needed
 
 [log]
 level = "info" # debug, info, warn, error

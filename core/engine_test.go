@@ -13412,6 +13412,7 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 	agent := &resultAgent{session: agentSession}
 
 	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	defer e.cancel()
 	e.cronScheduler = scheduler
 
@@ -13561,6 +13562,7 @@ func TestExecuteCronJob_ExpandsSlashSkillPrompt(t *testing.T) {
 			agent := &resultAgent{session: agentSession}
 
 			e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+			e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 			defer e.cancel()
 			e.skills.SetDirs([]string{skillRoot})
 
