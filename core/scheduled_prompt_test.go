@@ -51,7 +51,7 @@ func cc27WaitIdle(t *testing.T, e *Engine, key string) {
 
 // Busy scheduled prompts join the actual Engine FIFO even when the normal
 // user queue is full. User -> timer -> cron -> timer must reach the agent once,
-// in order, retaining muted delivery and each scheduled permission mode.
+// in order, retaining agent delivery and each scheduled permission mode.
 func TestScheduledPromptBusyFIFO(t *testing.T) {
 	p := &scheduledTestPlatform{&steerReactionPlatform{stubPlatformEngine: stubPlatformEngine{n: "scheduled"}, reactions: make(chan string, 16)}}
 	s := &scheduledTestSession{steeringJourneySession: &steeringJourneySession{cujAgentSession: newCUJAgentSession(), started: make(chan string, 16), steered: make(chan string, 16)}, modes: make(chan string, 16), ids: make(chan string, 16)}
@@ -106,8 +106,8 @@ func TestScheduledPromptBusyFIFO(t *testing.T) {
 			count++
 		}
 	}
-	if count != 2 {
-		t.Fatalf("muted scheduled responses leaked: %v", sent)
+	if count != 5 {
+		t.Fatalf("scheduled agent responses missing: %v", sent)
 	}
 }
 
