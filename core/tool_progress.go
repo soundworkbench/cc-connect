@@ -69,6 +69,7 @@ func publicToolProgress(event Event) string {
 // replaceToolProgress coalesces bursts at the stream_preview interval. It only
 // edits an existing placeholder; final delivery cancels the owned timer.
 func (sp *streamPreview) replaceToolProgress(text string) {
+	sp.acknowledgeVisible(text)
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 	sp.queueProgressLocked(text)
@@ -128,10 +129,12 @@ func (sp *streamPreview) appendProgressEvent(event Event, text string) {
 	if event.Type != EventProgress && event.Type != EventToolUse {
 		return
 	}
+	text, _ = stripTrailingSilent(text)
 	text = strings.TrimSpace(text)
 	if text == "" || isEllipsisOnly(text) {
 		return
 	}
+	sp.acknowledgeVisible(text)
 	key := string(event.Type) + ":" + event.ProgressID
 	if event.ProgressID == "" {
 		key = fmt.Sprintf("%s:%x", event.Type, sha256.Sum256([]byte(event.ToolName+"\x00"+text)))

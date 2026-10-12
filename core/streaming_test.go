@@ -653,3 +653,19 @@ func TestStreamPreview_UnfreezeIdempotent(t *testing.T) {
 		t.Fatal("canPreview() = false after no-op unfreeze, want true")
 	}
 }
+
+func TestStreamPreview_TextWithNoReplyNeverDisplaysMarker(t *testing.T) {
+	p := &mockUpdaterPlatform{}
+	sp := newStreamPreview(StreamPreviewCfg{Enabled: true}, p, "ctx", context.Background(), nil)
+	sp.appendText("visible answer\nNO_REPLY")
+	sp.freeze()
+	sp.finish("visible answer", "")
+	for _, message := range p.getMessages() {
+		if strings.Contains(message, "NO_REPLY") {
+			t.Fatalf("silent marker leaked into preview: %v", p.getMessages())
+		}
+	}
+	if p.lastMsg != "visible answer" {
+		t.Fatalf("visible text lost: %q", p.lastMsg)
+	}
+}

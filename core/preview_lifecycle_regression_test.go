@@ -61,19 +61,6 @@ func TestProcessInteractiveEvents_PreviewLifecycleOneCard(t *testing.T) {
 				e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, "ctx")
 				close(done)
 			}()
-			deadline := time.Now().Add(2 * time.Second)
-			for {
-				p.previewMu.Lock()
-				n := len(p.starts)
-				p.previewMu.Unlock()
-				if n > 0 {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("no immediate placeholder before first model event")
-				}
-				time.Sleep(time.Millisecond)
-			}
 			as.events <- Event{Type: EventThinking, Content: "progress one"}
 			as.events <- Event{Type: EventText, Content: "intermediate commentary"}
 			as.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "pwd"}
@@ -128,6 +115,7 @@ func TestProcessInteractiveEvents_PreviewLifecycleErrorRecalls(t *testing.T) {
 
 func TestCUJ_PreviewLifecycleThreeTurns(t *testing.T) {
 	t.Run("public_progress_hidden_thinking", testPreviewLifecyclePublicProgressThreeTurns)
+	t.Run("silent_visible_normal", testPreviewLifecycleSilentVisibleThreeTurns)
 	for _, outcome := range []string{"success", "error", "nil_handle", "disabled"} {
 		for _, instant := range []bool{false, true} {
 			for _, textPreview := range []bool{false, true} {
@@ -367,5 +355,134 @@ func TestAppendProgressPermissionKeepsHistoryAndHandle(t *testing.T) {
 	defer p.previewMu.Unlock()
 	if len(p.starts) != 1 || len(p.edits) != 2 || len(p.deletes) != 1 {
 		t.Fatalf("starts=%v edits=%v deletes=%v", p.starts, p.edits, p.deletes)
+	}
+}
+
+func TestProcessInteractiveEvents_NoReplyDeferredPlaceholderZeroFootprint(t *testing.T) {
+	for _, textPreview := range []bool{false, true} {
+		for _, instant := range []bool{false, true} {
+			for _, chunks := range [][]string{nil, {"N"}, {"NO_R"}, {"**NO_R"}, {"NO_REPLY"}, {"NO_R", "EPLY"}, {"  ", "no_reply\n"}, {"**NO_REPLY"}} {
+				t.Run(fmt.Sprintf("text_%t/instant_%t/chunks_%v", textPreview, instant, chunks), func(t *testing.T) {
+					p := &lifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "lifecycle"}, textPreview: textPreview}
+					e := NewEngine("test", &stubAgent{}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+					defer e.Stop()
+					e.SetStreamPreviewCfg(DefaultStreamPreviewCfg())
+					e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
+					e.SetInstantReply(InstantReplyCfg{Enabled: instant, Content: "思考中…"})
+					as := newControllableSession("silent")
+					state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx"}
+					key := "lifecycle:silent"
+					e.interactiveStates[key] = state
+					for _, chunk := range chunks {
+						as.events <- Event{Type: EventText, Content: chunk}
+					}
+					as.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+					e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "silent", time.Now(), nil, nil, "ctx")
+					if len(p.getSent()) != 0 || len(p.starts) != 0 || len(p.edits) != 0 || len(p.deletes) != 0 {
+						t.Fatalf("silent turn left a footprint: sent=%v starts=%v edits=%v recalls=%v", p.getSent(), p.starts, p.edits, p.deletes)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestProcessInteractiveEvents_TextWithNoReplyDeliversOnlyText(t *testing.T) {
+	for _, result := range []string{"NO_REPLY", "**NO_REPLY"} {
+		for _, textPreview := range []bool{false, true} {
+			t.Run(fmt.Sprintf("result_%s/text_%t", result, textPreview), func(t *testing.T) {
+				p := &lifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "lifecycle"}, textPreview: textPreview}
+				e := NewEngine("test", &stubAgent{}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+				defer e.Stop()
+				e.SetStreamPreviewCfg(DefaultStreamPreviewCfg())
+				e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
+				as := newControllableSession("visible")
+				state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx"}
+				key := "lifecycle:visible"
+				e.interactiveStates[key] = state
+				as.events <- Event{Type: EventText, Content: "visible answer"}
+				as.events <- Event{Type: EventText, Content: "\nNO_REPLY"}
+				as.events <- Event{Type: EventResult, Content: result, Done: true}
+				e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "visible", time.Now(), nil, nil, "ctx")
+				if sent := p.getSent(); len(sent) != 1 || sent[0] != "visible answer" {
+					t.Fatalf("visible text lost or marker leaked: %v", sent)
+				}
+			})
+		}
+	}
+}
+
+func TestAcknowledgeTurnStart_DefersPlaceholderUntilVisibleOutput(t *testing.T) {
+	p := &lifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "lifecycle"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangChinese)
+	defer e.Stop()
+	sp := newStreamPreview(DefaultStreamPreviewCfg(), p, "ctx", e.ctx, nil)
+	e.acknowledgeTurnStart(p, "ctx", sp, false)
+	if len(p.starts) != 0 || len(p.getSent()) != 0 {
+		t.Fatalf("acknowledged before visible output: starts=%v sent=%v", p.starts, p.getSent())
+	}
+	sp.acknowledgeVisible("NO_REPLY")
+	if len(p.starts) != 0 {
+		t.Fatalf("marker created a placeholder: %v", p.starts)
+	}
+	sp.acknowledgeVisible("visible progress")
+	sp.replacePreview("visible progress")
+	if len(p.starts) != 1 || p.starts[0] != "思考中…" || len(p.edits) != 1 || p.edits[0] != "card-1:visible progress" {
+		t.Fatalf("starts=%v edits=%v", p.starts, p.edits)
+	}
+	sp.discard()
+}
+
+func testPreviewLifecycleSilentVisibleThreeTurns(t *testing.T) {
+	p := &lifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "lifecycle"}}
+	s := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 3)}
+	e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
+	cfg := DefaultStreamPreviewCfg()
+	cfg.IntervalMs = 1
+	e.SetStreamPreviewCfg(cfg)
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
+	e.SetInstantReply(InstantReplyCfg{Enabled: true, Content: "思考中…"})
+	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
+	key := "lifecycle:silent-visible"
+	for turn := 1; turn <= 3; turn++ {
+		e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), UserID: "user", MessageID: fmt.Sprintf("m%d", turn), Content: fmt.Sprintf("request %d", turn), ReplyCtx: "ctx"})
+		select {
+		case <-s.sent:
+		case <-time.After(3 * time.Second):
+			t.Fatal("request did not reach agent")
+		}
+		switch turn {
+		case 1:
+			s.events <- Event{Type: EventText, Content: "NO_R"}
+			s.events <- Event{Type: EventText, Content: "EPLY"}
+			s.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+		case 2:
+			s.events <- Event{Type: EventToolUse, ToolName: "Bash"}
+			s.events <- Event{Type: EventProgress, Content: "正在检查。", ProgressID: "check"}
+			s.events <- Event{Type: EventToolUse, ToolName: "Bash"}
+			s.events <- Event{Type: EventText, Content: "检查完成。\nNO_REPLY"}
+			s.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
+		case 3:
+			s.events <- Event{Type: EventText, Content: "普通答复。"}
+			s.events <- Event{Type: EventResult, Content: "普通答复。", Done: true}
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		for e.sessions.GetOrCreateActive(key).Busy() {
+			if time.Now().After(deadline) {
+				t.Fatalf("turn %d did not finish", turn)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		p.previewMu.Lock()
+		starts, recalls := len(p.starts), len(p.deletes)
+		p.previewMu.Unlock()
+		if starts != turn-1 || recalls != turn-1 {
+			t.Fatalf("turn %d: starts=%d recalls=%d", turn, starts, recalls)
+		}
+		want := []string{"检查完成。", "普通答复。"}[:turn-1]
+		if got := p.getSent(); strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Fatalf("turn %d: sent=%v want=%v", turn, got, want)
+		}
 	}
 }

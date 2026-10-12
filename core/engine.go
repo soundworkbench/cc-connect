@@ -4860,6 +4860,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				silentHold = couldBeSilentPrefix(peekSegment)
 				releasedNow := prevHold && !silentHold
 				if !silentHold {
+					sp.acknowledgeVisible(peekSegment)
 					ensureAgentStreamCard(p)
 				}
 
@@ -5127,10 +5128,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages && !thinkingProcessPreview {
-				fullResponse = strings.Join(textParts, "")
-			} else if fullResponse == "" && len(textParts) > 0 {
-				fullResponse = strings.Join(textParts, "")
+			strippedResult, hasSilentResult := stripTrailingSilent(fullResponse)
+			silentResult := hasSilentResult && strings.TrimSpace(strippedResult) == ""
+			streamedResponse := strings.Join(textParts, "")
+			useStreamedText := len(textParts) > 0 && (!silentResult || !couldBeSilentPrefix(streamedResponse))
+			if useStreamedText && segmentStart == 0 && !e.display.ToolMessages && !thinkingProcessPreview {
+				fullResponse = streamedResponse
+			} else if useStreamedText && (fullResponse == "" || silentResult) {
+				fullResponse = streamedResponse
 			}
 			if fullResponse == "" && !muteScheduledNotices {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
@@ -5186,6 +5191,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			if !isSilent {
+				sp.acknowledgeVisible(baseResponse)
 				ensureAgentStreamCard(p)
 				e.hooks.Emit(HookEvent{
 					Event:      HookEventMessageSent,
@@ -15629,7 +15635,7 @@ func stripTrailingSilent(text string) (string, bool) {
 // prefix of "NO_REPLY". Used during streaming to hold the preview until we know
 // whether the response will resolve to a pure NO_REPLY marker.
 func couldBeSilentPrefix(text string) bool {
-	t := strings.TrimSpace(text)
+	t := strings.TrimLeft(strings.TrimSpace(text), "*")
 	if t == "" {
 		return true
 	}

@@ -104,7 +104,9 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 					desc = truncateStr(job.Prompt, 40)
 				}
 			}
-			e.send(targetPlatform, replyCtx, scheduledStartNotice(desc))
+			if notice := timerStartNotice(desc); notice != "" {
+				e.send(targetPlatform, replyCtx, notice)
+			}
 		}
 	}
 
