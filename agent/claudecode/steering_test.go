@@ -191,7 +191,11 @@ func TestClaudeSteer_WriteFailureAdmission(t *testing.T) {
 			a := takeInput(t, ch)
 			cs.stdin = tc.pipe
 			ok, err := cs.Steer("second", "", nil, nil)
-			if ok || !errors.Is(err, core.ErrSteerNotWritten) {
+			expected := core.ErrSteerWriteUncertain
+			if tc.pipe.deadlineFail {
+				expected = core.ErrSteerNotWritten
+			}
+			if ok || !errors.Is(err, expected) {
 				t.Fatal("incorrect delivery certainty")
 			}
 			finish(cs, a["uuid"])
@@ -234,36 +238,25 @@ func (p *shortOncePipe) Write(b []byte) (int, error) {
 	}
 	return p.File.Write(b)
 }
-func TestClaudeSteer_PartialWriteQueuesSameFrameExactlyOnce(t *testing.T) {
+func TestClaudeSteer_PartialWriteInvalidatesStream(t *testing.T) {
 	cs, ch := steerFixture(t)
 	if err := cs.Send("first", "m1", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	first := takeInput(t, ch)
+	takeInput(t, ch)
 	cs.stdin = &shortOncePipe{File: cs.stdin.(*os.File)}
 	receipt, err := cs.SteerAsync("supplement", "m2", nil, nil)
-	if receipt != nil || !errors.Is(err, core.ErrSteerNotWritten) {
+	if receipt != nil || !errors.Is(err, core.ErrSteerWriteUncertain) {
 		t.Fatalf("receipt=%v error=%v", receipt, err)
 	}
-	finish(cs, first["uuid"])
-	if !(<-cs.events).Done {
-		t.Fatal("incomplete frame held old turn open")
+	if cs.Alive() {
+		t.Fatal("partial frame must invalidate the process")
 	}
-	if err = cs.Send("supplement", "m2", nil, nil); err != nil {
-		t.Fatal(err)
+	if err := cs.Send("supplement", "m2", nil, nil); err == nil {
+		t.Fatal("partial frame must never be continued on the same stream")
 	}
-	second := takeInput(t, ch)
-	if second["message"].(map[string]any)["content"] != "supplement" {
-		t.Fatal("frame corrupted")
-	}
-	finish(cs, second["uuid"])
-	if !(<-cs.events).Done {
-		t.Fatal("queued turn not finished")
-	}
-	select {
-	case <-ch:
-		t.Fatal("duplicate input")
-	default:
+	for frame := range ch {
+		t.Fatalf("unexpected complete frame: %v", frame["type"])
 	}
 }
 
@@ -312,40 +305,25 @@ func TestClaudeSteer_InlineImagesAndTextOnce(t *testing.T) {
 	}
 }
 
-func TestClaudeSteer_PartialImageWriteQueuesSameUUID(t *testing.T) {
+func TestClaudeSteer_PartialImageWriteInvalidatesStream(t *testing.T) {
 	cs, ch := steerFixture(t)
-	cs.workDir = t.TempDir()
 	if err := cs.Send("first", "m1", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	first := takeInput(t, ch)
+	takeInput(t, ch)
 	cs.stdin = &shortOncePipe{File: cs.stdin.(*os.File)}
 	images := []core.ImageAttachment{{Data: []byte("png-data"), MimeType: "image/png"}}
 	receipt, err := cs.SteerAsync("picture", "m2", images, nil)
-	if receipt != nil || !errors.Is(err, core.ErrSteerNotWritten) {
+	if receipt != nil || !errors.Is(err, core.ErrSteerWriteUncertain) {
 		t.Fatalf("receipt=%v error=%v", receipt, err)
 	}
-	id := cs.partialInput.id
-	finish(cs, first["uuid"])
-	if !(<-cs.events).Done {
-		t.Fatal("incomplete image blocked original result")
+	if cs.Alive() {
+		t.Fatal("partial image frame must invalidate the process")
 	}
-	if err := cs.Send("picture", "m2", images, nil); err != nil {
-		t.Fatal(err)
+	if err := cs.Send("picture", "m2", images, nil); err == nil {
+		t.Fatal("partial image must not reuse stdin")
 	}
-	frame := takeInput(t, ch)
-	if frame["uuid"] != id {
-		t.Fatal("new image UUID instead of finishing partial frame")
-	}
-	parts := frame["message"].(map[string]any)["content"].([]any)
-	if parts[0].(map[string]any)["source"].(map[string]any)["data"] != "cG5nLWRhdGE=" {
-		t.Fatal("corrupt image")
-	}
-	finish(cs, id)
-	if !(<-cs.events).Done {
-		t.Fatal("queued image did not finish")
-	}
-	if len(ch) != 0 {
-		t.Fatal("duplicate frame")
+	for frame := range ch {
+		t.Fatalf("unexpected complete frame: %v", frame["type"])
 	}
 }

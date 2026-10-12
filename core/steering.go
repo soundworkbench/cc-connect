@@ -51,7 +51,10 @@ func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg 
 		if err != nil {
 			// Uncertain transport errors must never trigger an automatic duplicate.
 			slog.Warn("active-turn message delivery unconfirmed", "session", msg.SessionKey, "msg_id", msg.MessageID)
-			if errors.Is(err, ErrSteerWriteUncertain) {
+			var writeErr *InputWriteError
+			if errors.As(err, &writeErr) {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPromptNotDelivered))
+			} else if errors.Is(err, ErrSteerWriteUncertain) {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerWriteInterrupted))
 			}
 		} else {

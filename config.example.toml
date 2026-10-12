@@ -829,6 +829,9 @@ name = "my-backend"
 type = "claudecode"
 
 [projects.agent.options]
+# Claude stdin startup deadline; later writes retain the 3s active-turn deadline.
+# Claude 首条 stdin 写入期限；后续写入仍使用 3 秒期限。
+# first_write_timeout = "60s"
 work_dir = "/path/to/backend"
 mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassPermissions" (yolo)
 

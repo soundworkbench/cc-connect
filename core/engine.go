@@ -4329,6 +4329,35 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 	}
 	events := turnAgentSession.Events()
+	handleSendError := func(err error) {
+		slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
+		if !thinkingProcessPreview {
+			sp.discard()
+		}
+		if stopTyping != nil {
+			stopTyping()
+			stopTyping = nil
+		}
+		if turnAgentSession == nil || !turnAgentSession.Alive() {
+			e.cleanupInteractiveState(sessionKey, state)
+		}
+		state.mu.Lock()
+		p := state.platform
+		state.mu.Unlock()
+		displayErr := err.Error()
+		var writeErr *InputWriteError
+		if errors.As(err, &writeErr) {
+			displayErr = e.i18n.T(MsgPromptNotDelivered)
+			slog.Warn("agent session restart required after input failure", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "written_bytes", writeErr.WrittenBytes, "total_bytes", writeErr.TotalBytes)
+		} else {
+			var localized *UserMessageError
+			if errors.As(err, &localized) {
+				displayErr = localized.Localize(e.i18n.CurrentLang())
+			}
+		}
+		terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError), displayErr))
+		e.notifyDroppedQueuedMessages(state, err)
+	}
 	stopCh := state.stopSignal()
 	for {
 		var event Event
@@ -4348,22 +4377,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case err := <-pendingSend:
 			pendingSend = nil
 			if err != nil {
-				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
-				if !thinkingProcessPreview {
-					sp.discard()
-				}
-				if stopTyping != nil {
-					stopTyping()
-					stopTyping = nil
-				}
-				if turnAgentSession == nil || !turnAgentSession.Alive() {
-					e.cleanupInteractiveState(sessionKey, state)
-				}
-				state.mu.Lock()
-				p := state.platform
-				state.mu.Unlock()
-				terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError), err))
-				e.notifyDroppedQueuedMessages(state, err)
+				handleSendError(err)
 				return
 			}
 			e.steerQueuedMessages(state, session, sessions)
@@ -5693,6 +5707,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 
 channelClosed:
+	// The process can close events before Send publishes its write error.
+	if pendingSend != nil {
+		if err := <-pendingSend; err != nil {
+			handleSendError(err)
+			return
+		}
+	}
+	if reporter, ok := turnAgentSession.(InputFailureReporter); ok {
+		if err := reporter.InputFailure(); err != nil {
+			handleSendError(err)
+			return
+		}
+	}
 	// Channel closed - process exited unexpectedly
 	slog.Warn("agent process exited", "session_key", sessionKey)
 	state.mu.Lock()
