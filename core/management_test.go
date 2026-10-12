@@ -576,6 +576,7 @@ func TestMgmt_CronWithScheduler(t *testing.T) {
 
 func TestMgmt_CronExecByID(t *testing.T) {
 	mgmt, ts, e := testManagementServer(t, "tok")
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	store, err := NewCronStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

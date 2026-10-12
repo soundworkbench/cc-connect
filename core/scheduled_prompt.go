@@ -46,20 +46,28 @@ func (e *Engine) admitScheduledPrompt(p Platform, msg *Message, session *Session
 				}
 				return true, nil
 			}
-			msg.executionState = state
-			duplicate := state.steerMessageIDs[msg.scheduledInputID]
-			if !duplicate {
-				if state.steerMessageIDs == nil {
-					state.steerMessageIDs = make(map[string]bool)
-				}
-				state.steerMessageIDs[msg.scheduledInputID] = true
-			}
-			state.mu.Unlock()
-			e.interactiveMu.Unlock()
-			if duplicate {
+			if state.steerMessageIDs[msg.scheduledInputID] {
+				state.mu.Unlock()
+				e.interactiveMu.Unlock()
 				session.Unlock()
 				return true, nil
 			}
+			if e.shouldHold(msg) {
+				state.mu.Unlock()
+				e.interactiveMu.Unlock()
+				held, err := e.holdIdleMessage(p, msg, session, sessions, agent, key, workspace)
+				if err != nil {
+					session.Unlock()
+				}
+				return held, err
+			}
+			msg.executionState = state
+			if state.steerMessageIDs == nil {
+				state.steerMessageIDs = make(map[string]bool)
+			}
+			state.steerMessageIDs[msg.scheduledInputID] = true
+			state.mu.Unlock()
+			e.interactiveMu.Unlock()
 			return false, nil
 		}
 		handled, err := e.admitBusyMessage(p, msg, key, session, sessions)

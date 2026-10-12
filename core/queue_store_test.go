@@ -21,6 +21,7 @@ func (p *queueTestPlatform) ReconstructReplyCtx(key string) (any, error) { retur
 func queueTestEngine(t *testing.T, dir string, p Platform, s AgentSession) *Engine {
 	t.Helper()
 	e := NewEngine("durable-queue", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(dir, "sessions.json"), LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	e.SetDataDir(dir)
 	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
 	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
@@ -433,6 +434,7 @@ func TestQueuePersistence_StopWaitsForProcessCloseBeforeContinuing(t *testing.T)
 		return next, nil
 	}}
 	e := NewEngine("durable-queue", a, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
 	queueTestSend(e, p, "first", "current")
 	cc27Take(t, old.sent)

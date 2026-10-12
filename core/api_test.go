@@ -363,6 +363,7 @@ func TestHandleCronExec_TriggersJob(t *testing.T) {
 	}
 	agentSession := newResultAgentSession("triggered from local api")
 	engine := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
+	engine.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	defer engine.cancel()
 	engine.cronScheduler = scheduler
 	scheduler.RegisterEngine("test", engine)
@@ -416,6 +417,7 @@ func TestHandleCronExec_RunAliasRouteTriggersJob(t *testing.T) {
 	}
 	agentSession := newResultAgentSession("triggered from local api alias")
 	engine := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
+	engine.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	defer engine.cancel()
 	engine.cronScheduler = scheduler
 	scheduler.RegisterEngine("test", engine)

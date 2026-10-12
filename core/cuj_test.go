@@ -253,6 +253,7 @@ func newCUJEnv(t *testing.T) *cujEnv {
 	agent := &cujAgent{}
 	storePath := dir + "/sessions.json"
 	e := NewEngine("test", agent, []Platform{plat}, storePath, LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	return &cujEnv{
 		t:       t,
 		engine:  e,
@@ -717,6 +718,7 @@ func testStopContinuesQueuedMessages(t *testing.T) {
 		return next, nil
 	}}
 	e := NewEngine("queue-stop", a, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
 	send := func(id, content string) {
 		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: p.Name(), MessageID: id, Content: content, ReplyCtx: "ctx"})
@@ -768,6 +770,7 @@ func testPreviewLifecycleQueuedTurns(t *testing.T, outcome string, instant, text
 	p.textPreview = textPreview
 	s := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 3)}
 	e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	cfg := DefaultStreamPreviewCfg()
 	cfg.Enabled = outcome != "disabled"
 	cfg.IntervalMs = 1
@@ -2294,6 +2297,7 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	pB := &stubPlatformEngine{n: "platB"}
 	agent := &cujAgent{}
 	e := NewEngine("test", agent, []Platform{pA, pB}, dir+"/sessions.json", LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
 
 	// Fire 5 messages on each platform concurrently.
@@ -2874,6 +2878,7 @@ func (s *steeringJourneySession) Steer(prompt, _ string, _ []ImageAttachment, _ 
 }
 
 func TestCUJ_ST1_SteeringContinuousMessages(t *testing.T) {
+	t.Run("queued-batch-hold", testQueueBatchJourney)
 	for _, outcome := range []string{"accepted", "rejected", "unconfirmed", "startup", "write-failed"} {
 		t.Run(outcome, func(t *testing.T) {
 			p := &stubPlatformEngine{n: "steering"}
@@ -2888,6 +2893,7 @@ func TestCUJ_ST1_SteeringContinuousMessages(t *testing.T) {
 				s.steerErr = errors.New("transport closed after write")
 			}
 			e := NewEngine("steering", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+			e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 			e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
 			t.Cleanup(func() { e.cancel(); _ = e.Stop() })
 			key := "steering:user"
@@ -3179,6 +3185,7 @@ func TestCUJ_PR1_PreviewRecallAfterQueuedAnswers(t *testing.T) {
 	p := &finalOrderPlatform{failDeletes: 1}
 	s := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 3)}
 	e := newFinalOrderEngine(t, p, &controllableAgent{nextSession: s})
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
 	key := "order:queued"
 	for turn := 1; turn <= 3; turn++ {
@@ -3340,5 +3347,34 @@ func chineseToolProgressJourney(t *testing.T, mode string) {
 		if starts != turn || deletes != turn {
 			t.Fatalf("starts=%d recalls=%d", starts, deletes)
 		}
+	}
+}
+
+func testQueueBatchJourney(t *testing.T) {
+	e, p, s := batchEngine(t)
+	cfg := DefaultQueueBatchConfig()
+	cfg.Hold = time.Hour
+	e.SetQueueBatchConfig(cfg)
+	for i := 1; i <= 3; i++ {
+		msg := batchMessage(i)
+		if i < 3 {
+			msg.Source = "relay"
+		}
+		e.ReceiveMessage(p, msg)
+	}
+	input := cc27Take(t, s.deliveries)
+	if !strings.Contains(input.prompt, "内容1") || !strings.Contains(input.prompt, "内容2") || !strings.Contains(input.prompt, "内容3") {
+		t.Fatal(input.prompt)
+	}
+	s.events <- Event{Type: EventResult, Content: "统一答复", Done: true}
+	cc27WaitIdle(t, e, "test:user")
+	seen := 0
+	for _, reply := range p.getSent() {
+		if reply == "统一答复" {
+			seen++
+		}
+	}
+	if seen != 1 || len(s.deliveries) != 0 {
+		t.Fatalf("user replies=%v extra turns=%d", p.getSent(), len(s.deliveries))
 	}
 }

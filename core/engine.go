@@ -492,7 +492,8 @@ type Engine struct {
 	webStatusFunc func() (url string)
 
 	// Data directory for socket path injection
-	dataDir string
+	dataDir    string
+	queueBatch QueueBatchConfig
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -507,6 +508,11 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
+	source            string
+	urgent            bool
+	queuedAt          time.Time
+	separateReply     bool
+	mergedFrom        []queuedMessage
 	replySessionKey   string
 	restored          *queueRecord
 	scheduledPrompt   bool
@@ -531,6 +537,7 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
+	hold                     *queueHold
 	queueReady               <-chan struct{}
 	queueKey                 string
 	queueSessionID           string
@@ -772,6 +779,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
+		queueBatch:            DefaultQueueBatchConfig(),
 		showContextIndicator:  true,
 		showWorkdirIndicator:  true,
 		shell:                 defaultShell(),
@@ -1496,6 +1504,7 @@ func (e *Engine) Stop() error {
 	e.stopping = true
 	e.platformLifecycleMu.Unlock()
 
+	e.wakeQueueHolds()
 	queueErr := e.flushQueues()
 
 	// Let accepted turns finish delivery before canceling the shared context.
@@ -2057,6 +2066,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Resolve aliases on user text BEFORE merging ExtraContent, so reply
 	// quotes and platform context survive alias resolution (PR #420 fix).
 	content = e.resolveAlias(content)
+	msg.individualReply = msg.individualReply || strings.HasPrefix(content, "/") || strings.HasPrefix(content, "!")
 	if msg.ExtraContent != "" {
 		if content == "" {
 			msg.Content = msg.ExtraContent
@@ -2276,6 +2286,13 @@ sessionLocked:
 		}
 		return
 	}
+	if held, err := e.holdIdleMessage(p, msg, session, sessions, agent, interactiveKey, resolvedWorkspace); held {
+		if err != nil {
+			session.Unlock()
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
+		}
+		return
+	}
 	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
 		session = rotated
 	}
@@ -2423,7 +2440,7 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 
 	// Allow queueing when agentSession is nil (session is starting up,
 	// issue #565). Only reject if the session was established and died.
-	if state.stopped || state.queueRetired || (state.agentSession != nil && !state.agentSession.Alive()) {
+	if state.stopped || state.queueRetired || (state.agentSession != nil && !state.agentSession.Alive() && state.hold == nil) {
 		return false, nil
 	}
 
@@ -2462,12 +2479,13 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 		state.queueSessionID = session.ID
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
+		source: messageSource(msg), urgent: msg.Urgent, queuedAt: time.Now(), separateReply: msg.individualReply || msg.IsPermissionResponse || msg.preflightSent,
 		replySessionKey:   msg.replySessionKey,
 		scheduledPrompt:   msg.scheduledPrompt,
 		scheduledMute:     msg.scheduledMute,
 		scheduledInputID:  msg.scheduledInputID,
 		modeOverride:      msg.ModeOverride,
-		steerRetry:        e.dataDir == "" && !msg.scheduledPrompt && msg.ModeOverride == "" && !state.steerWriteFailed && len(msg.Files) == 0,
+		steerRetry:        e.dataDir == "" && (!e.queueBatch.Enabled || messageSource(msg) == "human") && (!e.queueBatch.Enabled || !msg.individualReply) && !msg.scheduledPrompt && msg.ModeOverride == "" && !state.steerWriteFailed && len(msg.Files) == 0,
 		messageID:         msg.MessageID,
 		platform:          p,
 		replyCtx:          msg.ReplyCtx,
@@ -2493,6 +2511,7 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 		}
 		state.steerMessageIDs[msg.scheduledInputID] = true
 	}
+	e.wakeQueueHoldLocked(state, msg)
 	accepted = true
 	queueDepth := len(state.pendingMessages)
 
@@ -2564,6 +2583,7 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	if !hasState || state == nil {
 		return
 	}
+	e.waitQueueHold(state)
 	state.mu.Lock()
 	if state.stopped || state.queueRetired || (state.queueSessionID != "" && state.queueSessionID != session.ID) {
 		state.mu.Unlock()
@@ -2571,12 +2591,13 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	}
 	needsStart := state.agentSession == nil || !state.agentSession.Alive()
 	if needsStart {
-		q, ok := e.popQueuedMessageLocked(state)
+		q, ok := e.popQueuedBatchLocked(state)
 		state.mu.Unlock()
 		if !ok {
 			return
 		}
 		unlocked = true // processInteractiveMessageWith takes ownership of the lock.
+		e.acknowledgeQueuedBatch(q)
 		msg := queuedInput(q)
 		msg.executionState = state
 		e.processInteractiveMessageWith(q.platform, msg, session, agent, sessions, interactiveKey, workspaceDir, q.msgSessionKey)
@@ -5434,7 +5455,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				)
 			}
 			if len(state.pendingMessages) > 0 {
-				queued, ok := e.popQueuedMessageLocked(state)
+				queued, ok := e.popQueuedBatchLocked(state)
 				if !ok {
 					state.mu.Unlock()
 					return
@@ -5447,6 +5468,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
+
+				e.acknowledgeQueuedBatch(queued)
 
 				// Stop the previous turn's typing indicator
 				if stopTyping != nil {
@@ -5519,6 +5542,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// further down — and platforms derive the parent message_id from
 				// it for the reply quote. Without this reassignment, msg2's
 				// reply would quote msg1's bubble.
+				p = queued.platform
 				replyCtx = queued.replyCtx
 				// Rich-mode per-turn state must reset too — otherwise EventText for
 				// the queued message would StreamRichCardText against the previous
@@ -5833,7 +5857,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			state.mu.Unlock()
 			return true
 		}
-		queued, ok := e.popQueuedMessageLocked(state)
+		queued, ok := e.popQueuedBatchLocked(state)
 		if !ok {
 			state.mu.Unlock()
 			return false
@@ -5845,6 +5869,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
 
+		e.acknowledgeQueuedBatch(queued)
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 

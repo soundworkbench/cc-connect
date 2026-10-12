@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -106,6 +107,7 @@ type Config struct {
 	OutgoingRateLimit  OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
 	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
 	Cron               CronConfig              `toml:"cron"`
+	QueueBatch         QueueBatchConfig        `toml:"queue_batch"`
 	Queue              QueueConfig             `toml:"queue"`
 	Webhook            WebhookConfig           `toml:"webhook"`
 	Bridge             BridgeConfig            `toml:"bridge"`
@@ -140,6 +142,61 @@ type Config struct {
 type CronConfig struct {
 	Silent      *bool  `toml:"silent"`       // suppress cron start notification; default false
 	SessionMode string `toml:"session_mode"` // default session mode: "" or "reuse" (default) or "new_per_run"
+}
+
+// QueueBatchConfig controls consecutive sends and idle automation waiting.
+type QueueBatchConfig struct {
+	Enabled          *bool    `toml:"enabled"`
+	MaxMessages      *int     `toml:"max_messages"`
+	MaxChars         *int     `toml:"max_chars"`
+	HoldSeconds      *int     `toml:"hold_seconds"`
+	ImmediateSources []string `toml:"immediate_sources"`
+}
+
+type ResolvedQueueBatch struct {
+	Enabled          bool
+	MaxMessages      int
+	MaxChars         int
+	HoldSeconds      int
+	ImmediateSources []string
+}
+
+func (c QueueBatchConfig) Resolve() ResolvedQueueBatch {
+	r := ResolvedQueueBatch{Enabled: true, MaxMessages: 20, MaxChars: 20000, HoldSeconds: 60, ImmediateSources: []string{"human"}}
+	if c.Enabled != nil {
+		r.Enabled = *c.Enabled
+	}
+	if c.MaxMessages != nil {
+		r.MaxMessages = *c.MaxMessages
+	}
+	if c.MaxChars != nil {
+		r.MaxChars = *c.MaxChars
+	}
+	if c.HoldSeconds != nil {
+		r.HoldSeconds = *c.HoldSeconds
+	}
+	if c.ImmediateSources != nil {
+		r.ImmediateSources = append([]string{}, c.ImmediateSources...)
+	}
+	return r
+}
+
+func (c QueueBatchConfig) validate() error {
+	if c.MaxMessages != nil && *c.MaxMessages <= 0 {
+		return fmt.Errorf("config: queue_batch.max_messages must be > 0")
+	}
+	if c.MaxChars != nil && *c.MaxChars <= 0 {
+		return fmt.Errorf("config: queue_batch.max_chars must be > 0")
+	}
+	if c.HoldSeconds != nil && (*c.HoldSeconds < 0 || int64(*c.HoldSeconds) > int64(1<<63-1)/int64(time.Second)) {
+		return fmt.Errorf("config: queue_batch.hold_seconds must fit a non-negative duration")
+	}
+	for _, source := range c.ImmediateSources {
+		if strings.TrimSpace(source) == "" {
+			return fmt.Errorf("config: queue_batch.immediate_sources must not contain empty values")
+		}
+	}
+	return nil
 }
 
 // QueueConfig controls the per-session message queue.
@@ -1007,6 +1064,9 @@ func (c *Config) validate() error {
 }
 
 func (c *Config) validateInternal(permissive bool) error {
+	if err := c.QueueBatch.validate(); err != nil {
+		return err
+	}
 	if err := validateDisplayConfig("display", &c.Display); err != nil {
 		return err
 	}

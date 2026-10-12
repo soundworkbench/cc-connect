@@ -9,6 +9,9 @@ import (
 func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg *Message, session *Session, sessions *SessionManager) bool {
 	e.platformLifecycleMu.Lock()
 	defer e.platformLifecycleMu.Unlock()
+	if e.queueBatch.Enabled && (state.hold != nil || messageSource(msg) != "human" || msg.individualReply) {
+		return false
+	}
 	if e.stopping || e.ctx.Err() != nil || state.queueRetired || msg.scheduledPrompt || msg.ModeOverride != "" || session == nil || sessions == nil || state.stopped || state.pending != nil {
 		return false
 	}

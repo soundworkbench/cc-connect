@@ -128,6 +128,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	}
 
 	msg := &Message{
+		individualReply:  strings.HasPrefix(strings.TrimSpace(job.Prompt), "/"),
 		scheduledPrompt:  true,
 		scheduledMute:    job.Mute,
 		scheduledInputID: "timer:" + job.ID + ":" + fmt.Sprint(job.ScheduledAt.UnixNano()),

@@ -194,6 +194,8 @@ const (
 	MsgSteerWriteInterrupted     MsgKey = "message_steer_write_interrupted"
 	MsgMessageSteered            MsgKey = "message_steered"
 	MsgMessageSteerUnconfirmed   MsgKey = "message_steer_unconfirmed"
+	MsgQueueBatchMarker          MsgKey = "queue_batch_marker"
+	MsgQueueBatchSource          MsgKey = "queue_batch_source"
 	MsgMessageQueued             MsgKey = "message_queued"
 	MsgQueuedMessageDropped      MsgKey = "queued_message_dropped"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
@@ -686,6 +688,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "[カード画像を取得できません：Feishuは他アプリのカード画像を制限しています｜送信者 %s ｜image_key=%s]",
 		LangSpanish:            "[Imagen de tarjeta no disponible: Feishu restringe imágenes de otras aplicaciones | remitente %s | image_key=%s]",
 	},
+	MsgQueueBatchMarker:    {LangChinese: "【消息 %d/%d｜来源：%s｜%s】", LangEnglish: "[Message %d/%d | Source: %s | %s]", LangTraditionalChinese: "【訊息 %d/%d｜來源：%s｜%s】", LangJapanese: "【メッセージ %d/%d｜送信元：%s｜%s】", LangSpanish: "[Mensaje %d/%d | Origen: %s | %s]"},
+	MsgQueueBatchSource:    {LangChinese: "消息", LangEnglish: "message", LangTraditionalChinese: "訊息", LangJapanese: "メッセージ", LangSpanish: "mensaje"},
 	MsgProgressFolded:      {LangChinese: "…（前 %d 条已折叠）", LangEnglish: "… (%d earlier entries folded)", LangTraditionalChinese: "…（前 %d 條已摺疊）", LangJapanese: "…（前の %d 件を折りたたみました）", LangSpanish: "… (%d entradas anteriores contraídas)"},
 	MsgProgressCommand:     {LangChinese: "运行命令", LangEnglish: "Run command", LangTraditionalChinese: "執行命令", LangJapanese: "コマンドを実行", LangSpanish: "Ejecutar comando"},
 	MsgProgressRead:        {LangChinese: "读取文件", LangEnglish: "Read file", LangTraditionalChinese: "讀取檔案", LangJapanese: "ファイルを読む", LangSpanish: "Leer archivo"},

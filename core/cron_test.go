@@ -114,7 +114,6 @@ func TestMutePlatform_DiscardMessages(t *testing.T) {
 	}
 }
 
-
 func TestCronJob_MuteField(t *testing.T) {
 	job := &CronJob{ID: "m1", Mute: false}
 	if job.Mute {
@@ -383,6 +382,7 @@ func TestCronScheduler_RunJobNow_DisabledJobStillRuns(t *testing.T) {
 	agent := &resultAgent{session: agentSession}
 
 	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	defer e.cancel()
 	e.cronScheduler = scheduler
 	scheduler.RegisterEngine("test", e)
@@ -488,6 +488,7 @@ func TestCronScheduler_RunJobNow_UsesSnapshot(t *testing.T) {
 	agent := &resultAgent{session: agentSession}
 
 	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	defer e.cancel()
 	e.cronScheduler = scheduler
 	scheduler.RegisterEngine("test", e)

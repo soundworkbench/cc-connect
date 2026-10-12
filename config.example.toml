@@ -8,7 +8,16 @@
 # Example: token = "${TELEGRAM_BOT_TOKEN}" / 所有字符串值都支持 ${VAR_NAME} 环境变量替换。
 # 例如：token = "${TELEGRAM_BOT_TOKEN}"
 #
-# Each [[projects]] entry binds one code directory to its own agent + platforms.
+# Each # Merge consecutive queued inputs for one session into one agent turn.
+# This top-level section applies to every project. Restart to apply changes.
+[queue_batch]
+enabled = true
+max_messages = 20
+max_chars = 20000                  # Unicode characters, including source/time markers
+hold_seconds = 60                 # idle automation wait; 0 disables waiting
+immediate_sources = ["human"]      # add "relay", "timer", "cron", "assistant" as needed
+
+[[projects]] entry binds one code directory to its own agent + platforms.
 # A single cc-connect process can manage multiple projects simultaneously.
 # 每个 [[projects]] 将一个代码目录绑定到独立的 agent 和平台。
 # 单个 cc-connect 进程可以同时管理多个项目。

@@ -8219,6 +8219,7 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 			}
 			agentSession := newResultAgentSession("manual run complete")
 			e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
+			e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 			e.cronScheduler = scheduler
 			scheduler.RegisterEngine("test", e)
 
@@ -9049,6 +9050,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessagesFIFOWithCreateTimes(t *tes
 	sess := newQueuingSession("qs-fifo-times")
 	agent := &controllableAgent{nextSession: sess}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 
 	key := "test:user1"
 	session := e.sessions.GetOrCreateActive(key)

@@ -15,6 +15,7 @@ func TestScheduledStartNoticeCronAndTimerDelivery(t *testing.T) {
 		for _, desc := range []string{"✅ 已完成", "❌ 失败", "Daily summary"} {
 			p := &scheduledTestPlatform{&steerReactionPlatform{stubPlatformEngine: stubPlatformEngine{n: "scheduled"}}}
 			e := NewEngine("notice", &resultAgent{session: newResultAgentSession("final")}, []Platform{p}, "", LangEnglish)
+			e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 			var err error
 			if timer {
 				err = e.ExecuteTimerJob(&TimerJob{ID: "t", SessionKey: "scheduled:chat:user", Prompt: "work", Description: desc})

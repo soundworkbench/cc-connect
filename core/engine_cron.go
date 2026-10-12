@@ -132,6 +132,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	msg := &Message{
+		individualReply:  strings.HasPrefix(strings.TrimSpace(job.Prompt), "/"),
 		scheduledPrompt:  true,
 		scheduledMute:    job.Mute,
 		scheduledInputID: "cron:" + job.ID + ":" + fmt.Sprint(time.Now().UnixNano()),
