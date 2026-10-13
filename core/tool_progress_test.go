@@ -44,8 +44,12 @@ func TestQuietToolProgressPlaceholderRegression(t *testing.T) {
 			edits := append([]string(nil), p.edits...)
 			starts := append([]string(nil), p.starts...)
 			p.previewMu.Unlock()
-			if len(starts) != 1 {
-				t.Fatalf("starts=%v", starts)
+			wantStarts := 1
+			if mode == "disabled" {
+				wantStarts = 0
+			}
+			if len(starts) != wantStarts {
+				t.Fatalf("starts=%v, want %d before visible output", starts, wantStarts)
 			}
 			if mode == "quiet" {
 				if len(edits) != 1 || edits[0] != "card-1:正在检查2\n正在检查3\n正在检查4" {

@@ -62,6 +62,7 @@ func runMaxTurnScenario(t *testing.T, maxTurn time.Duration, durations []time.Du
 	p := &stubPlatformEngine{n: "test"}
 	sess := newQueuingSession("max-turn")
 	e := NewEngine("test", &controllableAgent{nextSession: sess}, []Platform{p}, "", LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	e.SetMaxTurnTime(maxTurn)
 
 	key := "test:user1"

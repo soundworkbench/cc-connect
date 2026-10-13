@@ -104,7 +104,9 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 					desc = truncateStr(job.Prompt, 40)
 				}
 			}
-			e.send(targetPlatform, replyCtx, scheduledStartNotice(desc))
+			if notice := timerStartNotice(desc); notice != "" {
+				e.send(targetPlatform, replyCtx, notice)
+			}
 		}
 	}
 
@@ -128,6 +130,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	}
 
 	msg := &Message{
+		individualReply:  strings.HasPrefix(strings.TrimSpace(job.Prompt), "/"),
 		scheduledPrompt:  true,
 		scheduledMute:    job.Mute,
 		scheduledInputID: "timer:" + job.ID + ":" + fmt.Sprint(job.ScheduledAt.UnixNano()),

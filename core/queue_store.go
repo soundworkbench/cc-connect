@@ -11,9 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 )
 
 type queueRecord struct {
+	Source            string            `json:"source,omitempty"`
+	Urgent            bool              `json:"urgent,omitempty"`
+	QueuedAt          time.Time         `json:"queued_at,omitempty"`
+	SeparateReply     bool              `json:"separate_reply,omitempty"`
 	Project           string            `json:"project"`
 	Key               string            `json:"key"`
 	SessionID         string            `json:"session_id"`
@@ -45,7 +50,7 @@ func (q queuedMessage) record(project string, state *interactiveState) queueReco
 	if replyKey == "" {
 		replyKey = q.msgSessionKey
 	}
-	return queueRecord{Project: project, Key: state.queueKey, SessionID: state.queueSessionID,
+	return queueRecord{Source: q.source, Urgent: q.urgent, QueuedAt: q.queuedAt, SeparateReply: q.separateReply, Project: project, Key: state.queueKey, SessionID: state.queueSessionID,
 		Workspace: state.workspaceDir, Platform: q.platform.Name(), ReplySessionKey: replyKey,
 		Muted: q.scheduledMute, Scheduled: q.scheduledPrompt, InputID: q.scheduledInputID,
 		MessageID: q.messageID, SessionKey: q.msgSessionKey, Content: q.content,
@@ -54,7 +59,7 @@ func (q queuedMessage) record(project string, state *interactiveState) queueReco
 }
 
 func (r queueRecord) queued() queuedMessage {
-	return queuedMessage{scheduledPrompt: r.Scheduled, scheduledMute: r.Muted, scheduledInputID: r.InputID,
+	return queuedMessage{source: r.Source, urgent: r.Urgent, queuedAt: r.QueuedAt, separateReply: r.SeparateReply, scheduledPrompt: r.Scheduled, scheduledMute: r.Muted, scheduledInputID: r.InputID,
 		messageID: r.MessageID, msgPlatform: r.Platform, msgSessionKey: r.SessionKey,
 		replySessionKey: r.ReplySessionKey, content: r.Content, images: r.Images, files: r.Files,
 		modeOverride: r.Mode, fromVoice: r.FromVoice, userID: r.UserID, userName: r.UserName,
@@ -185,6 +190,12 @@ func (e *Engine) isShuttingDown() bool {
 // Beginning a queued execution and shutdown are serialized. The input leaves
 // disk before dispatch so an interrupted in-flight turn is never replayed.
 func (e *Engine) popQueuedMessageLocked(state *interactiveState) (queuedMessage, bool) {
+	return e.popQueuedLocked(state, false)
+}
+func (e *Engine) popQueuedBatchLocked(state *interactiveState) (queuedMessage, bool) {
+	return e.popQueuedLocked(state, true)
+}
+func (e *Engine) popQueuedLocked(state *interactiveState, batch bool) (queuedMessage, bool) {
 	e.platformLifecycleMu.Lock()
 	defer e.platformLifecycleMu.Unlock()
 	if e.stopping || e.ctx.Err() != nil || state.stopped || state.queueRetired || len(state.pendingMessages) == 0 || state.pendingMessages[0].platform == nil {
@@ -198,12 +209,19 @@ func (e *Engine) popQueuedMessageLocked(state *interactiveState) (queuedMessage,
 		}
 	}
 	old := state.pendingMessages
-	q := old[0]
-	state.pendingMessages = old[1:]
+	n := 1
+	if batch {
+		n = e.queuedBatchSize(old)
+	}
+	q := e.mergeQueuedMessages(old[:n])
+	state.pendingMessages = old[n:]
 	if err := e.persistQueueLocked(state); err != nil {
 		state.pendingMessages = old
 		slog.Error("queue: cannot begin execution", "session", state.queueKey, "error", err)
 		return queuedMessage{}, false
+	}
+	if n > 1 {
+		slog.Info("processing queued messages batched", "session", state.queueKey, "count", n, "chars", utf8.RuneCountInString(q.content))
 	}
 	return q, true
 }
@@ -224,7 +242,7 @@ func (e *Engine) flushQueues() error {
 }
 
 func queuedInput(q queuedMessage) *Message {
-	return &Message{scheduledPrompt: q.scheduledPrompt, scheduledMute: q.scheduledMute, scheduledInputID: q.scheduledInputID,
+	return &Message{Source: q.source, Urgent: q.urgent, individualReply: q.separateReply, scheduledPrompt: q.scheduledPrompt, scheduledMute: q.scheduledMute, scheduledInputID: q.scheduledInputID,
 		replySessionKey: q.replySessionKey, Platform: q.msgPlatform, SessionKey: q.msgSessionKey,
 		MessageID: q.messageID, Content: q.content, ReplyCtx: q.replyCtx, Images: q.images,
 		Files: q.files, FromVoice: q.fromVoice, UserID: q.userID, UserName: q.userName,

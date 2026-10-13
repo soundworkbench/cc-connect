@@ -107,6 +107,7 @@ func init() {
 }
 
 type replyContext struct {
+	source          string
 	p2pThread       bool
 	messageID       string
 	chatID          string
@@ -1147,6 +1148,9 @@ func (p *Platform) dispatchCoreMessage(msg *core.Message) {
 	if msg == nil || h == nil {
 		return
 	}
+	if rc, ok := msg.ReplyCtx.(replyContext); ok && msg.Source == "" {
+		msg.Source = rc.source
+	}
 	p.populateWorkspaceChannelKeys(msg)
 	if p.isMessageRecalled(msg.MessageID) {
 		slog.Debug(p.tag()+": recalled message dispatch dropped", "message_id", msg.MessageID)
@@ -1492,6 +1496,9 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey,
 		p2pThread: p.p2pThreadIsolation && chatType != "group" && stringValue(msg.ThreadId) != ""}
+	if stringValue(sender.SenderType) == "app" {
+		rctx.source = "relay"
+	}
 	slog.Debug(p.tag()+": routed inbound message",
 		"message_id", messageID,
 		"session_key", sessionKey,

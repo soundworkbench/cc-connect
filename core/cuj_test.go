@@ -253,6 +253,7 @@ func newCUJEnv(t *testing.T) *cujEnv {
 	agent := &cujAgent{}
 	storePath := dir + "/sessions.json"
 	e := NewEngine("test", agent, []Platform{plat}, storePath, LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	return &cujEnv{
 		t:       t,
 		engine:  e,
@@ -657,6 +658,7 @@ type startSessionError struct{ msg string }
 func (e *startSessionError) Error() string { return e.msg }
 
 func TestCUJ_G1_LLMFailureSurfacesErrorToUser(t *testing.T) {
+	t.Run("stdin_failure_restarts_with_resume", testCUJInputWriteFailureRecovery)
 	plat := &stubPlatformEngine{n: "test"}
 	agent := &failingAgent{}
 	agent.failNext.Set(true)
@@ -717,6 +719,7 @@ func testStopContinuesQueuedMessages(t *testing.T) {
 		return next, nil
 	}}
 	e := NewEngine("queue-stop", a, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
 	send := func(id, content string) {
 		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: p.Name(), MessageID: id, Content: content, ReplyCtx: "ctx"})
@@ -768,6 +771,7 @@ func testPreviewLifecycleQueuedTurns(t *testing.T, outcome string, instant, text
 	p.textPreview = textPreview
 	s := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 3)}
 	e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	cfg := DefaultStreamPreviewCfg()
 	cfg.Enabled = outcome != "disabled"
 	cfg.IntervalMs = 1
@@ -2295,6 +2299,7 @@ func TestCUJ_H2_TwoPlatformsConcurrentNoBleed(t *testing.T) {
 	pB := &stubPlatformEngine{n: "platB"}
 	agent := &cujAgent{}
 	e := NewEngine("test", agent, []Platform{pA, pB}, dir+"/sessions.json", LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
 
 	// Fire 5 messages on each platform concurrently.
@@ -2875,6 +2880,9 @@ func (s *steeringJourneySession) Steer(prompt, _ string, _ []ImageAttachment, _ 
 }
 
 func TestCUJ_ST1_SteeringContinuousMessages(t *testing.T) {
+	t.Run("queued-batch-hold", testQueueBatchJourney)
+	t.Run("queued-batch-recall", func(t *testing.T) { testQueueBatchAfterStateRemoval(t, true) })
+	t.Run("queued-batch-idle-close", func(t *testing.T) { testQueueBatchAfterStateRemoval(t, false) })
 	for _, outcome := range []string{"accepted", "rejected", "unconfirmed", "startup", "write-failed"} {
 		t.Run(outcome, func(t *testing.T) {
 			p := &stubPlatformEngine{n: "steering"}
@@ -2889,6 +2897,7 @@ func TestCUJ_ST1_SteeringContinuousMessages(t *testing.T) {
 				s.steerErr = errors.New("transport closed after write")
 			}
 			e := NewEngine("steering", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+			e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 			e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
 			t.Cleanup(func() { e.cancel(); _ = e.Stop() })
 			key := "steering:user"
@@ -3180,6 +3189,7 @@ func TestCUJ_PR1_PreviewRecallAfterQueuedAnswers(t *testing.T) {
 	p := &finalOrderPlatform{failDeletes: 1}
 	s := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 3)}
 	e := newFinalOrderEngine(t, p, &controllableAgent{nextSession: s})
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
 	key := "order:queued"
 	for turn := 1; turn <= 3; turn++ {
@@ -3344,6 +3354,150 @@ func chineseToolProgressJourney(t *testing.T, mode string) {
 	}
 }
 
+func testQueueBatchJourney(t *testing.T) {
+	e, p, s := batchEngine(t)
+	cfg := DefaultQueueBatchConfig()
+	cfg.Hold = time.Hour
+	e.SetQueueBatchConfig(cfg)
+	for i := 1; i <= 3; i++ {
+		msg := batchMessage(i)
+		if i < 3 {
+			msg.Source = "relay"
+		}
+		e.ReceiveMessage(p, msg)
+	}
+	input := cc27Take(t, s.deliveries)
+	if !strings.Contains(input.prompt, "内容1") || !strings.Contains(input.prompt, "内容2") || !strings.Contains(input.prompt, "内容3") {
+		t.Fatal(input.prompt)
+	}
+	s.events <- Event{Type: EventResult, Content: "统一答复", Done: true}
+	cc27WaitIdle(t, e, "test:user")
+	seen := 0
+	for _, reply := range p.getSent() {
+		if reply == "统一答复" {
+			seen++
+		}
+	}
+	if seen != 1 || len(s.deliveries) != 0 {
+		t.Fatalf("user replies=%v extra turns=%d", p.getSent(), len(s.deliveries))
+	}
+}
+
+func testQueueBatchAfterStateRemoval(t *testing.T, recall bool) {
+	base := &batchPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, routes: make(chan any, 100), merged: make(chan any, 100)}
+	var p Platform = base
+	if recall {
+		p = &reviewRecallPlatform{base}
+	}
+	first := &batchSession{cujAgentSession: newCUJAgentSession(), deliveries: make(chan batchDelivery, 100)}
+	next := &batchSession{cujAgentSession: newCUJAgentSession(), deliveries: make(chan batchDelivery, 100)}
+	starts := make(chan AgentSession, 2)
+	starts <- first
+	starts <- next
+	agent := &controllableAgent{startSessionFn: func(context.Context, string) (AgentSession, error) { return <-starts, nil }}
+	e := NewEngine("batch-removal", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	e.SetDataDir(t.TempDir())
+	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
+	cfg := DefaultQueueBatchConfig()
+	cfg.Hold = time.Hour
+	e.SetQueueBatchConfig(cfg)
+	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
+	if !recall {
+		e.SetAgentSessionIdleTimeout(10 * time.Millisecond)
+	}
+	e.ReceiveMessage(p, batchMessage(0))
+	cc27Take(t, first.deliveries)
+	if !recall {
+		first.events <- Event{Type: EventResult, Content: "先前答复", Done: true}
+		cc27WaitIdle(t, e, "test:user")
+		deadline := time.Now().Add(time.Second)
+		for !first.closed.Get() && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if !first.closed.Get() {
+			t.Fatal("idle agent did not close")
+		}
+	}
+	relay := batchMessage(1)
+	relay.Source = "relay"
+	e.ReceiveMessage(p, relay)
+	if sent := base.getSent(); !strings.Contains(strings.Join(sent, "\n"), e.i18n.T(MsgMessageQueued)) {
+		t.Fatalf("relay not visibly accepted after state removal: %v", sent)
+	}
+	select {
+	case d := <-next.deliveries:
+		t.Fatalf("relay ran before wake: %+v", d)
+	default:
+	}
+	e.ReceiveMessage(p, batchMessage(2))
+	d := cc27Take(t, next.deliveries)
+	if strings.Index(d.prompt, "内容1") < 0 || strings.Index(d.prompt, "内容2") <= strings.Index(d.prompt, "内容1") {
+		t.Fatalf("relay lost or reordered after state removal: %q", d.prompt)
+	}
+	next.events <- Event{Type: EventResult, Content: "撤回或空闲关闭后统一答复", Done: true}
+	cc27WaitIdle(t, e, "test:user")
+	count := 0
+	for _, sent := range base.getSent() {
+		if sent == "撤回或空闲关闭后统一答复" {
+			count++
+		}
+	}
+	if count != 1 || len(next.deliveries) != 0 {
+		t.Fatalf("user replies=%v extra turns=%d", base.getSent(), len(next.deliveries))
+	}
+}
+
+type inputFailureCUJSession struct{ *cujAgentSession }
+
+func (s *inputFailureCUJSession) Send(prompt, messageID string, images []ImageAttachment, files []FileAttachment) error {
+	if strings.Contains(prompt, "break-input") {
+		s.closed.Set(true)
+		close(s.events)
+		return &InputWriteError{WrittenBytes: 4096, TotalBytes: 65536, Err: errors.New("broken pipe")}
+	}
+	return s.cujAgentSession.Send(prompt, messageID, images, files)
+}
+func (s *inputFailureCUJSession) Close() error {
+	if !s.closed.Get() {
+		s.closed.Set(true)
+		close(s.events)
+	}
+	return nil
+}
+
+type inputFailureCUJAgent struct{ cujAgent }
+
+func (a *inputFailureCUJAgent) StartSession(ctx context.Context, id string) (AgentSession, error) {
+	as, err := a.cujAgent.StartSession(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	s := as.(*cujAgentSession)
+	a.mu.Lock()
+	if len(a.sessions) > 1 {
+		s.reply = "recovered on new process with resume=" + id
+	}
+	a.mu.Unlock()
+	return &inputFailureCUJSession{s}, nil
+}
+
+func testCUJInputWriteFailureRecovery(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	a := &inputFailureCUJAgent{}
+	e := NewEngine("test", a, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	defer e.Stop()
+	env := &cujEnv{t: t, engine: e, plat: p}
+	env.userSends("write-failure", "hello")
+	env.waitFor("first reply", time.Second, func() bool { return len(p.getSent()) > 0 })
+	env.userSends("write-failure", "break-input")
+	env.waitFor("explicit resend notice", time.Second, func() bool {
+		return strings.Contains(strings.Join(p.getSent(), "\n"), "Please resend")
+	})
+	env.userSends("write-failure", "retry")
+	env.waitFor("new process resumes", time.Second, func() bool {
+		return strings.Contains(strings.Join(p.getSent(), "\n"), "recovered on new process with resume=cuj-agent-session")
+	})
+}
 func testTimerAbsoluteTimezoneJourney(t *testing.T) {
 	for _, sub := range []string{"add", "addexec"} {
 		t.Run(sub, func(t *testing.T) {

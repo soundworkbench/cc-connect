@@ -106,6 +106,8 @@ type bridgeRegister struct {
 }
 
 type bridgeMessage struct {
+	Source     string            `json:"source,omitempty"`
+	Urgent     bool              `json:"urgent,omitempty"`
 	Type       string            `json:"type"`
 	MsgID      string            `json:"msg_id"`
 	SessionKey string            `json:"session_key"`
@@ -898,7 +900,8 @@ func (a *bridgeAdapter) handleMessage(raw json.RawMessage) {
 		UserID:     m.UserID,
 		UserName:   m.UserName,
 		Content:    m.Content,
-		ReplyCtx:   newBridgeReplyCtx(a, m.SessionKey, m.ReplyCtx),
+		Source:     m.Source, Urgent: m.Urgent,
+		ReplyCtx: newBridgeReplyCtx(a, m.SessionKey, m.ReplyCtx),
 	}
 
 	for _, img := range m.Images {

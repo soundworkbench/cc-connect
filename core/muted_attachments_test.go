@@ -38,6 +38,7 @@ func newMutedJourney(t *testing.T) (*Engine, *mutedAttachmentPlatform, *steering
 	p := &mutedAttachmentPlatform{stubMediaPlatform: stubMediaPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}}}
 	s := &steeringJourneySession{cujAgentSession: newCUJAgentSession(), started: make(chan string, 16), steered: make(chan string, 16)}
 	e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	t.Cleanup(func() { e.Stop() })
 	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
 	return e, p, s

@@ -72,12 +72,13 @@ type streamPreview struct {
 	ctx       context.Context
 	transform func(string) string
 
-	fullText          string // accumulated full text so far
-	lastSentText      string // what was last successfully sent to the platform
-	lastSentAt        time.Time
-	lastSentViaUpdate bool // true if lastSentText was delivered via UpdateMessage (not SendPreviewStart)
-	previewMsgID      any  // platform-specific ID for the preview message (returned by SendPreviewStart)
-	degraded          bool // if true, stop trying (platform doesn't support it or permanent error)
+	fullText               string // accumulated full text so far
+	lastSentText           string // what was last successfully sent to the platform
+	lastSentAt             time.Time
+	lastSentViaUpdate      bool   // true if lastSentText was delivered via UpdateMessage (not SendPreviewStart)
+	previewMsgID           any    // platform-specific ID for the preview message (returned by SendPreviewStart)
+	pendingAcknowledgement func() // consumed by the first visible output
+	degraded               bool   // if true, stop trying (platform doesn't support it or permanent error)
 
 	timer     *time.Timer
 	timerStop chan struct{} // closed when preview ends
@@ -198,6 +199,8 @@ type ThinkingProcessPreviewPreference interface {
 
 // replacePreview edits ephemeral progress without mixing it into answer text.
 func (sp *streamPreview) replacePreview(text string) bool {
+	text, _ = stripTrailingSilent(text)
+	sp.acknowledgeVisible(text)
 	if strings.TrimSpace(text) == "" || !sp.canPreview() {
 		return false
 	}
@@ -267,24 +270,48 @@ func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx contex
 	}
 }
 
-// acknowledgeTurnStart is shared by initial and queued turns. A successfully
-// created streaming card or preview already acknowledges the request; keep the
-// ordinary instant reply only as a fallback when neither is available.
+// Immediate-preview platforms defer acknowledgement until output is visible.
 func (e *Engine) acknowledgeTurnStart(p Platform, replyCtx any, sp *streamPreview, hasStreamingCard bool) {
 	if hasStreamingCard {
 		return
 	}
-	if pref, ok := p.(ImmediatePreviewPreference); ok && pref.StartPreviewImmediately() {
-		if sp.startPlaceholder("思考中…") {
-			return
+	acknowledge := func() {
+		if pref, ok := p.(ImmediatePreviewPreference); ok && pref.StartPreviewImmediately() {
+			if sp.startPlaceholder("思考中…") {
+				return
+			}
+		}
+		if e.instantReply.Enabled {
+			content := e.instantReply.Content
+			if content == "" {
+				content = e.i18n.T(MsgStarting)
+			}
+			e.send(p, replyCtx, content)
 		}
 	}
-	if e.instantReply.Enabled {
-		content := e.instantReply.Content
-		if content == "" {
-			content = e.i18n.T(MsgStarting)
-		}
-		e.send(p, replyCtx, content)
+	if pref, ok := p.(ImmediatePreviewPreference); ok && pref.StartPreviewImmediately() {
+		sp.mu.Lock()
+		sp.pendingAcknowledgement = acknowledge
+		sp.mu.Unlock()
+		return
+	}
+	acknowledge()
+}
+
+func (sp *streamPreview) acknowledgeVisible(text string) {
+	if sp.transform != nil {
+		text = sp.transform(text)
+	}
+	text, _ = stripTrailingSilent(text)
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	sp.mu.Lock()
+	acknowledge := sp.pendingAcknowledgement
+	sp.pendingAcknowledgement = nil
+	sp.mu.Unlock()
+	if acknowledge != nil {
+		acknowledge()
 	}
 }
 
@@ -363,7 +390,7 @@ func (sp *streamPreview) appendText(text string) {
 
 	sp.fullText += text
 
-	displayText := sp.fullText
+	displayText, _ := stripTrailingSilent(sp.fullText)
 	maxChars := sp.cfg.MaxChars
 	if maxChars > 0 && len([]rune(displayText)) > maxChars {
 		displayText = string([]rune(displayText)[:maxChars]) + "…"
@@ -399,7 +426,7 @@ func (sp *streamPreview) scheduleFlushLocked(delay time.Duration) {
 		if sp.degraded {
 			return
 		}
-		displayText := sp.fullText
+		displayText, _ := stripTrailingSilent(sp.fullText)
 		maxChars := sp.cfg.MaxChars
 		if maxChars > 0 && len([]rune(displayText)) > maxChars {
 			displayText = string([]rune(displayText)[:maxChars]) + "…"
@@ -417,6 +444,7 @@ func (sp *streamPreview) cancelTimerLocked() {
 
 // flushLocked sends the current preview text to the platform. Must hold sp.mu.
 func (sp *streamPreview) flushLocked(text string) {
+	text, _ = stripTrailingSilent(text)
 	if sp.transform != nil {
 		text = sp.transform(text)
 	}
@@ -480,7 +508,7 @@ func (sp *streamPreview) freeze() {
 
 	if sp.previewMsgID != nil && !sp.degraded {
 		if updater, ok := sp.platform.(MessageUpdater); ok {
-			text := sp.fullText
+			text, _ := stripTrailingSilent(sp.fullText)
 			maxChars := sp.cfg.MaxChars
 			if maxChars > 0 && len([]rune(text)) > maxChars {
 				text = string([]rune(text)[:maxChars]) + "…"
@@ -544,6 +572,7 @@ func (sp *streamPreview) unfreeze() {
 func (sp *streamPreview) discard() {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
+	sp.pendingAcknowledgement = nil
 
 	sp.cancelTimerLocked()
 
@@ -775,6 +804,7 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 }
 
 func (sp *streamPreview) deliverFinalInOrder(body, footer string, sendFn func(Platform, any, string) error, failureText string, order FinalReplyOrder) bool {
+	sp.acknowledgeVisible(body)
 	sp.mu.Lock()
 	sp.cancelTimerLocked()
 	sp.degraded = true

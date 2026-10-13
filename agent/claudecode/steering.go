@@ -21,20 +21,13 @@ type claudeInput struct {
 	steered  bool
 }
 
-// A short write cannot deliver a JSON line without its terminating newline.
-// Preserve its unwritten tail so the normal queued Send can finish that same
-// frame exactly once, rather than concatenate a second JSON object to it.
-type claudePartialInput struct {
-	id, messageID, prompt string
-	tail                  []byte
-}
-
 var _ core.AgentSessionSteerer = (*claudeSession)(nil)
 
 const claudeInputTimeout = 3 * time.Second
+const claudeFirstWriteTimeout = 60 * time.Second
 
 // claudeInlineImageLimit caps base64 image bytes sent inline in one user
-// message, keeping the JSON line under the 64 KiB pipe buffer.
+// message. JSON framing and text may still make the line larger than a pipe buffer.
 const claudeInlineImageLimit = 48 << 10
 
 func newInputID() string {
@@ -56,30 +49,6 @@ func (cs *claudeSession) Send(prompt, messageID string, images []core.ImageAttac
 	msg["uuid"] = id
 	cs.inputMu.Lock()
 	defer cs.inputMu.Unlock()
-	if p := cs.partialInput; p != nil {
-		if p.messageID != messageID || p.prompt != prompt {
-			// The incomplete frame's owner is not resending it, so its tail will
-			// never arrive. Refusing forever wedged the whole chat; instead close
-			// stdin so this session ends and the next message starts fresh.
-			slog.Error("claudeSession: incomplete input frame abandoned, closing session", "pending_message", p.messageID, "new_message", messageID)
-			cs.partialInput = nil
-			cs.stdinMu.Lock()
-			_ = cs.stdin.Close()
-			cs.stdinMu.Unlock()
-			return errors.New("claude: previous input frame incomplete; session closed, please resend")
-		}
-		cs.inputs[p.id] = &claudeInput{ack: make(chan struct{})}
-		cs.inputActive = true
-		n, err := cs.writeBoundedBytes(p.tail)
-		if err != nil {
-			p.tail = p.tail[n:]
-			delete(cs.inputs, p.id)
-			cs.inputActive = len(cs.inputs) > 0
-		} else {
-			cs.partialInput = nil
-		}
-		return err
-	}
 	if cs.inputs == nil {
 		cs.inputs = make(map[string]*claudeInput)
 	}
@@ -126,8 +95,12 @@ func (cs *claudeSession) SteerAsync(prompt, messageID string, images []core.Imag
 	if encoded > claudeInlineImageLimit {
 		return nil, nil
 	}
-	cs.inputMu.Lock()
-	if !cs.inputActive || !cs.alive.Load() || cs.partialInput != nil {
+	// Send can hold inputMu for the entire first-write timeout. Engine calls
+	// steering while holding lifecycle locks, so busy input must take the queue.
+	if !cs.inputMu.TryLock() {
+		return nil, nil
+	}
+	if !cs.inputActive || !cs.alive.Load() {
 		cs.inputMu.Unlock()
 		return nil, nil
 	}
@@ -180,20 +153,16 @@ func (cs *claudeSession) SteerAsync(prompt, messageID string, images []core.Imag
 		err = io.ErrShortWrite
 	}
 	_ = w.SetWriteDeadline(time.Time{})
-	cs.stdinMu.Unlock()
-	if err != nil && n < len(data) {
-		if n > 0 {
-			cs.partialInput = &claudePartialInput{id: id, messageID: messageID, prompt: prompt, tail: append([]byte(nil), data[n:]...)}
-		}
+	if err != nil {
 		delete(cs.inputs, id)
 		cs.inputActive = len(cs.inputs) > 0
+		failure := cs.invalidateInput(n, len(data), err)
+		cs.stdinMu.Unlock()
 		cs.inputMu.Unlock()
-		return nil, core.ErrSteerNotWritten
+		return nil, errors.Join(core.ErrSteerWriteUncertain, failure)
 	}
+	cs.stdinMu.Unlock()
 	cs.inputMu.Unlock()
-	if err != nil {
-		return nil, core.ErrSteerWriteUncertain
-	}
 	return &core.SteerReceipt{Ack: input.ack, End: cs.done}, nil
 }
 
@@ -265,43 +234,41 @@ func (cs *claudeSession) writeBoundedUser(v any) error {
 }
 
 func (cs *claudeSession) writeBoundedBytes(b []byte) (int, error) {
-	w, ok := cs.stdin.(interface{ SetWriteDeadline(time.Time) error })
-	if !ok {
-		cs.stdinMu.Lock()
-		defer cs.stdinMu.Unlock()
-		n, err := cs.stdin.Write(b)
-		if err == nil && n != len(b) {
-			err = io.ErrShortWrite
-		}
-		return n, err
-	}
-	deadline := time.Now().Add(claudeInputTimeout)
-	for !cs.stdinMu.TryLock() {
-		if time.Now().After(deadline) {
-			return 0, errors.New("claude: stdin lock timeout")
-		}
-		select {
-		case <-cs.ctx.Done():
-			return 0, cs.ctx.Err()
-		case <-time.After(time.Millisecond):
-		}
-	}
+	return cs.writeInputBytes(b, true)
+}
+
+func (cs *claudeSession) writeInputBytes(b []byte, userInput bool) (int, error) {
+	cs.stdinMu.Lock()
 	defer cs.stdinMu.Unlock()
-	if err := w.SetWriteDeadline(deadline); err != nil {
-		return 0, err
+	if !cs.alive.Load() {
+		return 0, errors.New("claude: session process is not running")
 	}
-	defer w.SetWriteDeadline(time.Time{})
+	timeout := claudeInputTimeout
+	if userInput && !cs.firstWriteDone {
+		timeout = cs.firstWriteTimeout
+		if timeout <= 0 {
+			timeout = claudeFirstWriteTimeout
+		}
+	}
+	if w, ok := cs.stdin.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		if err := w.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+			return 0, cs.invalidateInput(0, len(b), err)
+		}
+		defer func() {
+			if err := w.SetWriteDeadline(time.Time{}); err != nil && cs.inputFailure.Load() == nil {
+				slog.Warn("claudeSession: reset stdin deadline", "session", cs.CurrentSessionID(), "error", err)
+			}
+		}()
+	}
 	n, err := cs.stdin.Write(b)
 	if err == nil && n != len(b) {
 		err = io.ErrShortWrite
 	}
-	if err != nil && n > 0 && n < len(b) {
-		// A partial JSON line is now in Claude's stdin; every later message
-		// would be appended to it and fail to parse, wedging the session.
-		// Close stdin so the process exits and the next message starts fresh.
-		slog.Error("claudeSession: partial stdin write, closing session", "written", n, "size", len(b), "error", err)
-		_ = cs.stdin.Close()
-		return n, fmt.Errorf("claude: partial input write (%d/%d bytes), session closed: %w", n, len(b), err)
+	if err != nil {
+		return n, cs.invalidateInput(n, len(b), err)
 	}
-	return n, err
+	if userInput {
+		cs.firstWriteDone = true
+	}
+	return n, nil
 }

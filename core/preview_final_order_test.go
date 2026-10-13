@@ -176,7 +176,7 @@ func TestPreviewLifecycleFinalOrderErrorAndSilent(t *testing.T) {
 			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("order"), e.sessions, "order", "m", time.Now(), nil, nil, "ctx")
 			calls := p.snapshot()
 			if silent {
-				if !reflect.DeepEqual(calls, []string{"start:思考中…", "delete:card-1"}) {
+				if len(calls) != 0 {
 					t.Fatal(calls)
 				}
 			} else {
@@ -195,6 +195,12 @@ func TestPreviewLifecycleStopSendsBeforeRecall(t *testing.T) {
 				as := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 3)}
 				e := newFinalOrderEngine(t, p, &controllableAgent{nextSession: as})
 				e.ReceiveMessage(p, &Message{SessionKey: "order:stop", MessageID: "m1", Content: "work", ReplyCtx: "ctx"})
+				select {
+				case <-as.sent:
+				case <-time.After(3 * time.Second):
+					t.Fatal("request did not reach the agent")
+				}
+				as.events <- Event{Type: EventText, Content: "visible progress"}
 				deadline := time.Now().Add(3 * time.Second)
 				for len(p.snapshot()) == 0 {
 					if time.Now().After(deadline) {

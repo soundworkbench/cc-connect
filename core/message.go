@@ -361,7 +361,8 @@ type LocationAttachment struct {
 
 // Message represents a unified incoming message from any platform.
 type Message struct {
-	executionState *interactiveState // the state that admitted this turn
+	individualReply bool              // command provenance survives prompt enrichment
+	executionState  *interactiveState // the state that admitted this turn
 	// scheduledPrompt is an internal scheduler admission flag, never set by platforms.
 	admissionDeadline time.Time // local automation bounds dead-state retries before timer fallback
 	preflightSent     bool      // rotation confirmed its first Send on a prepared agent
@@ -371,6 +372,8 @@ type Message struct {
 	scheduledInputID  string // scheduler occurrence ID, never a platform message ID
 	replySessionKey   string // proactive reply target, which can differ from SessionKey
 	// IsolateAgent requests per-routing-key agent options in addition to history isolation.
+	Source       string // automation source; empty uses scheduler/user metadata
+	Urgent       bool   // bypasses the idle batching window
 	IsolateAgent bool
 	SessionKey   string // unique key for user context, e.g. "feishu:{chatID}:{userID}"
 	Platform     string

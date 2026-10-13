@@ -13,6 +13,8 @@ import (
 // These endpoints are local automation admission, not outbound platform send.
 // They resolve existing workspace bindings and never create an unknown route.
 type assistantRequest struct {
+	Source               string `json:"source,omitempty"`
+	Urgent               bool   `json:"urgent,omitempty"`
 	Project              string `json:"project"`
 	SessionKey           string `json:"session_key"`
 	Message              string `json:"message,omitempty"`
@@ -229,7 +231,7 @@ func (s *APIServer) handleAssistantInject(w http.ResponseWriter, r *http.Request
 		http.Error(w, "session not found", 409)
 		return
 	}
-	msg := &Message{SessionKey: req.SessionKey, Platform: p.Name(), UserID: "assistant", UserName: "assistant", Content: req.Message, ReplyCtx: ctx, scheduledPrompt: true, scheduledInputID: "assistant:" + req.RequestID, admissionDeadline: time.Now().Add(250 * time.Millisecond)}
+	msg := &Message{SessionKey: req.SessionKey, Platform: p.Name(), UserID: "assistant", UserName: "assistant", Content: req.Message, Source: req.Source, Urgent: req.Urgent, ReplyCtx: ctx, scheduledPrompt: true, scheduledInputID: "assistant:" + req.RequestID, admissionDeadline: time.Now().Add(250 * time.Millisecond)}
 	queued, err := e.admitScheduledPrompt(p, msg, session, sessions, agent, iKey, workspace)
 	if err != nil {
 		http.Error(w, "admission failed", 503)

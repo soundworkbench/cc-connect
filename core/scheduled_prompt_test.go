@@ -136,6 +136,7 @@ func cc27ResumedJourney(t *testing.T, timerFirst, eventRetry bool) {
 	resumed := make(chan string, 1)
 	agent := &controllableAgent{startSessionFn: func(_ context.Context, id string) (AgentSession, error) { resumed <- id; return s, nil }}
 	e := NewEngine("resumed", agent, []Platform{p}, file, LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	defer e.cancel()
 	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
 	done := make(chan error, 1)

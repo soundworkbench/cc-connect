@@ -58,6 +58,15 @@
 # 也可用环境变量 CC_MAX_ATTACHMENT_SIZE_MB 覆盖（同样单位 MiB；设置后优先级高于本配置项）。
 # max_attachment_size_mb = 50
 
+# Merge consecutive queued inputs for one session into one agent turn.
+# This top-level section applies to every project. Restart to apply changes.
+[queue_batch]
+enabled = true
+max_messages = 20
+max_chars = 20000                  # Unicode characters, including source/time markers
+hold_seconds = 60                 # idle automation wait; 0 disables waiting
+immediate_sources = ["human"]      # add "relay", "timer", "cron", "assistant" as needed
+
 [log]
 level = "info" # debug, info, warn, error
 
@@ -820,6 +829,9 @@ name = "my-backend"
 type = "claudecode"
 
 [projects.agent.options]
+# Claude stdin startup deadline; later writes retain the 3s active-turn deadline.
+# Claude 首条 stdin 写入期限；后续写入仍使用 3 秒期限。
+# first_write_timeout = "60s"
 work_dir = "/path/to/backend"
 mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassPermissions" (yolo)
 

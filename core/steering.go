@@ -9,6 +9,9 @@ import (
 func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg *Message, session *Session, sessions *SessionManager) bool {
 	e.platformLifecycleMu.Lock()
 	defer e.platformLifecycleMu.Unlock()
+	if e.queueBatch.Enabled && (state.hold != nil || messageSource(msg) != "human" || msg.individualReply) {
+		return false
+	}
 	if e.stopping || e.ctx.Err() != nil || state.queueRetired || msg.scheduledPrompt || msg.ModeOverride != "" || session == nil || sessions == nil || state.stopped || state.pending != nil {
 		return false
 	}
@@ -48,7 +51,10 @@ func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg 
 		if err != nil {
 			// Uncertain transport errors must never trigger an automatic duplicate.
 			slog.Warn("active-turn message delivery unconfirmed", "session", msg.SessionKey, "msg_id", msg.MessageID)
-			if errors.Is(err, ErrSteerWriteUncertain) {
+			var writeErr *InputWriteError
+			if errors.As(err, &writeErr) {
+				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPromptNotDelivered))
+			} else if errors.Is(err, ErrSteerWriteUncertain) {
 				e.reply(p, msg.ReplyCtx, e.i18n.T(MsgSteerWriteInterrupted))
 			}
 		} else {

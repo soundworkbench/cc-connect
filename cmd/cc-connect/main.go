@@ -690,6 +690,9 @@ func main() {
 			engine.SetMaxTurnTime(time.Duration(*cfg.MaxTurnTimeMins) * time.Minute)
 		}
 
+		batch := cfg.QueueBatch.Resolve()
+		engine.SetQueueBatchConfig(core.QueueBatchConfig{Enabled: batch.Enabled, MaxMessages: batch.MaxMessages, MaxChars: batch.MaxChars, Hold: time.Duration(batch.HoldSeconds) * time.Second, ImmediateSources: batch.ImmediateSources})
+
 		// Wire queue depth
 		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {
 			engine.SetMaxQueuedMessages(*cfg.Queue.MaxDepth)

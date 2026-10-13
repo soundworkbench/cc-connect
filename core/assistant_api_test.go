@@ -22,6 +22,7 @@ func cc17Fixture(t *testing.T) (*APIServer, *Engine, *scheduledTestSession, *htt
 	p := &scheduledTestPlatform{&steerReactionPlatform{stubPlatformEngine: stubPlatformEngine{n: "local"}, reactions: make(chan string, 16)}}
 	as := &scheduledTestSession{steeringJourneySession: &steeringJourneySession{cujAgentSession: newCUJAgentSession(), started: make(chan string, 16), steered: make(chan string, 16)}, modes: make(chan string, 16), ids: make(chan string, 16)}
 	e := NewEngine("project", &controllableAgent{nextSession: as}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
 	key := "local:chat:user"
 	e.sessions.GetOrCreateActive(key)
@@ -179,6 +180,7 @@ func TestQueuePersistence_AssistantInjectUnixRestartAndStop(t *testing.T) {
 	p := &queueTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "local"}}
 	first, next := queueTestSession(), queueTestSession()
 	e2 := NewEngine("project", &controllableAgent{nextSession: first}, []Platform{p}, e.sessions.StorePath(), LangEnglish)
+	e2.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	e2.SetDataDir(dir)
 	e2.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
 	t.Cleanup(func() { e2.cancel(); _ = e2.Stop() })
@@ -246,6 +248,7 @@ func TestQueuePersistence_AssistantRotationRestartRestoresPromotedSession(t *tes
 	p := &queueTestPlatform{stubPlatformEngine: stubPlatformEngine{n: "local"}}
 	s := queueTestSession()
 	e2 := NewEngine("project", &controllableAgent{nextSession: s}, []Platform{p}, e.sessions.StorePath(), LangEnglish)
+	e2.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	e2.SetDataDir(dir)
 	e2.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
 	t.Cleanup(func() { e2.cancel(); _ = e2.Stop() })

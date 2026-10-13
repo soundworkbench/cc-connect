@@ -8219,6 +8219,7 @@ func TestCmdCronExec_TriggersJob(t *testing.T) {
 			}
 			agentSession := newResultAgentSession("manual run complete")
 			e := NewEngine("test", &resultAgent{session: agentSession}, []Platform{platform}, "", LangEnglish)
+			e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 			e.cronScheduler = scheduler
 			scheduler.RegisterEngine("test", e)
 
@@ -9049,6 +9050,7 @@ func TestProcessInteractiveEvents_DrainsQueuedMessagesFIFOWithCreateTimes(t *tes
 	sess := newQueuingSession("qs-fifo-times")
 	agent := &controllableAgent{nextSession: sess}
 	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 
 	key := "test:user1"
 	session := e.sessions.GetOrCreateActive(key)
@@ -13410,6 +13412,7 @@ func TestExecuteCronJob_ResolvesCronReplyTarget(t *testing.T) {
 	agent := &resultAgent{session: agentSession}
 
 	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 	defer e.cancel()
 	e.cronScheduler = scheduler
 
@@ -13559,6 +13562,7 @@ func TestExecuteCronJob_ExpandsSlashSkillPrompt(t *testing.T) {
 			agent := &resultAgent{session: agentSession}
 
 			e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
+			e.SetQueueBatchConfig(QueueBatchConfig{Enabled: false})
 			defer e.cancel()
 			e.skills.SetDirs([]string{skillRoot})
 

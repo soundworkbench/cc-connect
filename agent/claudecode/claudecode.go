@@ -68,6 +68,8 @@ type Agent struct {
 	// customisation. Empty value falls back to os.TempDir.
 	ccDataDir string
 
+	firstWriteTimeout time.Duration
+
 	// spawnOpts controls OS-user isolation via run_as_user. Zero value
 	// means legacy spawn as the supervisor user. See core/runas.go.
 	spawnOpts core.SpawnOptions
@@ -150,6 +152,18 @@ func New(opts map[string]any) (core.Agent, error) {
 	systemPrompt, _ := opts["system_prompt"].(string)
 	appendSystemPrompt, _ := opts["append_system_prompt"].(string)
 	ccDataDir, _ := opts["cc_data_dir"].(string)
+	firstWriteTimeout := claudeFirstWriteTimeout
+	if raw, ok := opts["first_write_timeout"]; ok {
+		value, ok := raw.(string)
+		if !ok {
+			return nil, fmt.Errorf("claudecode: first_write_timeout must be a duration string")
+		}
+		timeout, err := time.ParseDuration(value)
+		if err != nil || timeout <= 0 {
+			return nil, fmt.Errorf("claudecode: first_write_timeout must be a positive duration")
+		}
+		firstWriteTimeout = timeout
+	}
 
 	var pluginDirs []string
 	if dir, ok := opts["plugin_dir"].(string); ok && dir != "" {
@@ -269,6 +283,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		ccDataDir:        ccDataDir,
 
 		appendSystemPrompt: appendSystemPrompt,
+		firstWriteTimeout:  firstWriteTimeout,
 	}, nil
 }
 
@@ -532,7 +547,12 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	return newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, a.ccDataDir)
+	cs, err := newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, a.ccDataDir)
+	if err != nil {
+		return nil, err
+	}
+	cs.firstWriteTimeout = a.firstWriteTimeout
+	return cs, nil
 }
 
 func (a *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {

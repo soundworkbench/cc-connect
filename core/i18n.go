@@ -194,6 +194,8 @@ const (
 	MsgSteerWriteInterrupted     MsgKey = "message_steer_write_interrupted"
 	MsgMessageSteered            MsgKey = "message_steered"
 	MsgMessageSteerUnconfirmed   MsgKey = "message_steer_unconfirmed"
+	MsgQueueBatchMarker          MsgKey = "queue_batch_marker"
+	MsgQueueBatchSource          MsgKey = "queue_batch_source"
 	MsgMessageQueued             MsgKey = "message_queued"
 	MsgQueuedMessageDropped      MsgKey = "queued_message_dropped"
 	MsgNoToolsAllowed            MsgKey = "no_tools_allowed"
@@ -205,6 +207,7 @@ const (
 	MsgIntermediateContent       MsgKey = "intermediate_content"
 	MsgFinalDeliveryFailed       MsgKey = "final_delivery_failed"
 	MsgError                     MsgKey = "error"
+	MsgPromptNotDelivered        MsgKey = "prompt_not_delivered"
 	MsgAgentTurnFailed           MsgKey = "agent_turn_failed"
 	MsgAgentTurnInterrupted      MsgKey = "agent_turn_interrupted"
 	MsgSessionNotFound           MsgKey = "session_not_found"
@@ -688,6 +691,8 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "[カード画像を取得できません：Feishuは他アプリのカード画像を制限しています｜送信者 %s ｜image_key=%s]",
 		LangSpanish:            "[Imagen de tarjeta no disponible: Feishu restringe imágenes de otras aplicaciones | remitente %s | image_key=%s]",
 	},
+	MsgQueueBatchMarker:    {LangChinese: "【消息 %d/%d｜来源：%s｜%s】", LangEnglish: "[Message %d/%d | Source: %s | %s]", LangTraditionalChinese: "【訊息 %d/%d｜來源：%s｜%s】", LangJapanese: "【メッセージ %d/%d｜送信元：%s｜%s】", LangSpanish: "[Mensaje %d/%d | Origen: %s | %s]"},
+	MsgQueueBatchSource:    {LangChinese: "消息", LangEnglish: "message", LangTraditionalChinese: "訊息", LangJapanese: "メッセージ", LangSpanish: "mensaje"},
 	MsgProgressFolded:      {LangChinese: "…（前 %d 条已折叠）", LangEnglish: "… (%d earlier entries folded)", LangTraditionalChinese: "…（前 %d 條已摺疊）", LangJapanese: "…（前の %d 件を折りたたみました）", LangSpanish: "… (%d entradas anteriores contraídas)"},
 	MsgProgressCommand:     {LangChinese: "运行命令", LangEnglish: "Run command", LangTraditionalChinese: "執行命令", LangJapanese: "コマンドを実行", LangSpanish: "Ejecutar comando"},
 	MsgProgressRead:        {LangChinese: "读取文件", LangEnglish: "Read file", LangTraditionalChinese: "讀取檔案", LangJapanese: "ファイルを読む", LangSpanish: "Leer archivo"},
@@ -893,6 +898,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "最終訊息傳送失敗，已保留進度資訊。",
 		LangJapanese:           "最終メッセージの送信に失敗しました。進捗を保持しました。",
 		LangSpanish:            "No se pudo enviar el mensaje final. Se conservó el progreso.",
+	},
+	MsgPromptNotDelivered: {
+		LangEnglish:            "Your previous message was not delivered completely. The agent process was stopped and will restart for your next message. Please resend.",
+		LangChinese:            "上一条消息未完整送达，代理进程已结束，下条消息将重新启动。请重发上一条消息。",
+		LangTraditionalChinese: "上一則訊息未完整送達，代理程序已結束，下則訊息將重新啟動。請重傳上一則訊息。",
+		LangJapanese:           "前のメッセージを完全に送信できませんでした。エージェントのプロセスを終了し、次のメッセージで再起動します。再送してください。",
+		LangSpanish:            "Tu mensaje anterior no se entregó por completo. Se detuvo el proceso del agente y se reiniciará con el siguiente mensaje. Vuelve a enviarlo.",
 	},
 	MsgError: {
 		LangEnglish:            "❌ Error: %v",

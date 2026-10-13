@@ -492,7 +492,8 @@ type Engine struct {
 	webStatusFunc func() (url string)
 
 	// Data directory for socket path injection
-	dataDir string
+	dataDir    string
+	queueBatch QueueBatchConfig
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -507,6 +508,11 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
+	source            string
+	urgent            bool
+	queuedAt          time.Time
+	separateReply     bool
+	mergedFrom        []queuedMessage
 	replySessionKey   string
 	restored          *queueRecord
 	scheduledPrompt   bool
@@ -531,6 +537,7 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
+	hold                     *queueHold
 	queueReady               <-chan struct{}
 	queueKey                 string
 	queueSessionID           string
@@ -772,6 +779,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		references:            DefaultReferenceRenderCfg(),
 		eventIdleTimeout:      defaultEventIdleTimeout,
 		maxQueuedMessages:     defaultMaxQueuedMessages,
+		queueBatch:            DefaultQueueBatchConfig(),
 		showContextIndicator:  true,
 		showWorkdirIndicator:  true,
 		shell:                 defaultShell(),
@@ -1496,6 +1504,7 @@ func (e *Engine) Stop() error {
 	e.stopping = true
 	e.platformLifecycleMu.Unlock()
 
+	e.wakeQueueHolds()
 	queueErr := e.flushQueues()
 
 	// Let accepted turns finish delivery before canceling the shared context.
@@ -2057,6 +2066,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 	// Resolve aliases on user text BEFORE merging ExtraContent, so reply
 	// quotes and platform context survive alias resolution (PR #420 fix).
 	content = e.resolveAlias(content)
+	msg.individualReply = msg.individualReply || strings.HasPrefix(content, "/") || strings.HasPrefix(content, "!")
 	if msg.ExtraContent != "" {
 		if content == "" {
 			msg.Content = msg.ExtraContent
@@ -2261,7 +2271,9 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 
 sessionLocked:
 	e.interactiveMu.Lock()
-	queuedState := e.interactiveStates[interactiveKey]
+	// Recall and idle cleanup can remove the startup placeholder before we own
+	// the session lock. Re-establish it before choosing queue admission.
+	queuedState := e.ensureInteractiveStateForQueueingLocked(interactiveKey, p, msg.ReplyCtx, session)
 	hasPending := false
 	if queuedState != nil {
 		queuedState.mu.Lock()
@@ -2273,6 +2285,13 @@ sessionLocked:
 		e.deliverMessageForBusySession(p, msg, interactiveKey, session, sessions)
 		if !e.launchAcceptedWork(func() { e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace) }) {
 			session.Unlock()
+		}
+		return
+	}
+	if held, err := e.holdIdleMessage(p, msg, session, sessions, agent, interactiveKey, resolvedWorkspace); held {
+		if err != nil {
+			session.Unlock()
+			e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgError, err))
 		}
 		return
 	}
@@ -2423,7 +2442,7 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 
 	// Allow queueing when agentSession is nil (session is starting up,
 	// issue #565). Only reject if the session was established and died.
-	if state.stopped || state.queueRetired || (state.agentSession != nil && !state.agentSession.Alive()) {
+	if state.stopped || state.queueRetired || (state.agentSession != nil && !state.agentSession.Alive() && state.hold == nil) {
 		return false, nil
 	}
 
@@ -2452,7 +2471,9 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 		accepted = true
 		return true, nil
 	}
-	if !msg.scheduledPrompt && len(state.pendingMessages) >= e.maxQueuedMessages {
+	// max_depth limits input waiting behind a running turn. An idle hold has
+	// not started a turn yet; immediate input must join its FIFO before waking it.
+	if state.hold == nil && !msg.scheduledPrompt && len(state.pendingMessages) >= e.maxQueuedMessages {
 		depth := len(state.pendingMessages)
 		e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgQueueFull), depth))
 		return true, nil // handled: queue-full reply sent
@@ -2462,12 +2483,13 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 		state.queueSessionID = session.ID
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
+		source: messageSource(msg), urgent: msg.Urgent, queuedAt: time.Now(), separateReply: msg.individualReply || msg.IsPermissionResponse || msg.preflightSent,
 		replySessionKey:   msg.replySessionKey,
 		scheduledPrompt:   msg.scheduledPrompt,
 		scheduledMute:     msg.scheduledMute,
 		scheduledInputID:  msg.scheduledInputID,
 		modeOverride:      msg.ModeOverride,
-		steerRetry:        e.dataDir == "" && !msg.scheduledPrompt && msg.ModeOverride == "" && !state.steerWriteFailed && len(msg.Files) == 0,
+		steerRetry:        e.dataDir == "" && (!e.queueBatch.Enabled || messageSource(msg) == "human") && (!e.queueBatch.Enabled || !msg.individualReply) && !msg.scheduledPrompt && msg.ModeOverride == "" && !state.steerWriteFailed && len(msg.Files) == 0,
 		messageID:         msg.MessageID,
 		platform:          p,
 		replyCtx:          msg.ReplyCtx,
@@ -2493,6 +2515,7 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 		}
 		state.steerMessageIDs[msg.scheduledInputID] = true
 	}
+	e.wakeQueueHoldLocked(state, msg)
 	accepted = true
 	queueDepth := len(state.pendingMessages)
 
@@ -2529,6 +2552,11 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, replyCtx any, session ...*Session) {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
+	e.ensureInteractiveStateForQueueingLocked(key, p, replyCtx, session...)
+}
+
+// The caller holds interactiveMu until any subsequent state.mu acquisition.
+func (e *Engine) ensureInteractiveStateForQueueingLocked(key string, p Platform, replyCtx any, session ...*Session) *interactiveState {
 	if _, ok := e.interactiveStates[key]; !ok {
 		e.interactiveStates[key] = &interactiveState{
 			queueKey:         key,
@@ -2543,6 +2571,7 @@ func (e *Engine) ensureInteractiveStateForQueueing(key string, p Platform, reply
 		state.queueSessionID = session[0].ID
 	}
 	state.mu.Unlock()
+	return state
 }
 
 // drainOrphanedQueue is called when a message was queued but the drain loop
@@ -2564,6 +2593,7 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	if !hasState || state == nil {
 		return
 	}
+	e.waitQueueHold(state)
 	state.mu.Lock()
 	if state.stopped || state.queueRetired || (state.queueSessionID != "" && state.queueSessionID != session.ID) {
 		state.mu.Unlock()
@@ -2571,12 +2601,13 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 	}
 	needsStart := state.agentSession == nil || !state.agentSession.Alive()
 	if needsStart {
-		q, ok := e.popQueuedMessageLocked(state)
+		q, ok := e.popQueuedBatchLocked(state)
 		state.mu.Unlock()
 		if !ok {
 			return
 		}
 		unlocked = true // processInteractiveMessageWith takes ownership of the lock.
+		e.acknowledgeQueuedBatch(q)
 		msg := queuedInput(q)
 		msg.executionState = state
 		e.processInteractiveMessageWith(q.platform, msg, session, agent, sessions, interactiveKey, workspaceDir, q.msgSessionKey)
@@ -3725,6 +3756,7 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 		state.stopped ||
 		state.eventsNeedResync ||
 		state.pending != nil ||
+		state.hold != nil ||
 		len(state.pendingMessages) > 0 {
 		state.mu.Unlock()
 		e.interactiveMu.Unlock()
@@ -4297,6 +4329,35 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 	}
 	events := turnAgentSession.Events()
+	handleSendError := func(err error) {
+		slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
+		if !thinkingProcessPreview {
+			sp.discard()
+		}
+		if stopTyping != nil {
+			stopTyping()
+			stopTyping = nil
+		}
+		if turnAgentSession == nil || !turnAgentSession.Alive() {
+			e.cleanupInteractiveState(sessionKey, state)
+		}
+		state.mu.Lock()
+		p := state.platform
+		state.mu.Unlock()
+		displayErr := err.Error()
+		var writeErr *InputWriteError
+		if errors.As(err, &writeErr) {
+			displayErr = e.i18n.T(MsgPromptNotDelivered)
+			slog.Warn("agent session restart required after input failure", "session_key", sessionKey, "agent_session", session.GetAgentSessionID(), "written_bytes", writeErr.WrittenBytes, "total_bytes", writeErr.TotalBytes)
+		} else {
+			var localized *UserMessageError
+			if errors.As(err, &localized) {
+				displayErr = localized.Localize(e.i18n.CurrentLang())
+			}
+		}
+		terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError), displayErr))
+		e.notifyDroppedQueuedMessages(state, err)
+	}
 	stopCh := state.stopSignal()
 	for {
 		var event Event
@@ -4316,22 +4377,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		case err := <-pendingSend:
 			pendingSend = nil
 			if err != nil {
-				slog.Error("failed to send prompt", "error", err, "session_key", sessionKey)
-				if !thinkingProcessPreview {
-					sp.discard()
-				}
-				if stopTyping != nil {
-					stopTyping()
-					stopTyping = nil
-				}
-				if turnAgentSession == nil || !turnAgentSession.Alive() {
-					e.cleanupInteractiveState(sessionKey, state)
-				}
-				state.mu.Lock()
-				p := state.platform
-				state.mu.Unlock()
-				terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError), err))
-				e.notifyDroppedQueuedMessages(state, err)
+				handleSendError(err)
 				return
 			}
 			e.steerQueuedMessages(state, session, sessions)
@@ -4814,6 +4860,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				silentHold = couldBeSilentPrefix(peekSegment)
 				releasedNow := prevHold && !silentHold
 				if !silentHold {
+					sp.acknowledgeVisible(peekSegment)
 					ensureAgentStreamCard(p)
 				}
 
@@ -5081,10 +5128,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// When tool progress is hidden, segmentStart stays 0 and textParts
 			// contains ALL text across tool boundaries. Prefer the full accumulated
 			// text over event.Content which only contains the last assistant segment.
-			if len(textParts) > 0 && segmentStart == 0 && !e.display.ToolMessages && !thinkingProcessPreview {
-				fullResponse = strings.Join(textParts, "")
-			} else if fullResponse == "" && len(textParts) > 0 {
-				fullResponse = strings.Join(textParts, "")
+			strippedResult, hasSilentResult := stripTrailingSilent(fullResponse)
+			silentResult := hasSilentResult && strings.TrimSpace(strippedResult) == ""
+			streamedResponse := strings.Join(textParts, "")
+			useStreamedText := len(textParts) > 0 && (!silentResult || !couldBeSilentPrefix(streamedResponse))
+			if useStreamedText && segmentStart == 0 && !e.display.ToolMessages && !thinkingProcessPreview {
+				fullResponse = streamedResponse
+			} else if useStreamedText && (fullResponse == "" || silentResult) {
+				fullResponse = streamedResponse
 			}
 			if fullResponse == "" && !muteScheduledNotices {
 				fullResponse = e.i18n.T(MsgEmptyResponse)
@@ -5140,6 +5191,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 			if !isSilent {
+				sp.acknowledgeVisible(baseResponse)
 				ensureAgentStreamCard(p)
 				e.hooks.Emit(HookEvent{
 					Event:      HookEventMessageSent,
@@ -5434,7 +5486,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				)
 			}
 			if len(state.pendingMessages) > 0 {
-				queued, ok := e.popQueuedMessageLocked(state)
+				queued, ok := e.popQueuedBatchLocked(state)
 				if !ok {
 					state.mu.Unlock()
 					return
@@ -5447,6 +5499,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
+
+				e.acknowledgeQueuedBatch(queued)
 
 				// Stop the previous turn's typing indicator
 				if stopTyping != nil {
@@ -5519,6 +5573,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				// further down — and platforms derive the parent message_id from
 				// it for the reply quote. Without this reassignment, msg2's
 				// reply would quote msg1's bubble.
+				p = queued.platform
 				replyCtx = queued.replyCtx
 				// Rich-mode per-turn state must reset too — otherwise EventText for
 				// the queued message would StreamRichCardText against the previous
@@ -5658,6 +5713,19 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	}
 
 channelClosed:
+	// The process can close events before Send publishes its write error.
+	if pendingSend != nil {
+		if err := <-pendingSend; err != nil {
+			handleSendError(err)
+			return
+		}
+	}
+	if reporter, ok := turnAgentSession.(InputFailureReporter); ok {
+		if err := reporter.InputFailure(); err != nil {
+			handleSendError(err)
+			return
+		}
+	}
 	// Channel closed - process exited unexpectedly
 	slog.Warn("agent process exited", "session_key", sessionKey)
 	state.mu.Lock()
@@ -5833,7 +5901,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			state.mu.Unlock()
 			return true
 		}
-		queued, ok := e.popQueuedMessageLocked(state)
+		queued, ok := e.popQueuedBatchLocked(state)
 		if !ok {
 			state.mu.Unlock()
 			return false
@@ -5845,6 +5913,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
 
+		e.acknowledgeQueuedBatch(queued)
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
 
@@ -15566,7 +15635,7 @@ func stripTrailingSilent(text string) (string, bool) {
 // prefix of "NO_REPLY". Used during streaming to hold the preview until we know
 // whether the response will resolve to a pure NO_REPLY marker.
 func couldBeSilentPrefix(text string) bool {
-	t := strings.TrimSpace(text)
+	t := strings.TrimLeft(strings.TrimSpace(text), "*")
 	if t == "" {
 		return true
 	}
