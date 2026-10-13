@@ -871,6 +871,7 @@ func testPreviewLifecycleQueuedTurns(t *testing.T, outcome string, instant, text
 // Scheduling commands must retain the same visible lifecycle after their
 // handlers and renderers move out of engine.go. Do not start background jobs.
 func TestCUJ_E7_ScheduledCommandLifecycle(t *testing.T) {
+	t.Run("AbsoluteTimeRequiresTimezone", testTimerAbsoluteTimezoneJourney)
 	t.Run("MutedAttachmentLifecycle", testMutedAttachmentCommandLifecycle)
 	for _, kind := range []string{"cron", "timer"} {
 		for _, shell := range []bool{false, true} {
@@ -3340,5 +3341,40 @@ func chineseToolProgressJourney(t *testing.T, mode string) {
 		if starts != turn || deletes != turn {
 			t.Fatalf("starts=%d recalls=%d", starts, deletes)
 		}
+	}
+}
+
+func testTimerAbsoluteTimezoneJourney(t *testing.T) {
+	for _, sub := range []string{"add", "addexec"} {
+		t.Run(sub, func(t *testing.T) {
+			env := newCUJEnv(t)
+			t.Cleanup(func() { _ = env.engine.Stop() })
+			env.engine.SetAdminFrom("scheduler-user")
+			env.engine.i18n.SetLang(LangChinese)
+			store, err := NewTimerStore(env.tempDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			env.engine.SetTimerScheduler(NewTimerScheduler(store))
+			send := func(command string) string {
+				t.Helper()
+				env.plat.clearSent()
+				env.userSends("scheduler-user", command)
+				env.waitFor(command, time.Second, func() bool { return len(env.plat.getSent()) > 0 })
+				return env.lastSent()
+			}
+			if got := send("/timer " + sub + " 2099-10-13T20:45 timezone-check"); !strings.Contains(got, "--at 必须带时区偏移") {
+				t.Fatalf("missing timezone rejection: %q", got)
+			}
+			if got := send("/timer list"); strings.Contains(got, "timezone-check") {
+				t.Fatalf("rejected timer was created: %q", got)
+			}
+			if got := send("/timer " + sub + " 2099-10-13T20:45Z timezone-check"); !strings.Contains(got, "北京时间: 10-14 04:45") {
+				t.Fatalf("missing Beijing creation time: %q", got)
+			}
+			if got := send("/timer list"); !strings.Contains(got, "北京时间: 10-14 04:45") || !strings.Contains(got, "timezone-check") {
+				t.Fatalf("missing Beijing list time: %q", got)
+			}
+		})
 	}
 }

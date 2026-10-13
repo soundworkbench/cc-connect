@@ -238,10 +238,10 @@ func (s *TimerStore) ListPending() []*TimerJob {
 
 // TimerScheduler runs one-shot timer jobs using time.AfterFunc.
 type TimerScheduler struct {
-	store    *TimerStore
-	engines  map[string]*Engine
-	mu       sync.RWMutex
-	timers   map[string]*time.Timer // job ID → active timer
+	store              *TimerStore
+	engines            map[string]*Engine
+	mu                 sync.RWMutex
+	timers             map[string]*time.Timer // job ID → active timer
 	defaultSilent      bool
 	defaultSessionMode string
 }
@@ -442,50 +442,38 @@ func GenerateTimerID() string {
 	return hex.EncodeToString(b)
 }
 
-// ParseDelayOrTime parses a relative duration ("2h", "30m", "1h30m") or
-// an absolute ISO time ("2026-05-15T14:00", "2026-05-15T14:00:00+08:00")
-// and returns the absolute fire time.
+// ParseDelayOrTime parses a positive duration or an absolute time with an explicit offset.
 func ParseDelayOrTime(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Time{}, fmt.Errorf("empty delay or time")
 	}
-
-	// Try as a Go duration first (e.g., "2h", "30m", "1h30m", "2h30m15s")
 	if d, err := time.ParseDuration(s); err == nil {
 		if d <= 0 {
 			return time.Time{}, fmt.Errorf("delay must be positive")
 		}
 		return time.Now().Add(d), nil
 	}
+	return ParseTimerAbsoluteTime(s)
+}
 
-	// Try ISO time formats
-	// RFC3339 includes timezone (e.g. "2026-05-15T14:00:00+08:00"),
-	// so it's parsed directly. The other layouts have no timezone
-	// and are interpreted in the system's local timezone.
-	layouts := []struct {
-		layout string
-		local  bool
-	}{
-		{time.RFC3339, false},
-		{"2006-01-02T15:04:05", true},
-		{"2006-01-02T15:04", true},
-		{"2006-01-02 15:04:05", true},
-		{"2006-01-02 15:04", true},
-	}
-	for _, l := range layouts {
-		if l.local {
-			if t, err := time.ParseInLocation(l.layout, s, time.Local); err == nil {
-				return t, nil
-			}
-		} else {
-			if t, err := time.Parse(l.layout, s); err == nil {
-				return t, nil
-			}
+// ParseTimerAbsoluteTime accepts RFC3339 timestamps with optional seconds.
+func ParseTimerAbsoluteTime(s string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04Z07:00"} {
+		if t, err := time.Parse(layout, strings.TrimSpace(s)); err == nil {
+			return t, nil
 		}
 	}
+	return time.Time{}, fmt.Errorf("%s", NewI18n(LangChinese).T(MsgTimerTimezoneRequired))
+}
 
-	return time.Time{}, fmt.Errorf("invalid delay or time %q (use duration like 2h30m, or ISO time like 2026-05-15T14:00)", s)
+// FormatTimerBeijingTime formats an instant in Asia/Shanghai, with a +08:00 fallback.
+func FormatTimerBeijingTime(t time.Time) string {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		loc = time.FixedZone("CST", 8*60*60)
+	}
+	return t.In(loc).Format("01-02 15:04")
 }
 
 // FormatTimerRemaining returns a human-readable string for time remaining
