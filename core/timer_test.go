@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -51,10 +52,10 @@ func TestParseDelayOrTime_Absolute(t *testing.T) {
 	}{
 		{"2026-05-15T14:00:00+08:00", false},
 		{"2026-05-15T14:00:00Z", false},
-		{"2026-05-15T14:00:00", false},
-		{"2026-05-15T14:00", false},
-		{"2026-05-15 14:00:00", false},
-		{"2026-05-15 14:00", false},
+		{"2026-05-15T14:00:00", true},
+		{"2026-05-15T14:00", true},
+		{"2026-05-15 14:00:00", true},
+		{"2026-05-15 14:00", true},
 		{"not-a-date", true},
 	}
 
@@ -77,27 +78,27 @@ func TestParseDelayOrTime_Absolute(t *testing.T) {
 	}
 }
 
-func TestParseDelayOrTime_LocalTimezone(t *testing.T) {
-	// When no timezone is specified, should use system local timezone
-	got, err := ParseDelayOrTime("2026-05-15T14:00")
-	if err != nil {
-		t.Fatalf("ParseDelayOrTime: %v", err)
+func TestParseDelayOrTime_RejectsImplicitLocalTimezone(t *testing.T) {
+	for _, input := range []string{"2026-05-15T14:00", "2026-05-15T14:00:00", "2026-05-15 14:00", "2026-05-15 14:00:00"} {
+		if _, err := ParseDelayOrTime(input); err == nil || !strings.Contains(err.Error(), "--at 必须带时区偏移") {
+			t.Errorf("ParseDelayOrTime(%q) error=%v", input, err)
+		}
 	}
-	if got.Location() != time.Local {
-		t.Errorf("expected local timezone %v, got %v", time.Local, got.Location())
-	}
-	if got.Hour() != 14 || got.Minute() != 0 {
-		t.Errorf("expected 14:00 local, got %02d:%02d", got.Hour(), got.Minute())
-	}
+}
 
-	// With explicit timezone, should use that timezone
-	got2, err := ParseDelayOrTime("2026-05-15T14:00:00+08:00")
-	if err != nil {
-		t.Fatalf("ParseDelayOrTime: %v", err)
-	}
-	_, offset := got2.Zone()
-	if offset != 8*3600 {
-		t.Errorf("expected +08:00 offset (%d), got %d", 8*3600, offset)
+func TestFormatTimerBeijingTime_CrossesDateBoundary(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"2026-10-13T22:45:00+08:00", "10-13 22:45"},
+		{"2026-10-13T00:15:00+09:00", "10-12 23:15"},
+		{"2026-10-13T20:45:00Z", "10-14 04:45"},
+	} {
+		instant, err := time.Parse(time.RFC3339, tc.input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := FormatTimerBeijingTime(instant); got != tc.want {
+			t.Errorf("FormatTimerBeijingTime(%s)=%q, want %q", tc.input, got, tc.want)
+		}
 	}
 }
 

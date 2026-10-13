@@ -577,7 +577,7 @@ func (s *APIServer) handleCronEdit(w http.ResponseWriter, r *http.Request) {
 type TimerAddRequest struct {
 	Project     string `json:"project"`
 	SessionKey  string `json:"session_key"`
-	Delay       string `json:"delay"` // relative ("2h") or absolute ISO time
+	Delay       string `json:"delay"` // relative ("2h") or absolute RFC3339 time with an offset
 	Prompt      string `json:"prompt"`
 	Exec        string `json:"exec"`
 	WorkDir     string `json:"work_dir"`

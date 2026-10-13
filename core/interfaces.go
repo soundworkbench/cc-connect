@@ -181,9 +181,10 @@ IMPORTANT: do NOT use cron for one-shot delays. A cron expression like "4 19 14 
 means "every year on June 14 at 19:04", not "once on this date". Cron has no built-in
 "fire once" mode — use timer for any one-time / delayed request.
 
-Duration examples: 30m, 2h, 1h30m. Or use absolute time: --at "2026-05-16T09:00"
-Absolute times without timezone (e.g. "2026-05-16T09:00") are interpreted as the
-system's local timezone. When the user says "明天早上9点", use local time.
+Duration examples: 30m, 2h, 1h30m. Or use absolute time: --at "2026-05-16T09:00+08:00"
+--at requires an explicit timezone offset. For Beijing time, use +08:00.
+If the timezone is uncertain, use --delay instead of guessing.
+--at 必须带时区偏移，北京时间写 +08:00；不确定就用 --delay。
 Environment variables CC_PROJECT and CC_SESSION_KEY are already set.
 
 Optional flags:
@@ -196,7 +197,7 @@ Optional flags:
 Examples:
   cc-connect timer add --delay 2h --prompt "Check PR status" --desc "PR check"
   cc-connect timer add --delay 30m --exec "df -h" --desc "Disk check"
-  cc-connect timer add --at "2026-05-16T09:00" --prompt "Morning standup reminder"
+  cc-connect timer add --at "2026-05-16T09:00+08:00" --prompt "Morning standup reminder"
 
 You can also list or cancel timers:
   cc-connect timer list

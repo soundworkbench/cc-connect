@@ -11,6 +11,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func runTimer(args []string) {
@@ -41,6 +43,7 @@ func runTimerAdd(args []string) {
 	var project, sessionKey, delay, atTime, prompt, execCmd, desc, dataDir, sessionMode string
 	var timeoutMins *int
 	var mute bool
+	var atProvided bool
 
 	var positional []string
 	for i := 0; i < len(args); i++ {
@@ -61,6 +64,7 @@ func runTimerAdd(args []string) {
 				delay = args[i]
 			}
 		case "--at", "-a":
+			atProvided = true
 			if i+1 < len(args) {
 				i++
 				atTime = args[i]
@@ -129,8 +133,12 @@ func runTimerAdd(args []string) {
 	}
 
 	fireTime := delay
-	if atTime != "" {
+	if atProvided {
 		fireTime = atTime
+		if _, err := core.ParseTimerAbsoluteTime(atTime); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	if fireTime == "" || (prompt == "" && execCmd == "") {
@@ -141,6 +149,12 @@ func runTimerAdd(args []string) {
 	if prompt != "" && execCmd != "" {
 		fmt.Fprintln(os.Stderr, "Error: --prompt and --exec are mutually exclusive")
 		os.Exit(1)
+	}
+	if !atProvided {
+		if _, err := core.ParseDelayOrTime(fireTime); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	sockPath := resolveSocketPath(dataDir)
@@ -184,8 +198,15 @@ func runTimerAdd(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: invalid response: %v\n", err)
 		os.Exit(1)
 	}
+	scheduledAt, _ := result["scheduled_at"].(string)
+	beijing, err := timerBeijingTime(scheduledAt)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	fmt.Printf("Timer created: %s\n", result["id"])
 	fmt.Printf("Fires at: %s\n", result["scheduled_at"])
+	fmt.Println(beijing)
 	if execCmd != "" {
 		fmt.Printf("Command: %s\n", result["exec"])
 	} else {
@@ -279,8 +300,21 @@ func runTimerList(args []string) {
 		if m, ok := j["mute"].(bool); ok && m {
 			muteStr = " [mute]"
 		}
-		fmt.Printf("  ⏰ %s  %s  %s%s\n", id, scheduledAt, display, muteStr)
+		beijing, err := timerBeijingTime(scheduledAt)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("  ⏰ %s  %s  %s%s  %s\n", id, scheduledAt, display, muteStr, beijing)
 	}
+}
+
+func timerBeijingTime(s string) (string, error) {
+	t, err := core.ParseTimerAbsoluteTime(s)
+	if err != nil {
+		return "", err
+	}
+	return core.NewI18n(core.LangChinese).Tf(core.MsgTimerBeijingTime, core.FormatTimerBeijingTime(t)), nil
 }
 
 func runTimerDel(args []string) {
@@ -408,7 +442,7 @@ Options:
   -p, --project <name>       Target project (auto-detected from CC_PROJECT env)
   -s, --session-key <key>    Target session (auto-detected from CC_SESSION_KEY env)
   -d, --delay <duration>     Delay from now (e.g. 30m, 2h, 1h30m)
-  -a, --at <time>            Absolute ISO time (e.g. 2026-05-16T09:00, local timezone)
+  -a, --at <time>            RFC3339 time with offset (e.g. 2026-05-16T09:00+08:00; seconds optional)
       --prompt <text>        Task prompt (runs through agent)
       --exec <command>       Shell command (runs directly, mutually exclusive with --prompt)
       --desc <text>          Short description
@@ -421,6 +455,6 @@ Options:
 Examples:
   cc-connect timer add --delay 2h --prompt "Check PR status"
   cc-connect timer add --delay 30m --exec "df -h" --desc "Disk check"
-  cc-connect timer add --at "2026-05-16T09:00" --prompt "Morning standup reminder"
+  cc-connect timer add --at "2026-05-16T09:00+08:00" --prompt "Morning standup reminder"
   cc-connect timer add 2h Check PR status`)
 }
