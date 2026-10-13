@@ -578,6 +578,18 @@ cc-connect doctor user-isolation
 /cron add 0 6 * * * 帮我总结 GitHub trending
 ```
 
+一次性提醒用 `timer`。绝对时间必须带时区偏移，北京时间写 `+08:00`，
+东京时间写 `+09:00`，UTC 写 `Z`。秒数可省略。不确定时区时用 `--delay`。
+
+```bash
+cc-connect timer add --at "2026-10-13T22:45+08:00" --prompt "检查 PR 状态"
+cc-connect timer add --delay 2h --prompt "检查 PR 状态"
+cc-connect timer list
+```
+
+创建和列表输出会同时显示北京时间。聊天中可用
+`/timer add 2026-10-13T22:45+08:00 检查 PR 状态`。
+
 ### 📎 Agent 回传图片和文件
 
 当 Agent 在本地生成了截图、图表、PDF、日志包等文件时，可以主动把附件发回当前聊天。

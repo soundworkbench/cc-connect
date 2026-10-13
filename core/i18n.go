@@ -411,31 +411,33 @@ const (
 	MsgCronIDLabel               MsgKey = "cron_id_label"
 	MsgCronFailedSuffix          MsgKey = "cron_failed_suffix"
 
-	MsgTimerNotAvailable    MsgKey = "timer_not_available"
-	MsgTimerUsage           MsgKey = "timer_usage"
-	MsgTimerAddUsage        MsgKey = "timer_add_usage"
-	MsgTimerAdded           MsgKey = "timer_added"
-	MsgTimerAddedExec       MsgKey = "timer_added_exec"
-	MsgTimerAddExecUsage    MsgKey = "timer_addexec_usage"
-	MsgTimerEmpty           MsgKey = "timer_empty"
-	MsgTimerListTitle       MsgKey = "timer_list_title"
-	MsgTimerListFooter      MsgKey = "timer_list_footer"
-	MsgTimerDelUsage        MsgKey = "timer_del_usage"
-	MsgTimerMuteUsage       MsgKey = "timer_mute_usage"
-	MsgTimerDeleted         MsgKey = "timer_deleted"
-	MsgTimerNotFound        MsgKey = "timer_not_found"
-	MsgTimerMuted           MsgKey = "timer_muted"
-	MsgTimerUnmuted         MsgKey = "timer_unmuted"
-	MsgTimerCardHint        MsgKey = "timer_card_hint"
-	MsgTimerBtnMute         MsgKey = "timer_btn_mute"
-	MsgTimerBtnUnmute       MsgKey = "timer_btn_unmute"
-	MsgTimerBtnDelete       MsgKey = "timer_btn_delete"
-	MsgTimerIDLabel         MsgKey = "timer_id_label"
-	MsgTimerScheduledLabel  MsgKey = "timer_scheduled_label"
-	MsgTimerFailedSuffix    MsgKey = "timer_failed_suffix"
-	MsgCommandsTagAgent     MsgKey = "commands_tag_agent"
-	MsgCommandsTagShell     MsgKey = "commands_tag_shell"
-	MsgUpgradeTimeoutSuffix MsgKey = "upgrade_timeout_suffix"
+	MsgTimerNotAvailable     MsgKey = "timer_not_available"
+	MsgTimerUsage            MsgKey = "timer_usage"
+	MsgTimerTimezoneRequired MsgKey = "timer_timezone_required"
+	MsgTimerBeijingTime      MsgKey = "timer_beijing_time"
+	MsgTimerAddUsage         MsgKey = "timer_add_usage"
+	MsgTimerAdded            MsgKey = "timer_added"
+	MsgTimerAddedExec        MsgKey = "timer_added_exec"
+	MsgTimerAddExecUsage     MsgKey = "timer_addexec_usage"
+	MsgTimerEmpty            MsgKey = "timer_empty"
+	MsgTimerListTitle        MsgKey = "timer_list_title"
+	MsgTimerListFooter       MsgKey = "timer_list_footer"
+	MsgTimerDelUsage         MsgKey = "timer_del_usage"
+	MsgTimerMuteUsage        MsgKey = "timer_mute_usage"
+	MsgTimerDeleted          MsgKey = "timer_deleted"
+	MsgTimerNotFound         MsgKey = "timer_not_found"
+	MsgTimerMuted            MsgKey = "timer_muted"
+	MsgTimerUnmuted          MsgKey = "timer_unmuted"
+	MsgTimerCardHint         MsgKey = "timer_card_hint"
+	MsgTimerBtnMute          MsgKey = "timer_btn_mute"
+	MsgTimerBtnUnmute        MsgKey = "timer_btn_unmute"
+	MsgTimerBtnDelete        MsgKey = "timer_btn_delete"
+	MsgTimerIDLabel          MsgKey = "timer_id_label"
+	MsgTimerScheduledLabel   MsgKey = "timer_scheduled_label"
+	MsgTimerFailedSuffix     MsgKey = "timer_failed_suffix"
+	MsgCommandsTagAgent      MsgKey = "commands_tag_agent"
+	MsgCommandsTagShell      MsgKey = "commands_tag_shell"
+	MsgUpgradeTimeoutSuffix  MsgKey = "upgrade_timeout_suffix"
 
 	MsgCronScheduleLabel MsgKey = "cron_schedule_label"
 	MsgCronNextRunLabel  MsgKey = "cron_next_run_label"
@@ -2128,19 +2130,33 @@ var messages = map[MsgKey]map[Language]string{
 		LangJapanese:           "タイマースケジューラは利用できません。",
 		LangSpanish:            "El programador de temporizador no está disponible.",
 	},
+	MsgTimerTimezoneRequired: {
+		LangEnglish:            "--at requires a timezone offset, e.g. 2026-10-13T22:45+08:00 (Beijing) or +09:00 (Tokyo); you can also use --delay",
+		LangChinese:            "--at 必须带时区偏移，例如 2026-10-13T22:45+08:00（北京）或 +09:00（东京）；也可用 --delay",
+		LangTraditionalChinese: "--at 必須帶時區偏移，例如 2026-10-13T22:45+08:00（北京）或 +09:00（東京）；也可用 --delay",
+		LangJapanese:           "--at にはタイムゾーンのオフセットが必要です。例: 2026-10-13T22:45+08:00（北京）または +09:00（東京）。不明な場合は --delay を使用してください",
+		LangSpanish:            "--at requiere un desplazamiento de zona horaria, por ejemplo 2026-10-13T22:45+08:00 (Pekín) o +09:00 (Tokio); también puede usar --delay",
+	},
+	MsgTimerBeijingTime: {
+		LangEnglish:            "Beijing time: %s",
+		LangChinese:            "北京时间: %s",
+		LangTraditionalChinese: "北京時間: %s",
+		LangJapanese:           "北京時間: %s",
+		LangSpanish:            "Hora de Pekín: %s",
+	},
 	MsgTimerUsage: {
-		LangEnglish:            "Usage:\n/timer add <delay|time> <prompt>\n/timer addexec <delay|time> <command>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\nDelay: 30m, 2h, 1h30m. Or absolute time: 2026-05-16T09:00\nTime without timezone uses system local time.",
-		LangChinese:            "用法：\n/timer add <延迟|时间> <任务描述>\n/timer addexec <延迟|时间> <命令>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n延迟：30m、2h、1h30m。或绝对时间：2026-05-16T09:00\n不带时区的时间按系统本地时区解析。",
-		LangTraditionalChinese: "用法：\n/timer add <延遲|時間> <任務描述>\n/timer addexec <延遲|時間> <命令>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n延遲：30m、2h、1h30m。或絕對時間：2026-05-16T09:00\n不帶時區的時間按系統本地時區解析。",
-		LangJapanese:           "使い方:\n/timer add <遅延|時刻> <タスク内容>\n/timer addexec <遅延|時刻> <コマンド>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n遅延: 30m, 2h, 1h30m。または絶対時刻: 2026-05-16T09:00\nタイムゾーンなしの時刻はシステムのローカルタイムゾーンで解釈されます。",
-		LangSpanish:            "Uso:\n/timer add <retraso|hora> <tarea>\n/timer addexec <retraso|hora> <comando>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\nRetraso: 30m, 2h, 1h30m. O hora absoluta: 2026-05-16T09:00\nHora sin zona horaria usa la hora local del sistema.",
+		LangEnglish:            "Usage:\n/timer add <delay|time> <prompt>\n/timer addexec <delay|time> <command>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\nDelay: 30m, 2h, 1h30m. Or absolute time: 2026-05-16T09:00+08:00\nAbsolute times require a timezone offset. Use +08:00 for Beijing; if uncertain, use --delay.",
+		LangChinese:            "用法：\n/timer add <延迟|时间> <任务描述>\n/timer addexec <延迟|时间> <命令>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n延迟：30m、2h、1h30m。或绝对时间：2026-05-16T09:00+08:00\n绝对时间必须带时区偏移，北京时间写 +08:00；不确定就用 --delay。",
+		LangTraditionalChinese: "用法：\n/timer add <延遲|時間> <任務描述>\n/timer addexec <延遲|時間> <命令>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n延遲：30m、2h、1h30m。或絕對時間：2026-05-16T09:00+08:00\n絕對時間必須帶時區偏移，北京時間寫 +08:00；不確定就用 --delay。",
+		LangJapanese:           "使い方:\n/timer add <遅延|時刻> <タスク内容>\n/timer addexec <遅延|時刻> <コマンド>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\n遅延: 30m, 2h, 1h30m。または絶対時刻: 2026-05-16T09:00+08:00\n絶対時刻にはタイムゾーンのオフセットが必要です。北京時間は +08:00、不明な場合は --delay を使用してください。",
+		LangSpanish:            "Uso:\n/timer add <retraso|hora> <tarea>\n/timer addexec <retraso|hora> <comando>\n/timer list\n/timer del <id>\n/timer mute <id> · /timer unmute <id>\n\nRetraso: 30m, 2h, 1h30m. O hora absoluta: 2026-05-16T09:00+08:00\nLa hora absoluta requiere un desplazamiento de zona horaria. Use +08:00 para Pekín; si no está seguro, use --delay.",
 	},
 	MsgTimerAddUsage: {
-		LangEnglish:            "Usage: /timer add <delay|time> <prompt>\nExamples:\n  /timer add 2h Check PR status\n  /timer add 2026-05-16T09:00 Morning standup reminder\nDelay: 30m, 2h, 1h30m. Time: ISO format (2026-05-16T09:00)\nTime without timezone uses system local time.",
-		LangChinese:            "用法：/timer add <延迟|时间> <任务描述>\n示例：\n  /timer add 2h 检查PR状态\n  /timer add 2026-05-16T09:00 早会提醒\n延迟：30m、2h、1h30m。时间：ISO格式（2026-05-16T09:00）\n不带时区的时间按系统本地时区解析。",
-		LangTraditionalChinese: "用法：/timer add <延遲|時間> <任務描述>\n範例：\n  /timer add 2h 檢查PR狀態\n  /timer add 2026-05-16T09:00 早會提醒\n延遲：30m、2h、1h30m。時間：ISO格式（2026-05-16T09:00）\n不帶時區的時間按系統本地時區解析。",
-		LangJapanese:           "使い方: /timer add <遅延|時刻> <タスク内容>\n例:\n  /timer add 2h PRの状態を確認\n  /timer add 2026-05-16T09:00 朝会リマインダー\n遅延: 30m, 2h, 1h30m。時刻: ISO形式（2026-05-16T09:00）\nタイムゾーンなしの時刻はシステムのローカルタイムゾーンで解釈されます。",
-		LangSpanish:            "Uso: /timer add <retraso|hora> <tarea>\nEjemplos:\n  /timer add 2h Verificar estado del PR\n  /timer add 2026-05-16T09:00 Recordatorio de reunión\nRetraso: 30m, 2h, 1h30m. Hora: formato ISO (2026-05-16T09:00)\nHora sin zona horaria usa la hora local del sistema.",
+		LangEnglish:            "Usage: /timer add <delay|time> <prompt>\nExamples:\n  /timer add 2h Check PR status\n  /timer add 2026-05-16T09:00+08:00 Morning standup reminder\nDelay: 30m, 2h, 1h30m. Time: ISO format (2026-05-16T09:00+08:00)\nAbsolute times require a timezone offset. Use +08:00 for Beijing; if uncertain, use --delay.",
+		LangChinese:            "用法：/timer add <延迟|时间> <任务描述>\n示例：\n  /timer add 2h 检查PR状态\n  /timer add 2026-05-16T09:00+08:00 早会提醒\n延迟：30m、2h、1h30m。时间：ISO格式（2026-05-16T09:00+08:00）\n绝对时间必须带时区偏移，北京时间写 +08:00；不确定就用 --delay。",
+		LangTraditionalChinese: "用法：/timer add <延遲|時間> <任務描述>\n範例：\n  /timer add 2h 檢查PR狀態\n  /timer add 2026-05-16T09:00+08:00 早會提醒\n延遲：30m、2h、1h30m。時間：ISO格式（2026-05-16T09:00+08:00）\n絕對時間必須帶時區偏移，北京時間寫 +08:00；不確定就用 --delay。",
+		LangJapanese:           "使い方: /timer add <遅延|時刻> <タスク内容>\n例:\n  /timer add 2h PRの状態を確認\n  /timer add 2026-05-16T09:00+08:00 朝会リマインダー\n遅延: 30m, 2h, 1h30m。時刻: ISO形式（2026-05-16T09:00+08:00）\n絶対時刻にはタイムゾーンのオフセットが必要です。北京時間は +08:00、不明な場合は --delay を使用してください。",
+		LangSpanish:            "Uso: /timer add <retraso|hora> <tarea>\nEjemplos:\n  /timer add 2h Verificar estado del PR\n  /timer add 2026-05-16T09:00+08:00 Recordatorio de reunión\nRetraso: 30m, 2h, 1h30m. Hora: formato ISO (2026-05-16T09:00+08:00)\nLa hora absoluta requiere un desplazamiento de zona horaria. Use +08:00 para Pekín; si no está seguro, use --delay.",
 	},
 	MsgTimerAdded: {
 		LangEnglish:            "⏰ Reminder set (one-shot)\nID: `%s`\nFires in: %s\nPrompt: %s\n(use /timer to view, /cron for recurring tasks)",

@@ -264,6 +264,8 @@ func (e *Engine) renderTimerCard(sessionKey string, userID string) *Card {
 		fmt.Fprintf(&sb, "⏰ %s\n", desc)
 		sb.WriteString(e.i18n.Tf(MsgTimerIDLabel, j.ID))
 		sb.WriteString(e.i18n.Tf(MsgTimerScheduledLabel, j.ScheduledAt.Format("2006-01-02 15:04"), remaining))
+		sb.WriteString(e.i18n.Tf(MsgTimerBeijingTime, FormatTimerBeijingTime(j.ScheduledAt)))
+		sb.WriteString("\n")
 		if j.LastError != "" {
 			sb.WriteString(e.i18n.Tf(MsgTimerFailedSuffix, truncateStr(j.LastError, 40)))
 		}
@@ -355,7 +357,7 @@ func (e *Engine) cmdTimerAdd(p Platform, msg *Message, args []string) {
 	}
 
 	remaining := FormatTimerRemaining(fireAt)
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTimerAdded), job.ID, remaining, truncateStr(prompt, 60)))
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTimerAdded), job.ID, remaining, truncateStr(prompt, 60))+"\n"+e.i18n.Tf(MsgTimerBeijingTime, FormatTimerBeijingTime(fireAt)))
 }
 
 func (e *Engine) cmdTimerAddExec(p Platform, msg *Message, args []string) {
@@ -393,7 +395,7 @@ func (e *Engine) cmdTimerAddExec(p Platform, msg *Message, args []string) {
 	}
 
 	remaining := FormatTimerRemaining(fireAt)
-	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTimerAddedExec), job.ID, remaining, truncateStr(shellCmd, 60)))
+	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgTimerAddedExec), job.ID, remaining, truncateStr(shellCmd, 60))+"\n"+e.i18n.Tf(MsgTimerBeijingTime, FormatTimerBeijingTime(fireAt)))
 }
 
 func (e *Engine) cmdTimerList(p Platform, msg *Message) {
@@ -432,6 +434,7 @@ func (e *Engine) cmdTimerList(p Platform, msg *Message) {
 		remaining := FormatTimerRemaining(j.ScheduledAt)
 		fmt.Fprintf(&sb, "⏰ %s (%s)\n", desc, remaining)
 		fmt.Fprintf(&sb, "ID: %s\n", j.ID)
+		fmt.Fprintf(&sb, "%s\n", e.i18n.Tf(MsgTimerBeijingTime, FormatTimerBeijingTime(j.ScheduledAt)))
 	}
 
 	fmt.Fprintf(&sb, "\n%s", e.i18n.T(MsgTimerListFooter))
