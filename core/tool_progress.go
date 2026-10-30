@@ -141,7 +141,9 @@ func (sp *streamPreview) appendProgressEvent(event Event, text string) {
 	}
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
-	if sp.degraded || sp.previewMsgID == nil {
+	// A hidden preview still records rows so substantive progress is merged
+	// into the final reply; queueProgressLocked never sends without a handle.
+	if sp.degraded || (sp.previewMsgID == nil && !sp.hidden) {
 		return
 	}
 	if sp.progressSeen == nil {

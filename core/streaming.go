@@ -92,6 +92,10 @@ type streamPreview struct {
 	keepProgressCard    bool
 	pendingToolProgress string     // latest coalesced progress; never answer text
 	pendingStatus       CardStatus // last status set via setStatus(); applied on recovery
+	// hidden marks an automated turn (timer, tell, relay...): the preview keeps
+	// its state for the final reply but never creates a platform message, so
+	// a turn that ends silent sends nothing and recalls nothing.
+	hidden bool
 }
 
 // ToolStepKind identifies the kind of progress row shown in rich cards.
@@ -227,6 +231,9 @@ func (sp *streamPreview) replacePreviewLocked(text string) bool {
 		return true
 	}
 	if sp.previewMsgID == nil {
+		if sp.hidden {
+			return false
+		}
 		starter, ok := sp.platform.(PreviewStarter)
 		if !ok {
 			return false
@@ -318,7 +325,7 @@ func (sp *streamPreview) acknowledgeVisible(text string) {
 // startPlaceholder reports whether a visible placeholder was sent. Callers can
 // use it to avoid a second acknowledgement while retaining failure fallback.
 func (sp *streamPreview) startPlaceholder(text string) bool {
-	if strings.TrimSpace(text) == "" || !sp.canPreview() {
+	if sp.hidden || strings.TrimSpace(text) == "" || !sp.canPreview() {
 		return false
 	}
 
@@ -460,6 +467,9 @@ func (sp *streamPreview) flushLocked(text string) {
 	}
 
 	if sp.previewMsgID == nil {
+		if sp.hidden {
+			return
+		}
 		// First preview: try to send a new preview message
 		if starter, ok := sp.platform.(PreviewStarter); ok {
 			slog.Debug("stream preview: sending first preview via SendPreviewStart", "text_len", len(text))
@@ -786,7 +796,7 @@ func (sp *streamPreview) detachForFinal() *streamPreview {
 	sp.degraded = true
 	final := newStreamPreview(sp.cfg, sp.platform, sp.replyCtx, sp.ctx, sp.transform)
 	final.previewMsgID, final.lastSentText = sp.previewMsgID, sp.lastSentText
-	final.keepProgressCard = sp.keepProgressCard
+	final.keepProgressCard, final.hidden = sp.keepProgressCard, sp.hidden
 	final.pendingToolProgress = sp.pendingToolProgress
 	final.mergeCfg, final.progressI18n = sp.mergeCfg, sp.progressI18n
 	final.substantiveProgress, sp.substantiveProgress = sp.substantiveProgress, nil

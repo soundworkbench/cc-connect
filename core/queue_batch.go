@@ -55,6 +55,42 @@ func messageSource(msg *Message) string {
 	return "human"
 }
 
+// automationUserIDs are the sender IDs engine-side producers stamp on the
+// messages they inject (engine_timer, engine_cron, engine_heartbeat, webhook,
+// assistant_api). messageSource does not know heartbeat or webhook.
+var automationUserIDs = map[string]bool{"timer": true, "cron": true, "heartbeat": true, "webhook": true, "assistant": true, "relay": true}
+
+// isHumanTurn reports whether a person typed this message in chat. Anything
+// carrying an automation marker is not: scheduler/assistant admission
+// (timer, cron, relay via timer, assistant inject, rotation), an explicit
+// non-human Source, app-sent Feishu messages (relay), and the synthetic
+// heartbeat/webhook senders. An unmarked platform message counts as human; in
+// this deployment that is exactly a Feishu message from a real user.
+func isHumanTurn(msg *Message) bool {
+	if msg != nil && msg.humanBatch {
+		return true
+	}
+	if msg == nil || msg.scheduledPrompt || messageSource(msg) != "human" {
+		return false
+	}
+	id := strings.ToLower(strings.TrimSpace(msg.UserID))
+	return !automationUserIDs[id] && !strings.HasPrefix(id, "relay:")
+}
+
+// isHumanQueuedTurn treats a merged batch as human when any part is human, so
+// a person's message never loses its live preview by riding along with a tell.
+func isHumanQueuedTurn(q queuedMessage) bool {
+	if len(q.mergedFrom) == 0 {
+		return isHumanTurn(queuedInput(q))
+	}
+	for _, m := range q.mergedFrom {
+		if isHumanTurn(queuedInput(m)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Engine) shouldHold(msg *Message) bool {
 	if !e.queueBatch.Enabled || e.queueBatch.Hold <= 0 || msg.Urgent || msg.individualReply || msg.ModeOverride != "" || msg.IsPermissionResponse || msg.preflightSent || strings.HasPrefix(strings.TrimSpace(msg.Content), "/") || strings.HasPrefix(strings.TrimSpace(msg.Content), "!") {
 		return false
