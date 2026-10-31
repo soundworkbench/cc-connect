@@ -20,12 +20,18 @@ func TestUnsolicitedReaderNoReplyContract(t *testing.T) {
 		{"trailing", "后台任务完成\n\nNO_REPLY", []string{"后台任务完成"}},
 		{"trailing_only_marker", "\n\n**NO_REPLY", nil},
 		{"normal", "All 5 campaigns created successfully", []string{"All 5 campaigns created successfully"}},
+		// Agent metadata is removed before the NO_REPLY decision, as in the
+		// foreground path (cleanAgentReply).
+		{"footer_after_marker", "NO_REPLY\n*claude-opus-4-8[1m] · out 788 · in 442 cw 0 cr 395.1k · ctx 40%*", nil},
+		{"ctx_after_marker", "NO_REPLY\n[ctx: ~40%]", nil},
+		{"text_then_ctx", "已完成\n[ctx: ~40%]", []string{"已完成"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &stubPlatformEngine{n: "test"}
 			sess := newControllableSession("unsol-" + tc.name)
 			e := NewEngine("test", &stubAgent{}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
 			defer e.Stop()
+			e.SetDisplayConfig(DisplayCfg{Mode: "quiet", HideAgentFooter: true})
 			iKey := "test:ch1:u1"
 			session := e.sessions.GetOrCreateActive(iKey)
 			state := &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
@@ -242,5 +248,91 @@ func TestExecuteTimerJob_AutomatedTurnNoPreviewOrRecall(t *testing.T) {
 				t.Fatalf("want exactly one send containing the reply, got %v", sent)
 			}
 		})
+	}
+}
+
+// cardStylePlatform is a text-preview platform whose progress_style is
+// "card" (compact progress writer enabled), like Feishu progress_style=card.
+type cardStylePlatform struct{ lifecyclePlatform }
+
+func (p *cardStylePlatform) ProgressStyle() string { return "card" }
+
+// plainPlatform has no preview or update support, like Feishu with cards off.
+type plainPlatform struct{ stubPlatformEngine }
+
+// Non-compact paths (thinking-process preview off): an automated turn must
+// not flush text segments into side messages or send thinking/tool messages.
+// The whole text A + B arrives as one final message; a silent turn sends and
+// recalls nothing.
+func TestAutomatedTurnNonCompactPaths(t *testing.T) {
+	platforms := map[string]func() (Platform, *stubPlatformEngine, *lifecyclePlatform){
+		"legacy": func() (Platform, *stubPlatformEngine, *lifecyclePlatform) {
+			p := &lifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "legacy"}, textPreview: true}
+			return p, &p.stubPlatformEngine, p
+		},
+		"card": func() (Platform, *stubPlatformEngine, *lifecyclePlatform) {
+			p := &cardStylePlatform{lifecyclePlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}, textPreview: true}}
+			return p, &p.stubPlatformEngine, &p.lifecyclePlatform
+		},
+		"cards_off": func() (Platform, *stubPlatformEngine, *lifecyclePlatform) {
+			p := &plainPlatform{stubPlatformEngine{n: "plain"}}
+			return p, &p.stubPlatformEngine, nil
+		},
+	}
+	displays := map[string]DisplayCfg{
+		"quiet_thinking": {Mode: "quiet", ThinkingMessages: true, HideAgentFooter: true},
+		"quiet_tools":    {Mode: "quiet", ToolMessages: true, HideAgentFooter: true},
+		"compact":        {Mode: "compact", HideAgentFooter: true},
+		"all_on":         {Mode: "quiet", ThinkingMessages: true, ToolMessages: true, HideAgentFooter: true},
+	}
+	const a, b = "第一段：重要结论 A。", "第二段：B。"
+	work := []Event{
+		{Type: EventThinking, Content: "想一想"},
+		{Type: EventToolUse, ToolName: "Bash", ToolInput: "tool status"},
+		{Type: EventToolResult, ToolName: "Bash", ToolResult: "ok", ToolStatus: "ok"},
+	}
+	run := func(t *testing.T, mk func() (Platform, *stubPlatformEngine, *lifecyclePlatform), d DisplayCfg, automated bool, events []Event) ([]string, []string) {
+		t.Helper()
+		p, sent, lp := mk()
+		e := NewEngine("test", &stubAgent{}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+		defer e.Stop()
+		e.SetDisplayConfig(d)
+		e.SetStreamPreviewCfg(DefaultStreamPreviewCfg())
+		as := newControllableSession("np")
+		as.events = make(chan Event, len(events)+1)
+		for _, ev := range events {
+			as.events <- ev
+		}
+		state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx"}
+		e.processTurnEvents(automated, state, e.sessions.GetOrCreateActive("np"), e.sessions, "np", "m", time.Now(), nil, nil, "ctx")
+		var preview []string
+		if lp != nil {
+			lp.previewMu.Lock()
+			preview = append(append(append(preview, lp.starts...), lp.edits...), lp.deletes...)
+			lp.previewMu.Unlock()
+		}
+		return sent.getSent(), preview
+	}
+	for pn, mk := range platforms {
+		for dn, d := range displays {
+			t.Run(pn+"/"+dn, func(t *testing.T) {
+				visible := append(append([]Event{{Type: EventText, Content: a}}, work...),
+					Event{Type: EventText, Content: b}, Event{Type: EventResult, Content: b, Done: true})
+				sent, preview := run(t, mk, d, true, visible)
+				if len(sent) != 1 || !strings.Contains(sent[0], a) || !strings.Contains(sent[0], b) || len(preview) != 0 {
+					t.Fatalf("automated visible turn: want 1 send with A and B and no preview, got sent=%q preview=%q", sent, preview)
+				}
+				silent := append(append([]Event(nil), work...),
+					Event{Type: EventText, Content: "NO_REPLY"}, Event{Type: EventResult, Content: "NO_REPLY", Done: true})
+				if sent, preview := run(t, mk, d, true, silent); len(sent) != 0 || len(preview) != 0 {
+					t.Fatalf("automated silent turn: want 0 sends and 0 preview/recall, got sent=%q preview=%q", sent, preview)
+				}
+				// Human turns keep the old behavior: A is shown somewhere.
+				sent, preview = run(t, mk, d, false, visible)
+				if !strings.Contains(strings.Join(append(sent, preview...), "|"), a) {
+					t.Fatalf("human turn lost A: sent=%q preview=%q", sent, preview)
+				}
+			})
+		}
 	}
 }

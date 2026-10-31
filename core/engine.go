@@ -4062,7 +4062,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 				// Background completions follow the same NO_REPLY contract as
 				// foreground turns; history below still keeps the original text.
-				outbound, silent := resolveSilentReply(fullResponse)
+				outbound, silent := resolveSilentReply(e.cleanAgentReply(fullResponse))
 				if silent {
 					slog.Info("silent reply suppressed", "session", sessionKey, "unsolicited", true)
 				} else if outbound != "" {
@@ -4195,6 +4195,15 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
+	// keepSegmentForFinal is the automated-turn replacement for flushing a
+	// text segment at a thinking/tool/permission boundary. The hidden preview
+	// never showed it, so it stays in textParts (segmentStart does not move)
+	// and the final reply delivers the whole text once.
+	keepSegmentForFinal := func() {
+		if n := len(textParts); n > segmentStart && textParts[n-1] != "\n\n" {
+			textParts = append(textParts, "\n\n")
+		}
+	}
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
@@ -4571,6 +4580,10 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				}
 				break
 			}
+			if automated {
+				keepSegmentForFinal() // no thinking messages or progress card
+				break
+			}
 			// When thinking messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
@@ -4687,6 +4700,10 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				}
 				break
 			}
+			if automated {
+				keepSegmentForFinal() // no tool messages or progress card
+				break
+			}
 			// When tool messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
@@ -4789,7 +4806,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			}
 
 		case EventToolResult:
-			if thinkingProcessPreview {
+			if thinkingProcessPreview || automated {
 				break
 			}
 			if e.display.ToolMessages {
@@ -5021,7 +5038,11 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 
 			// Flush accumulated text segment before permission prompt
 			// Preserve the temporary process card handle across questions.
-			if !thinkingProcessPreview {
+			// Automated turns keep it for the final reply; the prompt itself
+			// is still sent because the turn cannot continue without it.
+			if automated {
+				keepSegmentForFinal()
+			} else if !thinkingProcessPreview {
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
 					if !previewActive {
@@ -5147,7 +5168,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			silentResult := hasSilentResult && strings.TrimSpace(strippedResult) == ""
 			streamedResponse := strings.Join(textParts, "")
 			useStreamedText := len(textParts) > 0 && (!silentResult || !couldBeSilentPrefix(streamedResponse))
-			if useStreamedText && segmentStart == 0 && !e.display.ToolMessages && !thinkingProcessPreview {
+			if useStreamedText && segmentStart == 0 && (!e.display.ToolMessages || automated) && !thinkingProcessPreview {
 				fullResponse = streamedResponse
 			} else if useStreamedText && (fullResponse == "" || silentResult) {
 				fullResponse = streamedResponse
@@ -5161,8 +5182,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			// rendered exclusively in the reply footer.
 			sdkPlausible := event.InputTokens >= 100
 			selfPct := parseSelfReportedCtx(fullResponse)
-			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
-			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
+			cleanResponse := e.cleanAgentReply(fullResponse)
 			baseResponse := cleanResponse
 
 			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
@@ -5766,18 +5786,13 @@ channelClosed:
 		sessions.Save()
 
 		// Respect NO_REPLY even on abnormal exit so silent turns stay silent.
-		if isSilentReply(fullResponse) {
+		outbound, silent := resolveSilentReply(fullResponse)
+		if silent {
 			sp.discard()
 			slog.Info("silent reply suppressed (channel closed)", "session", session.ID)
 			return
 		}
-		if stripped, ok := stripTrailingSilent(fullResponse); ok {
-			if strings.TrimSpace(stripped) == "" {
-				sp.discard()
-				return
-			}
-			fullResponse = stripped
-		}
+		fullResponse = outbound
 
 		e.hooks.Emit(HookEvent{
 			Event:      HookEventMessageSent,
@@ -15645,6 +15660,17 @@ func stripTrailingSilent(text string) (string, bool) {
 		return text, false
 	}
 	return strings.TrimRight(stripped, " \t\r\n"), true
+}
+
+// cleanAgentReply removes agent-added metadata before the NO_REPLY decision:
+// footer lines (when hide_agent_footer is on) and self-reported
+// "[ctx: ~N%]" markers. Foreground and unsolicited turns share it so a
+// "NO_REPLY" followed by a footer stays silent on both paths.
+func (e *Engine) cleanAgentReply(text string) string {
+	if e.display.HideAgentFooter {
+		text = stripAgentFooterLines(text)
+	}
+	return strings.TrimRight(ctxSelfReportRe.ReplaceAllString(text, ""), "\n ")
 }
 
 // resolveSilentReply applies the NO_REPLY contract to outbound text: a bare
