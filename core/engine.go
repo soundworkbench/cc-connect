@@ -2610,6 +2610,7 @@ func (e *Engine) drainOrphanedQueue(session *Session, sessions *SessionManager, 
 		e.acknowledgeQueuedBatch(q)
 		msg := queuedInput(q)
 		msg.executionState = state
+		msg.humanBatch = isHumanQueuedTurn(q)
 		e.processInteractiveMessageWith(q.platform, msg, session, agent, sessions, interactiveKey, workspaceDir, q.msgSessionKey)
 		return
 	}
@@ -3216,7 +3217,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		}()
 	}
 
-	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, msg.scheduledMute)
+	e.processTurnEvents(!isHumanTurn(msg), state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx, msg.scheduledMute)
 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
 	}
@@ -4059,8 +4060,13 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					fullResponse = strings.Join(textParts, "")
 				}
 
-				if fullResponse != "" {
-					for _, chunk := range SplitMessageCodeFenceAware(fullResponse, maxPlatformMessageLen) {
+				// Background completions follow the same NO_REPLY contract as
+				// foreground turns; history below still keeps the original text.
+				outbound, silent := resolveSilentReply(e.cleanAgentReply(fullResponse))
+				if silent {
+					slog.Info("silent reply suppressed", "session", sessionKey, "unsolicited", true)
+				} else if outbound != "" {
+					for _, chunk := range SplitMessageCodeFenceAware(outbound, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
 					}
 				}
@@ -4171,6 +4177,14 @@ var agentErrorHandlers = []agentErrorHandler{
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, mutedNotices ...bool) {
+	e.processTurnEvents(false, state, session, sessions, sessionKey, msgID, turnStart, stopTypingFn, sendDone, replyCtx, mutedNotices...)
+}
+
+// processTurnEvents runs one turn's event loop. automated is true when no
+// person typed the trigger (see isHumanTurn): such turns get no placeholder,
+// stream preview, streaming card or rich card, and only a final non-silent
+// reply reaches the platform. Each queued turn recomputes it.
+func (e *Engine) processTurnEvents(automated bool, state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, mutedNotices ...bool) {
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -4181,6 +4195,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var textParts []string
 	var segmentStart int // index into textParts: text before this has been sent/displayed
 	silentHold := false  // true while accumulated segment text could still resolve to a bare NO_REPLY marker
+	// keepSegmentForFinal is the automated-turn replacement for flushing a
+	// text segment at a thinking/tool/permission boundary. The hidden preview
+	// never showed it, so it stays in textParts (segmentStart does not move)
+	// and the final reply delivers the whole text once.
+	keepSegmentForFinal := func() {
+		if n := len(textParts); n > segmentStart && textParts[n-1] != "\n\n" {
+			textParts = append(textParts, "\n\n")
+		}
+	}
 	toolCount := 0
 	waitStart := time.Now()
 	firstEventLogged := false
@@ -4238,7 +4261,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	streamCardAttempted := false
 	startStreamCard := func(p Platform, replyCtx any) {
-		if streamCardAttempted {
+		if streamCardAttempted || automated {
 			return
 		}
 		streamCardAttempted = true
@@ -4255,6 +4278,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		startStreamCard(state.platform, state.replyCtx)
 	}
 	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+	sp.hidden = automated
 	sp.progressI18n = e.i18n
 	sp.keepProgressCard = e.display.KeepProgressCard
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
@@ -4290,7 +4314,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		}
 	}
 
-	if !muteScheduledNotices {
+	if !muteScheduledNotices && !automated {
 		e.acknowledgeTurnStart(state.platform, state.replyCtx, sp, streamCard != nil)
 	}
 
@@ -4489,7 +4513,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 		richCardSupporter, hasRichCard := p.(RichCardSupporter)
 		// Card 2.0 rich-card path is opt-in via [display] mode = "rich".
 		// Default "legacy" keeps upstream behavior for all platforms.
-		if e.display.CardMode != "rich" {
+		if e.display.CardMode != "rich" || automated {
 			hasRichCard = false
 		}
 		richMarkdownResolver, hasRichMarkdownResolver := p.(RichCardMarkdownResolver)
@@ -4554,6 +4578,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						slog.Debug("rich card: failed to update thinking card", "platform", p.Name(), "error", err)
 					}
 				}
+				break
+			}
+			if automated {
+				keepSegmentForFinal() // no thinking messages or progress card
 				break
 			}
 			// When thinking messages are hidden, behavior depends on display mode:
@@ -4672,6 +4700,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				break
 			}
+			if automated {
+				keepSegmentForFinal() // no tool messages or progress card
+				break
+			}
 			// When tool messages are hidden, behavior depends on display mode:
 			//   quiet:   append separator to keep all text in one card
 			//   compact: freeze+detach to split text into separate cards
@@ -4774,7 +4806,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			}
 
 		case EventToolResult:
-			if thinkingProcessPreview {
+			if thinkingProcessPreview || automated {
 				break
 			}
 			if e.display.ToolMessages {
@@ -5006,7 +5038,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			// Flush accumulated text segment before permission prompt
 			// Preserve the temporary process card handle across questions.
-			if !thinkingProcessPreview {
+			// Automated turns keep it for the final reply; the prompt itself
+			// is still sent because the turn cannot continue without it.
+			if automated {
+				keepSegmentForFinal()
+			} else if !thinkingProcessPreview {
 				previewActive := sp.canPreview()
 				if len(textParts) > segmentStart {
 					if !previewActive {
@@ -5132,7 +5168,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			silentResult := hasSilentResult && strings.TrimSpace(strippedResult) == ""
 			streamedResponse := strings.Join(textParts, "")
 			useStreamedText := len(textParts) > 0 && (!silentResult || !couldBeSilentPrefix(streamedResponse))
-			if useStreamedText && segmentStart == 0 && !e.display.ToolMessages && !thinkingProcessPreview {
+			if useStreamedText && segmentStart == 0 && (!e.display.ToolMessages || automated) && !thinkingProcessPreview {
 				fullResponse = streamedResponse
 			} else if useStreamedText && (fullResponse == "" || silentResult) {
 				fullResponse = streamedResponse
@@ -5146,8 +5182,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// rendered exclusively in the reply footer.
 			sdkPlausible := event.InputTokens >= 100
 			selfPct := parseSelfReportedCtx(fullResponse)
-			cleanResponse := ctxSelfReportRe.ReplaceAllString(fullResponse, "")
-			cleanResponse = strings.TrimRight(cleanResponse, "\n ")
+			cleanResponse := e.cleanAgentReply(fullResponse)
 			baseResponse := cleanResponse
 
 			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
@@ -5178,15 +5213,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			session.AddHistory("assistant", baseResponse)
 			sessions.Save()
 
-			isSilent := (muteScheduledNotices && strings.TrimSpace(baseResponse) == "") || isSilentReply(baseResponse)
+			isSilent := muteScheduledNotices && strings.TrimSpace(baseResponse) == ""
 			if !isSilent {
-				if stripped, ok := stripTrailingSilent(baseResponse); ok {
-					if strings.TrimSpace(stripped) == "" {
-						isSilent = true
-					} else {
-						baseResponse = stripped
-						cleanResponse = stripped
-					}
+				if outbound, silent := resolveSilentReply(baseResponse); silent {
+					isSilent = true
+				} else if outbound != baseResponse {
+					baseResponse = outbound
+					cleanResponse = outbound
 				}
 			}
 
@@ -5244,6 +5277,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				"input_tokens", event.InputTokens,
 				"output_tokens", event.OutputTokens,
 				"silent", isSilent,
+				"automated", automated,
 			)
 			// DEBUG: full assistant response for in-depth debugging.
 			if slog.Default().Enabled(e.ctx, slog.LevelDebug) {
@@ -5493,6 +5527,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				remainingQueue := len(state.pendingMessages)
 				muteScheduledNotices = queued.scheduledMute
+				automated = !isHumanQueuedTurn(queued)
 				state.platform = queued.platform
 				state.replyCtx = queued.replyCtx
 				state.currentMessageID = queued.messageID
@@ -5588,6 +5623,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+				sp.hidden = automated
 				sp.progressI18n = e.i18n
 				sp.keepProgressCard = e.display.KeepProgressCard
 				state.mu.Lock()
@@ -5617,7 +5653,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 						thinkingProcessPreview = pref.UseThinkingProcessPreview() && e.display.CardMode != "rich" && sp.canPreview()
 					}
 				}
-				if !muteScheduledNotices {
+				if !muteScheduledNotices && !automated {
 					e.acknowledgeTurnStart(queued.platform, queued.replyCtx, sp, streamCard != nil)
 				}
 
@@ -5750,18 +5786,13 @@ channelClosed:
 		sessions.Save()
 
 		// Respect NO_REPLY even on abnormal exit so silent turns stay silent.
-		if isSilentReply(fullResponse) {
+		outbound, silent := resolveSilentReply(fullResponse)
+		if silent {
 			sp.discard()
 			slog.Info("silent reply suppressed (channel closed)", "session", session.ID)
 			return
 		}
-		if stripped, ok := stripTrailingSilent(fullResponse); ok {
-			if strings.TrimSpace(stripped) == "" {
-				sp.discard()
-				return
-			}
-			fullResponse = stripped
-		}
+		fullResponse = outbound
 
 		e.hooks.Emit(HookEvent{
 			Event:      HookEventMessageSent,
@@ -5948,7 +5979,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)
-		e.processInteractiveEvents(state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx, queued.scheduledMute)
+		e.processTurnEvents(!isHumanQueuedTurn(queued), state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx, queued.scheduledMute)
 		if restoreMode != nil {
 			restoreMode()
 		}
@@ -15629,6 +15660,34 @@ func stripTrailingSilent(text string) (string, bool) {
 		return text, false
 	}
 	return strings.TrimRight(stripped, " \t\r\n"), true
+}
+
+// cleanAgentReply removes agent-added metadata before the NO_REPLY decision:
+// footer lines (when hide_agent_footer is on) and self-reported
+// "[ctx: ~N%]" markers. Foreground and unsolicited turns share it so a
+// "NO_REPLY" followed by a footer stays silent on both paths.
+func (e *Engine) cleanAgentReply(text string) string {
+	if e.display.HideAgentFooter {
+		text = stripAgentFooterLines(text)
+	}
+	return strings.TrimRight(ctxSelfReportRe.ReplaceAllString(text, ""), "\n ")
+}
+
+// resolveSilentReply applies the NO_REPLY contract to outbound text: a bare
+// marker, or a trailing marker with nothing before it, is silent; a trailing
+// marker after real content is stripped and the content is delivered.
+// Foreground and unsolicited turns both use it, so they cannot drift apart.
+func resolveSilentReply(text string) (string, bool) {
+	if isSilentReply(text) {
+		return "", true
+	}
+	if stripped, ok := stripTrailingSilent(text); ok {
+		if strings.TrimSpace(stripped) == "" {
+			return "", true
+		}
+		return stripped, false
+	}
+	return text, false
 }
 
 // couldBeSilentPrefix reports whether the trimmed text is still a case-insensitive

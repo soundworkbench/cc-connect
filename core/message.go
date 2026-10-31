@@ -370,6 +370,7 @@ type Message struct {
 	scheduledPrompt   bool
 	scheduledMute     bool   // suppress scheduler notices for this input only
 	scheduledInputID  string // scheduler occurrence ID, never a platform message ID
+	humanBatch        bool   // merged queue batch containing a person's message (see isHumanQueuedTurn)
 	replySessionKey   string // proactive reply target, which can differ from SessionKey
 	// IsolateAgent requests per-routing-key agent options in addition to history isolation.
 	Source       string // automation source; empty uses scheduler/user metadata

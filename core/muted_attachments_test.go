@@ -440,8 +440,10 @@ func TestScheduledMutedNotices_StreamingCardsOnlyForAgentOutput(t *testing.T) {
 						t.Error("empty scheduled result created a completion card")
 					}
 				} else {
-					if !card.finalized() || !strings.Contains(card.finalContent(), reply) {
-						t.Errorf("agent reply card lost: %q", card.finalContent())
+					// Scheduled turns are automated (isHumanTurn): no streaming
+					// card at all, the reply is exactly one plain message.
+					if got := p.getSent(); card.finalized() || len(got) != 1 || !strings.Contains(got[0], reply) {
+						t.Errorf("automated reply: sent=%q card=%q", got, card.finalContent())
 					}
 				}
 			})
