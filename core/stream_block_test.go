@@ -72,3 +72,26 @@ func TestDeliverFinalKeepsPreviewForLongCJK(t *testing.T) {
 		}
 	}
 }
+
+// While the turn runs the card ends with the typing marker, its dots move on each
+// repaint, and the final reply finished in place carries no marker.
+func TestTypingMarkerDuringTurnGoneOnFinish(t *testing.T) {
+	mp := &mockKeepPreviewPlatform{}
+	cfg := DefaultStreamPreviewCfg()
+	cfg.TypingMarker = "输出中"
+	sp := newStreamPreview(cfg, mp, "ctx", context.Background(), nil)
+	sp.startPlaceholder("先查一下。")
+	sp.replacePreview("先查一下。\n\n第一段")
+	msgs := mp.getMessages()
+	if len(msgs) != 2 || !strings.HasSuffix(msgs[0], "先查一下。\n\n输出中.") || !strings.HasSuffix(msgs[1], "第一段\n\n输出中..") {
+		t.Fatalf("preview frames: %q", msgs)
+	}
+	if !sp.deliverFinal("第一段\n\n第二段", "", func(Platform, any, string) error { return nil }, "失败") {
+		t.Fatal("deliverFinal failed")
+	}
+	msgs = mp.getMessages()
+	if last := msgs[len(msgs)-1]; strings.Contains(last, "输出中") || !strings.HasSuffix(last, "第二段") {
+		t.Fatalf("final card: %q", last)
+	}
+	sp.discard()
+}

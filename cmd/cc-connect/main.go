@@ -615,6 +615,9 @@ func main() {
 			if cfg.StreamPreview.DisabledPlatforms != nil {
 				spcfg.DisabledPlatforms = cfg.StreamPreview.DisabledPlatforms
 			}
+			if cfg.StreamPreview.TypingMarker != nil {
+				spcfg.TypingMarker = *cfg.StreamPreview.TypingMarker
+			}
 			engine.SetStreamPreviewCfg(spcfg)
 		}
 

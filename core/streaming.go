@@ -15,6 +15,7 @@ type StreamPreviewCfg struct {
 	IntervalMs        int      // minimum ms between updates (default 1500)
 	MinDeltaChars     int      // minimum new chars before sending an update (default 30)
 	MaxChars          int      // max preview length (default 2000)
+	TypingMarker      string   // shown under a preview while the turn is still running, e.g. "输出中"; empty = off
 }
 
 // DefaultStreamPreviewCfg returns sensible defaults.
@@ -79,6 +80,8 @@ type streamPreview struct {
 	lastSentViaUpdate      bool   // true if lastSentText was delivered via UpdateMessage (not SendPreviewStart)
 	previewMsgID           any    // platform-specific ID for the preview message (returned by SendPreviewStart)
 	previewStartedAt       time.Time
+	markerShown            bool // the card on screen carries the typing marker, so finish must always repaint it
+	markerFrame            int
 	pendingAcknowledgement func() // consumed by the first visible output
 	degraded               bool   // if true, stop trying (platform doesn't support it or permanent error)
 
@@ -210,6 +213,23 @@ type ThinkingProcessPreviewPreference interface {
 	UseThinkingProcessPreview() bool
 }
 
+// markTyping appends the typing marker to a preview; its trailing dots cycle on
+// every repaint, so they move while text streams and hold still during tool calls.
+// lastSentText keeps the unmarked text for dedupe and deltas.
+func (sp *streamPreview) markTyping(text string) string {
+	if sp.cfg.TypingMarker == "" || strings.HasPrefix(strings.TrimSpace(text), "{") {
+		sp.markerShown = false
+		return text
+	}
+	sp.markerFrame = sp.markerFrame%3 + 1
+	body := strings.TrimRight(text, " \n")
+	if strings.Count(body, "```")%2 == 1 {
+		body += "\n```"
+	}
+	sp.markerShown = true
+	return body + "\n\n" + sp.cfg.TypingMarker + strings.Repeat(".", sp.markerFrame)
+}
+
 // replacePreview edits ephemeral progress without mixing it into answer text.
 func (sp *streamPreview) replacePreview(text string) bool {
 	text, _ = stripTrailingSilent(text)
@@ -247,7 +267,7 @@ func (sp *streamPreview) replacePreviewLocked(text string) bool {
 		if !ok {
 			return false
 		}
-		handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, text)
+		handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, sp.markTyping(text))
 		if err != nil || handle == nil {
 			slog.Warn("progress preview start failed", "error", err)
 			return false
@@ -259,7 +279,7 @@ func (sp *streamPreview) replacePreviewLocked(text string) bool {
 		if !ok {
 			return false
 		}
-		if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, text); err != nil {
+		if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, sp.markTyping(text)); err != nil {
 			slog.Warn("progress preview update failed", "error", err)
 			return false
 		}
@@ -353,7 +373,7 @@ func (sp *streamPreview) startPlaceholder(text string) bool {
 	}
 
 	if starter, ok := sp.platform.(PreviewStarter); ok {
-		handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, text)
+		handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, sp.markTyping(text))
 		if err != nil {
 			slog.Debug("stream preview: placeholder start failed, degrading", "error", err)
 			sp.degraded = true
@@ -522,7 +542,7 @@ func (sp *streamPreview) flushLocked(text string) {
 		// First preview: try to send a new preview message
 		if starter, ok := sp.platform.(PreviewStarter); ok {
 			slog.Debug("stream preview: sending first preview via SendPreviewStart", "text_len", len(text))
-			handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, text)
+			handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, sp.markTyping(text))
 			if err != nil {
 				slog.Debug("stream preview: start failed, degrading", "error", err)
 				sp.degraded = true
@@ -546,7 +566,7 @@ func (sp *streamPreview) flushLocked(text string) {
 
 	// Update existing preview message
 	slog.Debug("stream preview: updating via UpdateMessage", "text_len", len(text))
-	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, text); err != nil {
+	if err := updater.UpdateMessage(sp.ctx, sp.previewMsgID, sp.markTyping(text)); err != nil {
 		slog.Debug("stream preview: update failed, degrading", "error", err)
 		sp.degraded = true
 		return
@@ -743,7 +763,7 @@ func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 	// via SendPreviewStart (first flush), we must still call UpdateMessage
 	// because it may apply different formatting (e.g. Markdown→HTML for
 	// Telegram).
-	if finalText == sp.lastSentText && sp.lastSentViaUpdate && statusFooter == "" {
+	if finalText == sp.lastSentText && sp.lastSentViaUpdate && statusFooter == "" && !sp.markerShown {
 		slog.Debug("stream preview finish: text unchanged and no footer, skipping",
 			"text_len", len(finalText))
 		return true
@@ -847,6 +867,7 @@ func (sp *streamPreview) detachForFinal() *streamPreview {
 	final := newStreamPreview(sp.cfg, sp.platform, sp.replyCtx, sp.ctx, sp.transform)
 	final.previewMsgID, final.lastSentText = sp.previewMsgID, sp.lastSentText
 	final.previewStartedAt = sp.previewStartedAt
+	final.markerShown, final.markerFrame = sp.markerShown, sp.markerFrame
 	final.keepProgressCard, final.hidden = sp.keepProgressCard, sp.hidden
 	final.pendingToolProgress = sp.pendingToolProgress
 	final.mergeCfg, final.progressI18n = sp.mergeCfg, sp.progressI18n
