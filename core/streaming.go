@@ -15,7 +15,7 @@ type StreamPreviewCfg struct {
 	IntervalMs        int      // minimum ms between updates (default 1500)
 	MinDeltaChars     int      // minimum new chars before sending an update (default 30)
 	MaxChars          int      // max preview length (default 2000)
-	TypingMarker      string   // shown under a preview while the turn is still running, e.g. "输出中"; empty = off
+	TypingMarker      string   // shown under a preview while the turn is still running, e.g. "..."; empty = off
 }
 
 // DefaultStreamPreviewCfg returns sensible defaults.
@@ -81,7 +81,6 @@ type streamPreview struct {
 	previewMsgID           any    // platform-specific ID for the preview message (returned by SendPreviewStart)
 	previewStartedAt       time.Time
 	markerShown            bool // the card on screen carries the typing marker, so finish must always repaint it
-	markerFrame            int
 	pendingAcknowledgement func() // consumed by the first visible output
 	degraded               bool   // if true, stop trying (platform doesn't support it or permanent error)
 
@@ -213,21 +212,20 @@ type ThinkingProcessPreviewPreference interface {
 	UseThinkingProcessPreview() bool
 }
 
-// markTyping appends the typing marker to a preview; its trailing dots cycle on
-// every repaint, so they move while text streams and hold still during tool calls.
-// lastSentText keeps the unmarked text for dedupe and deltas.
+// markTyping appends the typing marker (e.g. "...") to a preview so a running turn
+// reads differently from a finished reply. lastSentText keeps the unmarked text
+// for dedupe and deltas.
 func (sp *streamPreview) markTyping(text string) string {
 	if sp.cfg.TypingMarker == "" || strings.HasPrefix(strings.TrimSpace(text), "{") {
 		sp.markerShown = false
 		return text
 	}
-	sp.markerFrame = sp.markerFrame%3 + 1
 	body := strings.TrimRight(text, " \n")
 	if strings.Count(body, "```")%2 == 1 {
 		body += "\n```"
 	}
 	sp.markerShown = true
-	return body + "\n\n" + sp.cfg.TypingMarker + strings.Repeat(".", sp.markerFrame)
+	return body + "\n\n" + sp.cfg.TypingMarker
 }
 
 // replacePreview edits ephemeral progress without mixing it into answer text.
@@ -867,7 +865,7 @@ func (sp *streamPreview) detachForFinal() *streamPreview {
 	final := newStreamPreview(sp.cfg, sp.platform, sp.replyCtx, sp.ctx, sp.transform)
 	final.previewMsgID, final.lastSentText = sp.previewMsgID, sp.lastSentText
 	final.previewStartedAt = sp.previewStartedAt
-	final.markerShown, final.markerFrame = sp.markerShown, sp.markerFrame
+	final.markerShown = sp.markerShown
 	final.keepProgressCard, final.hidden = sp.keepProgressCard, sp.hidden
 	final.pendingToolProgress = sp.pendingToolProgress
 	final.mergeCfg, final.progressI18n = sp.mergeCfg, sp.progressI18n
