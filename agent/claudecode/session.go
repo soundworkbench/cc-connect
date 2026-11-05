@@ -79,6 +79,7 @@ type claudeSession struct {
 	// EventThinking: deployments can hide private reasoning independently.
 	pendingText        []string
 	pendingProgressIDs []string
+	partialBlock       strings.Builder // stream_partial_text: text of the block currently being written
 
 	inputMu           sync.Mutex
 	inputs            map[string]*claudeInput
@@ -594,6 +595,8 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 		cs.handleUser(raw)
 	case "result":
 		cs.handleResult(raw)
+	case "stream_event":
+		cs.handleStreamEvent(raw)
 	case "control_request":
 		cs.handleControlRequest(raw)
 	case "control_cancel_request":
@@ -625,6 +628,39 @@ func resultSubtype(raw map[string]any) string {
 		return s
 	}
 	return ""
+}
+
+// handleStreamEvent consumes --include-partial-messages frames. Only top-level
+// text deltas are used: each one is forwarded as EventTextDelta carrying the
+// whole block written so far, for preview rendering. The complete assistant
+// message still arrives afterwards and remains the only source of final text,
+// so nothing is appended twice.
+func (cs *claudeSession) handleStreamEvent(raw map[string]any) {
+	if parent, _ := raw["parent_tool_use_id"].(string); parent != "" {
+		return
+	}
+	ev, ok := raw["event"].(map[string]any)
+	if !ok {
+		return
+	}
+	switch ev["type"] {
+	case "message_start", "content_block_start", "content_block_stop", "message_stop":
+		cs.partialBlock.Reset()
+	case "content_block_delta":
+		delta, _ := ev["delta"].(map[string]any)
+		if delta == nil || delta["type"] != "text_delta" {
+			return
+		}
+		text, _ := delta["text"].(string)
+		if text == "" {
+			return
+		}
+		cs.partialBlock.WriteString(text)
+		select {
+		case cs.events <- core.Event{Type: core.EventTextDelta, Content: cs.partialBlock.String()}:
+		case <-cs.ctx.Done():
+		}
+	}
 }
 
 func (cs *claudeSession) handleSystem(raw map[string]any) {
@@ -956,9 +992,10 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 
 	toolName, _ := request["tool_name"].(string)
 	input, _ := request["input"].(map[string]any)
+	isAskUserQuestion := toolName == "AskUserQuestion"
 	cs.flushPublicText(core.EventProgress)
 
-	if cs.autoApprove.Load() {
+	if cs.autoApprove.Load() && !isAskUserQuestion {
 		slog.Debug("claudeSession: auto-approving", "request_id", requestID, "tool", toolName)
 		_ = cs.RespondPermission(requestID, core.PermissionResult{
 			Behavior:     "allow",
@@ -966,7 +1003,7 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 		})
 		return
 	}
-	if cs.dontAsk.Load() {
+	if cs.dontAsk.Load() && !isAskUserQuestion {
 		slog.Debug("claudeSession: auto-denying", "request_id", requestID, "tool", toolName)
 		_ = cs.RespondPermission(requestID, core.PermissionResult{
 			Behavior: "deny",
@@ -1015,7 +1052,7 @@ func (cs *claudeSession) handleControlRequest(raw map[string]any) {
 		ToolInputRaw: input,
 	}
 
-	if toolName == "AskUserQuestion" {
+	if isAskUserQuestion {
 		evt.Questions = parseUserQuestions(input)
 	}
 

@@ -34,24 +34,25 @@ func init() {
 //   - "auto":              Claude's automatic permission classifier
 //   - "bypassPermissions": auto-approve everything (alias: yolo)
 type Agent struct {
-	workDir          string
-	cmd              string   // CLI binary name (default: "claude")
-	cliExtraArgs     []string // extra args parsed from cmd (e.g. ["code", "-t", "foo"])
-	configEnv        []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
-	cmdArgsFlag      string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
-	model            string
-	reasoningEffort  string // "low" | "medium" | "high" | "max"
-	mode             string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
-	allowedTools     []string
-	disallowedTools  []string
-	maxContextTokens int // optional: passed as --max-context-tokens when > 0
-	providers        []core.ProviderConfig
-	activeIdx        int // -1 = no provider set
-	sessionEnv       []string
-	routerURL        string // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
-	routerAPIKey     string // Claude Code Router API key (optional)
-	systemPrompt     string // Custom system prompt to pass to Claude CLI
-	pluginDirs       []string // Plugin directories to load via --plugin-dir (repeatable)
+	workDir           string
+	cmd               string   // CLI binary name (default: "claude")
+	cliExtraArgs      []string // extra args parsed from cmd (e.g. ["code", "-t", "foo"])
+	configEnv         []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+	cmdArgsFlag       string   // if set, claude args are passed as a single string via this flag (e.g. "-a")
+	model             string
+	reasoningEffort   string // "low" | "medium" | "high" | "max"
+	mode              string // "default" | "acceptEdits" | "plan" | "auto" | "bypassPermissions" | "dontAsk"
+	allowedTools      []string
+	disallowedTools   []string
+	maxContextTokens  int // optional: passed as --max-context-tokens when > 0
+	providers         []core.ProviderConfig
+	activeIdx         int // -1 = no provider set
+	sessionEnv        []string
+	routerURL         string   // Claude Code Router URL (e.g., "http://127.0.0.1:3456")
+	streamPartialText bool     // stream_partial_text: --include-partial-messages, text deltas feed the preview only
+	routerAPIKey      string   // Claude Code Router API key (optional)
+	systemPrompt      string   // Custom system prompt to pass to Claude CLI
+	pluginDirs        []string // Plugin directories to load via --plugin-dir (repeatable)
 
 	appendSystemPrompt string // Custom text appended to the system prompt (keeps Claude's default)
 
@@ -78,41 +79,41 @@ type Agent struct {
 }
 
 var claudeProviderManagedEnvVars = map[string]struct{}{
-	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":                  {},
-	"CLAUDE_CODE_USE_BEDROCK":                               {},
-	"CLAUDE_CODE_USE_VERTEX":                                {},
-	"CLAUDE_CODE_USE_FOUNDRY":                               {},
-	"ANTHROPIC_BASE_URL":                                    {},
-	"ANTHROPIC_BEDROCK_BASE_URL":                            {},
-	"ANTHROPIC_VERTEX_BASE_URL":                             {},
-	"ANTHROPIC_FOUNDRY_BASE_URL":                            {},
-	"ANTHROPIC_FOUNDRY_RESOURCE":                            {},
-	"ANTHROPIC_VERTEX_PROJECT_ID":                           {},
-	"CLOUD_ML_REGION":                                       {},
-	"ANTHROPIC_API_KEY":                                     {},
-	"ANTHROPIC_AUTH_TOKEN":                                  {},
-	"CLAUDE_CODE_OAUTH_TOKEN":                               {},
-	"AWS_BEARER_TOKEN_BEDROCK":                              {},
-	"ANTHROPIC_FOUNDRY_API_KEY":                             {},
-	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":                         {},
-	"CLAUDE_CODE_SKIP_VERTEX_AUTH":                          {},
-	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH":                         {},
-	"ANTHROPIC_MODEL":                                       {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL":                         {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":             {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                    {},
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES":  {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL":                          {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":              {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                     {},
-	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":   {},
+	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST":                 {},
+	"CLAUDE_CODE_USE_BEDROCK":                              {},
+	"CLAUDE_CODE_USE_VERTEX":                               {},
+	"CLAUDE_CODE_USE_FOUNDRY":                              {},
+	"ANTHROPIC_BASE_URL":                                   {},
+	"ANTHROPIC_BEDROCK_BASE_URL":                           {},
+	"ANTHROPIC_VERTEX_BASE_URL":                            {},
+	"ANTHROPIC_FOUNDRY_BASE_URL":                           {},
+	"ANTHROPIC_FOUNDRY_RESOURCE":                           {},
+	"ANTHROPIC_VERTEX_PROJECT_ID":                          {},
+	"CLOUD_ML_REGION":                                      {},
+	"ANTHROPIC_API_KEY":                                    {},
+	"ANTHROPIC_AUTH_TOKEN":                                 {},
+	"CLAUDE_CODE_OAUTH_TOKEN":                              {},
+	"AWS_BEARER_TOKEN_BEDROCK":                             {},
+	"ANTHROPIC_FOUNDRY_API_KEY":                            {},
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH":                        {},
+	"CLAUDE_CODE_SKIP_VERTEX_AUTH":                         {},
+	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH":                        {},
+	"ANTHROPIC_MODEL":                                      {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL":                        {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION":            {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME":                   {},
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES": {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL":                         {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":             {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                    {},
+	"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":  {},
 
 	// Provider-specific base URL env vars for thinking rewrite proxy routing.
 	// These are set by cc-connect when thinking override is needed for
 	// Bedrock/Vertex/Foundry providers that don't use base_url config.
-	"ANTHROPIC_BEDROCK_PROXY_BASE_URL": {},
-	"ANTHROPIC_VERTEX_PROXY_BASE_URL":  {},
-	"ANTHROPIC_FOUNDRY_PROXY_BASE_URL": {},
+	"ANTHROPIC_BEDROCK_PROXY_BASE_URL":                      {},
+	"ANTHROPIC_VERTEX_PROXY_BASE_URL":                       {},
+	"ANTHROPIC_FOUNDRY_PROXY_BASE_URL":                      {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL":                        {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION":            {},
 	"ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":                   {},
@@ -212,6 +213,7 @@ func New(opts map[string]any) (core.Agent, error) {
 
 	// Claude Code Router support
 	routerURL, _ := opts["router_url"].(string)
+	streamPartialText, _ := opts["stream_partial_text"].(bool)
 	routerAPIKey, _ := opts["router_api_key"].(string)
 
 	// run_as_user: optional OS-user isolation. Injected into opts from
@@ -263,24 +265,25 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 
 	return &Agent{
-		workDir:          workDir,
-		cmd:              cmd,
-		cliExtraArgs:     cliExtraArgs,
-		cmdArgsFlag:      cmdArgsFlag,
-		model:            model,
-		reasoningEffort:  normalizeEffort(reasoningEffort),
-		mode:             mode,
-		systemPrompt:     systemPrompt,
-		pluginDirs:       pluginDirs,
-		allowedTools:     allowedTools,
-		disallowedTools:  disallowedTools,
-		maxContextTokens: maxContextTokens,
-		configEnv:        configEnv,
-		activeIdx:        -1,
-		routerURL:        routerURL,
-		routerAPIKey:     routerAPIKey,
-		spawnOpts:        spawnOpts,
-		ccDataDir:        ccDataDir,
+		workDir:           workDir,
+		cmd:               cmd,
+		cliExtraArgs:      cliExtraArgs,
+		streamPartialText: streamPartialText,
+		cmdArgsFlag:       cmdArgsFlag,
+		model:             model,
+		reasoningEffort:   normalizeEffort(reasoningEffort),
+		mode:              mode,
+		systemPrompt:      systemPrompt,
+		pluginDirs:        pluginDirs,
+		allowedTools:      allowedTools,
+		disallowedTools:   disallowedTools,
+		maxContextTokens:  maxContextTokens,
+		configEnv:         configEnv,
+		activeIdx:         -1,
+		routerURL:         routerURL,
+		routerAPIKey:      routerAPIKey,
+		spawnOpts:         spawnOpts,
+		ccDataDir:         ccDataDir,
 
 		appendSystemPrompt: appendSystemPrompt,
 		firstWriteTimeout:  firstWriteTimeout,
@@ -547,7 +550,11 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	disableVerbose := a.routerURL != ""
 	a.mu.Unlock()
 
-	cs, err := newClaudeSession(ctx, workDir, a.cmd, a.cliExtraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, a.ccDataDir)
+	extraArgs := a.cliExtraArgs
+	if a.streamPartialText {
+		extraArgs = append(append([]string{}, extraArgs...), "--include-partial-messages")
+	}
+	cs, err := newClaudeSession(ctx, workDir, a.cmd, extraArgs, a.cmdArgsFlag, model, effort, sessionID, mode, systemPrompt, appendSystemPrompt, tools, disTools, pluginDirs, extraEnv, platformPrompt, disableVerbose, a.spawnOpts, maxTok, a.ccDataDir)
 	if err != nil {
 		return nil, err
 	}

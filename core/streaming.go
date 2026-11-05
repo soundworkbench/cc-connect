@@ -73,10 +73,12 @@ type streamPreview struct {
 	transform func(string) string
 
 	fullText               string // accumulated full text so far
+	streamingText          string // latest whole preview text from streamReplace (token-level streaming)
 	lastSentText           string // what was last successfully sent to the platform
 	lastSentAt             time.Time
 	lastSentViaUpdate      bool   // true if lastSentText was delivered via UpdateMessage (not SendPreviewStart)
 	previewMsgID           any    // platform-specific ID for the preview message (returned by SendPreviewStart)
+	previewStartedAt       time.Time
 	pendingAcknowledgement func() // consumed by the first visible output
 	degraded               bool   // if true, stop trying (platform doesn't support it or permanent error)
 
@@ -190,6 +192,13 @@ type PreviewFinishPreference interface {
 	KeepPreviewOnFinish() bool
 }
 
+// PreviewKeepDecider lets a platform refuse to finish one particular preview in
+// place, e.g. when newer messages sit below it or the turn ran long: an edit
+// raises no notification, so the reader would never see the reply.
+type PreviewKeepDecider interface {
+	KeepPreviewInPlace(ctx context.Context, previewHandle any, age time.Duration) bool
+}
+
 // ImmediatePreviewPreference is an optional interface for platforms that want
 // an editable placeholder sent immediately before the first content delta.
 type ImmediatePreviewPreference interface {
@@ -244,6 +253,7 @@ func (sp *streamPreview) replacePreviewLocked(text string) bool {
 			return false
 		}
 		sp.previewMsgID = handle
+		sp.previewStartedAt = time.Now()
 	} else {
 		updater, ok := sp.platform.(MessageUpdater)
 		if !ok {
@@ -353,6 +363,7 @@ func (sp *streamPreview) startPlaceholder(text string) bool {
 			return false
 		}
 		sp.previewMsgID = handle
+		sp.previewStartedAt = time.Now()
 	} else {
 		if err := sp.platform.Send(sp.ctx, sp.replyCtx, text); err != nil {
 			slog.Debug("stream preview: placeholder send failed", "error", err)
@@ -368,6 +379,44 @@ func (sp *streamPreview) startPlaceholder(text string) bool {
 }
 
 // canPreview returns true if the platform supports message updating and is not disabled.
+// streamReplace shows text (the full preview body, e.g. progress lines plus the
+// block being written) as the preview, throttled by stream_preview.interval_ms so
+// token-level deltas from the agent become a card that grows every interval.
+// A later replacePreview/finish/discard cancels any pending frame.
+func (sp *streamPreview) streamReplace(text string) {
+	text, _ = stripTrailingSilent(text)
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sp.degraded || !sp.cfg.Enabled {
+		return
+	}
+	sp.streamingText = text
+	interval := time.Duration(sp.cfg.IntervalMs) * time.Millisecond
+	if interval <= 0 {
+		interval = 700 * time.Millisecond
+	}
+	if !sp.lastSentAt.IsZero() {
+		if elapsed := time.Since(sp.lastSentAt); elapsed < interval {
+			if sp.timer == nil {
+				sp.timer = time.AfterFunc(interval-elapsed, func() {
+					sp.mu.Lock()
+					defer sp.mu.Unlock()
+					sp.timer = nil
+					if !sp.degraded && sp.streamingText != "" {
+						sp.replacePreviewLocked(sp.streamingText)
+					}
+				})
+			}
+			return
+		}
+	}
+	sp.cancelTimerLocked()
+	sp.replacePreviewLocked(text)
+}
+
 func (sp *streamPreview) canPreview() bool {
 	sp.mu.Lock()
 	degraded := sp.degraded
@@ -480,6 +529,7 @@ func (sp *streamPreview) flushLocked(text string) {
 				return
 			}
 			sp.previewMsgID = handle
+			sp.previewStartedAt = time.Now()
 		} else {
 			if err := sp.platform.Send(sp.ctx, sp.replyCtx, text); err != nil {
 				slog.Debug("stream preview: initial send failed", "error", err)
@@ -796,6 +846,7 @@ func (sp *streamPreview) detachForFinal() *streamPreview {
 	sp.degraded = true
 	final := newStreamPreview(sp.cfg, sp.platform, sp.replyCtx, sp.ctx, sp.transform)
 	final.previewMsgID, final.lastSentText = sp.previewMsgID, sp.lastSentText
+	final.previewStartedAt = sp.previewStartedAt
 	final.keepProgressCard, final.hidden = sp.keepProgressCard, sp.hidden
 	final.pendingToolProgress = sp.pendingToolProgress
 	final.mergeCfg, final.progressI18n = sp.mergeCfg, sp.progressI18n
@@ -804,8 +855,52 @@ func (sp *streamPreview) detachForFinal() *streamPreview {
 	return final
 }
 
+// keepInPlace asks the platform whether this preview may become the final reply in place.
+func (sp *streamPreview) keepInPlace() bool {
+	decider, ok := sp.platform.(PreviewKeepDecider)
+	if !ok {
+		return true
+	}
+	sp.mu.Lock()
+	handle, started := sp.previewMsgID, sp.previewStartedAt
+	sp.mu.Unlock()
+	if handle == nil {
+		return true
+	}
+	return decider.KeepPreviewInPlace(sp.ctx, handle, time.Since(started))
+}
+
 // deliverFinal freezes progress updates before delivering the final reply.
 func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform, any, string) error, failureText string) bool {
+	// 平台要求保留预览（飞书 keep_preview_on_finish）时，把过程卡原地更新成最终回复；失败再走撤回/重发。
+	// 超过单条上限（按字符计，与分块一致）时，第一块原地完成，其余块接着另发。
+	if pref, ok := sp.platform.(PreviewFinishPreference); ok && pref.KeepPreviewOnFinish() && sp.keepInPlace() {
+		chunks := SplitMessageCodeFenceAware(body, maxPlatformMessageLen)
+		rest := chunks[1:]
+		firstFooter := footer
+		if len(rest) > 0 {
+			firstFooter = ""
+		}
+		if sp.finish(chunks[0], firstFooter) {
+			// 卡片已经是最终回复：交出所有权，回合末尾的 discard 不能再把它当预览撤回。
+			sp.mu.Lock()
+			sp.previewMsgID = nil
+			sp.degraded = true
+			sp.mu.Unlock()
+			for i, chunk := range rest {
+				if i == len(rest)-1 && footer != "" {
+					chunk = appendReplyFooter(chunk, footer)
+				}
+				if err := sendFn(sp.platform, sp.replyCtx, chunk); err != nil {
+					slog.Warn("final response: retrying failed chunk", "error", err, "chunk", i+1)
+					if err := sendFn(sp.platform, sp.replyCtx, chunk); err != nil {
+						slog.Error("final response: chunk retry exhausted", "error", err, "chunk", i+1)
+					}
+				}
+			}
+			return true
+		}
+	}
 	order := FinalReplySendFirst
 	if pref, ok := sp.platform.(FinalReplyOrderPreference); ok {
 		order = pref.FinalReplyOrder()

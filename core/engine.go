@@ -4855,6 +4855,26 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				}
 			}
 
+		case EventTextDelta:
+			// Preview only (agent option stream_partial_text): the block the agent is
+			// still writing. Final content still arrives as EventText/EventResult.
+			if thinkingProcessPreview {
+				block := strings.TrimSpace(event.Content)
+				if e.display.HideAgentFooter {
+					block = strings.TrimSpace(stripAgentFooterLines(block))
+				}
+				if block == "" || couldBeSilentPrefix(block) {
+					break
+				}
+				if e.display.appendProgress() {
+					sp.streamBlock(block)
+				} else if thinkingPreviewText.Len() > 0 {
+					sp.streamReplace(thinkingPreviewText.String() + "\n\n" + block)
+				} else {
+					sp.streamReplace(block)
+				}
+			}
+
 		case EventProgress:
 			// Public work summaries are independent of the private-thinking
 			// switch. Other display modes retain ordinary text behavior.

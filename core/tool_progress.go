@@ -99,6 +99,31 @@ func (sp *streamPreview) queueProgressLocked(text string) {
 	})
 }
 
+// streamBlock shows the block the agent is still writing below the progress
+// rows. It shares queueProgressLocked's throttle and pending text, so the next
+// progress row (or the final reply) simply supersedes the partial block.
+func (sp *streamPreview) streamBlock(block string) {
+	block, _ = stripTrailingSilent(block)
+	block = strings.TrimSpace(block)
+	if block == "" || isEllipsisOnly(block) {
+		return
+	}
+	sp.acknowledgeVisible(block)
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	if sp.degraded || sp.previewMsgID == nil {
+		return
+	}
+	text := block
+	if rows := sp.progressTextLocked(); strings.TrimSpace(rows) != "" {
+		text = rows + "\n\n" + block
+	}
+	if !progressFits(text) {
+		return
+	}
+	sp.queueProgressLocked(text)
+}
+
 func (d DisplayCfg) appendProgress() bool {
 	return d.Mode != "full" && (d.ProgressHistory == "append" || (d.ProgressHistory == "" && d.Mode == "quiet"))
 }

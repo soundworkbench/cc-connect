@@ -125,6 +125,8 @@ type Platform struct {
 	finalReplyOrder            core.FinalReplyOrder
 	progressMergeCfg           *core.ProgressMergeCfg
 	useInteractiveCard         bool
+	keepPreviewOnFinish        bool // 收尾时把预览卡更新成最终回复（流式卡片），不撤回
+	keepPreviewMaxAge          time.Duration // 回合超过这么久就不原地定稿，改发新消息（原地更新没有通知）；0 = 不限
 	self                       core.Platform
 	reactionEmoji              string
 	doneEmoji                  string
@@ -396,6 +398,19 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	if v, ok := opts["enable_feishu_card"].(bool); ok {
 		useInteractiveCard = v
 	}
+	keepPreviewOnFinish := false
+	if v, ok := opts["keep_preview_on_finish"].(bool); ok {
+		keepPreviewOnFinish = v
+	}
+	keepPreviewMaxAge := 120 * time.Second
+	switch v := opts["keep_preview_max_secs"].(type) {
+	case int64:
+		keepPreviewMaxAge = time.Duration(v) * time.Second
+	case int:
+		keepPreviewMaxAge = time.Duration(v) * time.Second
+	case float64:
+		keepPreviewMaxAge = time.Duration(v * float64(time.Second))
+	}
 
 	imageBatchWindow := defaultImageBatchWindow
 	if raw, ok := opts["image_batch_window_ms"]; ok {
@@ -434,6 +449,8 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		finalReplyOrder:            finalReplyOrder,
 		progressMergeCfg:           &mergeCfg,
 		useInteractiveCard:         useInteractiveCard,
+		keepPreviewOnFinish:        keepPreviewOnFinish,
+		keepPreviewMaxAge:          keepPreviewMaxAge,
 		reactionEmoji:              reactionEmoji,
 		doneEmoji:                  doneEmoji,
 		allowFrom:                  allowFrom,
@@ -512,8 +529,52 @@ func (p *Platform) FinalReplyOrder() core.FinalReplyOrder {
 	return p.finalReplyOrder
 }
 
+// KeepPreviewOnFinish：keep_preview_on_finish = true 时，回合结束把预览卡原地更新成最终回复（同上游默认）；
+// 默认 false 保持“撤回预览再发正文”。
 func (p *Platform) KeepPreviewOnFinish() bool {
-	return false
+	return p.useInteractiveCard && p.keepPreviewOnFinish
+}
+
+// KeepPreviewInPlace：卡片原地定稿不会推送通知。回合超过 keep_preview_max_secs，或卡片下面已经有新消息
+// （比如用户在回合中又发了一条），原地更新的回复就会被看漏，这时改走撤回预览再发新消息。
+func (p *Platform) KeepPreviewInPlace(ctx context.Context, previewHandle any, age time.Duration) bool {
+	h, ok := previewHandle.(*feishuPreviewHandle)
+	if !ok || h.chatID == "" || h.messageID == "" {
+		return true
+	}
+	if p.keepPreviewMaxAge > 0 && age > p.keepPreviewMaxAge {
+		slog.Info(p.tag()+": final reply sent as new message", "reason", "long turn", "age", age.Round(time.Second))
+		return false
+	}
+	req := larkim.NewListMessageReqBuilder().
+		ContainerIdType("chat").
+		ContainerId(h.chatID).
+		SortType("ByCreateTimeDesc").
+		PageSize(1).
+		Build()
+	latest := ""
+	err := p.withFreshTenantAccessTokenRetry(ctx, "list latest message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+		resp, err := client.Im.Message.List(ctx, req, options...)
+		if err != nil {
+			return err
+		}
+		if !resp.Success() {
+			return fmt.Errorf("code=%d msg=%s", resp.Code, resp.Msg)
+		}
+		if resp.Data != nil && len(resp.Data.Items) > 0 && resp.Data.Items[0].MessageId != nil {
+			latest = *resp.Data.Items[0].MessageId
+		}
+		return nil
+	})
+	if err != nil {
+		slog.Warn(p.tag()+": final reply sent as new message", "reason", "cannot check latest message", "error", err)
+		return false
+	}
+	if latest != h.messageID {
+		slog.Info(p.tag()+": final reply sent as new message", "reason", "newer messages below preview")
+		return false
+	}
+	return true
 }
 
 func (p *Platform) StartPreviewImmediately() bool {

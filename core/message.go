@@ -421,6 +421,7 @@ type EventType string
 
 const (
 	EventText              EventType = "text"               // intermediate or final text
+	EventTextDelta         EventType = "text_delta"         // preview only: accumulated text of the block being written (never final content)
 	EventProgress          EventType = "progress"           // public work summary, never private reasoning
 	EventToolUse           EventType = "tool_use"           // tool invocation info
 	EventToolResult        EventType = "tool_result"        // tool execution result
