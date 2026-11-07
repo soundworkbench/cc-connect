@@ -182,6 +182,10 @@ func (sp *streamPreview) appendProgressEvent(event Event, text string) {
 	if sp.mergeCfg.Enabled && substantiveProgress(text, sp.mergeCfg) {
 		sp.substantiveProgress = append(sp.substantiveProgress, text)
 	}
+	if sp.segmented != nil {
+		sp.replacePreviewLocked(text)
+		return
+	}
 	// Split unusually large entries before displaying them. Existing visible rows
 	// are never rewritten: only complete oldest rows can be folded later.
 	runes := []rune(text)

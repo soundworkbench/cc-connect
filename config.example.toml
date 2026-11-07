@@ -260,6 +260,10 @@ level = "info" # debug, info, warn, error
 # interval_ms = 1500        # Min ms between updates (default: 1500) / 更新最小间隔毫秒数（默认 1500）
 # min_delta_chars = 30      # Min new chars before sending update (default: 30) / 发送更新前最少新增字符数（默认 30）
 # max_chars = 2000          # Max preview length (default: 2000) / 预览最大长度（默认 2000）
+# segmented = false         # Opt-in Feishu thinking heartbeat, typed body, and collapsed process
+# push_interval_ms = 200    # CardKit push cadence in segmented mode
+# typing_interval_ms = 40   # Client typing tick in segmented mode
+# typing_step = 6           # Characters per client tick in segmented mode
 
 # =============================================================================
 # Instant Reply / 即时确认回复

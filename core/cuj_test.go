@@ -3532,3 +3532,84 @@ func testTimerAbsoluteTimezoneJourney(t *testing.T) {
 		})
 	}
 }
+
+// The platform boundary models editable visible messages; empty slots are recalled.
+type cujSegmentedPlatform struct{ stubPlatformEngine }
+
+func (p *cujSegmentedPlatform) StartSegmentedPreview(_ context.Context, _ any, _ StreamPreviewCfg, i18n *I18n) (any, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	id := len(p.sent)
+	p.sent = append(p.sent, i18n.T(MsgPreviewThinking))
+	return id, nil
+}
+func (p *cujSegmentedPlatform) UpdateMessage(_ context.Context, id any, text string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sent[id.(int)] = text
+	return nil
+}
+func (p *cujSegmentedPlatform) SetPreviewBody(ctx context.Context, id any, text string) error {
+	return p.UpdateMessage(ctx, id, text)
+}
+func (p *cujSegmentedPlatform) AddPreviewProgress(context.Context, any, string) error { return nil }
+func (p *cujSegmentedPlatform) FinishSegmentedPreview(ctx context.Context, id any, text string) error {
+	return p.UpdateMessage(ctx, id, text)
+}
+func (p *cujSegmentedPlatform) DeletePreviewMessage(ctx context.Context, id any) error {
+	return p.UpdateMessage(ctx, id, "")
+}
+func (p *cujSegmentedPlatform) getSent() []string {
+	var visible []string
+	for _, text := range p.stubPlatformEngine.getSent() {
+		if text != "" {
+			visible = append(visible, text)
+		}
+	}
+	return visible
+}
+
+func testPreviewLifecycleSegmentedThreeTurns(t *testing.T) {
+	p := &cujSegmentedPlatform{stubPlatformEngine: stubPlatformEngine{n: "segmented"}}
+	s := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 3)}
+	e := NewEngine("segmented", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	cfg := DefaultStreamPreviewCfg()
+	cfg.Segmented = true
+	e.SetStreamPreviewCfg(cfg)
+	t.Cleanup(func() { _ = e.Stop() })
+	key := "segmented:user"
+	for turn := 1; turn <= 3; turn++ {
+		e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), MessageID: fmt.Sprint(turn), UserID: "user", Content: fmt.Sprintf("请求 %d", turn), ReplyCtx: "ctx"})
+		select {
+		case <-s.sent:
+		case <-time.After(3 * time.Second):
+			t.Fatal("prompt missing")
+		}
+		before := p.getSent()
+		if len(before) == 0 || before[len(before)-1] != "思考中…" {
+			t.Fatalf("turn %d has no immediate thinking message: %v", turn, before)
+		}
+		body := fmt.Sprintf("answer %d", turn)
+		if turn == 2 {
+			body = "NO_REPLY"
+		} else {
+			s.events <- Event{Type: EventProgress, Content: "正在检查"}
+			s.events <- Event{Type: EventTextDelta, Content: body}
+		}
+		s.events <- Event{Type: EventResult, Content: body, Done: true}
+		deadline := time.Now().Add(3 * time.Second)
+		for e.sessions.GetOrCreateActive(key).Busy() {
+			if time.Now().After(deadline) {
+				t.Fatal("turn hung")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		want := "answer 1"
+		if turn == 3 {
+			want += "|answer 3"
+		}
+		if got := strings.Join(p.getSent(), "|"); got != want {
+			t.Fatalf("normal/silent/normal leaked or overwrote a card: %q want %q", got, want)
+		}
+	}
+}

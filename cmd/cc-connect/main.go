@@ -600,6 +600,16 @@ func main() {
 		// Wire streaming preview
 		{
 			spcfg := core.DefaultStreamPreviewCfg()
+			spcfg.Segmented = cfg.StreamPreview.Segmented
+			if cfg.StreamPreview.PushIntervalMs > 0 {
+				spcfg.PushIntervalMs = cfg.StreamPreview.PushIntervalMs
+			}
+			if cfg.StreamPreview.TypingIntervalMs > 0 {
+				spcfg.TypingIntervalMs = cfg.StreamPreview.TypingIntervalMs
+			}
+			if cfg.StreamPreview.TypingStep > 0 {
+				spcfg.TypingStep = cfg.StreamPreview.TypingStep
+			}
 			if cfg.StreamPreview.Enabled != nil {
 				spcfg.Enabled = *cfg.StreamPreview.Enabled
 			}

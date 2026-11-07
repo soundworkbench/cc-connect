@@ -125,7 +125,7 @@ type Platform struct {
 	finalReplyOrder            core.FinalReplyOrder
 	progressMergeCfg           *core.ProgressMergeCfg
 	useInteractiveCard         bool
-	keepPreviewOnFinish        bool // 收尾时把预览卡更新成最终回复（流式卡片），不撤回
+	keepPreviewOnFinish        bool          // 收尾时把预览卡更新成最终回复（流式卡片），不撤回
 	keepPreviewMaxAge          time.Duration // 回合超过这么久就不原地定稿，改发新消息（原地更新没有通知）；0 = 不限
 	self                       core.Platform
 	reactionEmoji              string
@@ -4032,6 +4032,7 @@ func isThreadSessionKey(sessionKey string) bool {
 // Entity failed → fallback), in which case streamRichCardText must NOT be
 // called and the engine falls back to full-card Patch via UpdateMessage.
 type feishuPreviewHandle struct {
+	live        *segmentedPreview
 	mu          sync.Mutex
 	messageID   string
 	chatID      string
@@ -4967,6 +4968,9 @@ func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) 
 		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
 	}
 
+	if h.live != nil {
+		h.live.stop()
+	}
 	req := larkim.NewDeleteMessageReqBuilder().
 		MessageId(h.messageID).
 		Build()
@@ -6832,6 +6836,9 @@ func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 		return
 	}
 
+	if h.live != nil {
+		return
+	}
 	h.mu.Lock()
 	h.status = status
 	lastContent := h.lastContent

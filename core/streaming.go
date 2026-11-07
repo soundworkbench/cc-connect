@@ -10,6 +10,10 @@ import (
 
 // StreamPreviewCfg controls the streaming preview behavior.
 type StreamPreviewCfg struct {
+	Segmented         bool     // opt-in segmented streaming cards
+	PushIntervalMs    int      // segmented card push cadence; default 200
+	TypingIntervalMs  int      // client typing tick; default 40
+	TypingStep        int      // characters per client tick; default 6
 	Enabled           bool     // global toggle
 	DisabledPlatforms []string // platforms where streaming preview is disabled (e.g. "feishu")
 	IntervalMs        int      // minimum ms between updates (default 1500)
@@ -22,6 +26,9 @@ type StreamPreviewCfg struct {
 func DefaultStreamPreviewCfg() StreamPreviewCfg {
 	return StreamPreviewCfg{
 		Enabled:           true,
+		PushIntervalMs:    200,
+		TypingIntervalMs:  40,
+		TypingStep:        6,
 		DisabledPlatforms: nil,
 		IntervalMs:        1500,
 		MinDeltaChars:     30,
@@ -77,10 +84,10 @@ type streamPreview struct {
 	streamingText          string // latest whole preview text from streamReplace (token-level streaming)
 	lastSentText           string // what was last successfully sent to the platform
 	lastSentAt             time.Time
-	lastSentViaUpdate      bool   // true if lastSentText was delivered via UpdateMessage (not SendPreviewStart)
-	previewMsgID           any    // platform-specific ID for the preview message (returned by SendPreviewStart)
+	lastSentViaUpdate      bool // true if lastSentText was delivered via UpdateMessage (not SendPreviewStart)
+	previewMsgID           any  // platform-specific ID for the preview message (returned by SendPreviewStart)
 	previewStartedAt       time.Time
-	markerShown            bool // the card on screen carries the typing marker, so finish must always repaint it
+	markerShown            bool   // the card on screen carries the typing marker, so finish must always repaint it
 	pendingAcknowledgement func() // consumed by the first visible output
 	degraded               bool   // if true, stop trying (platform doesn't support it or permanent error)
 
@@ -99,7 +106,8 @@ type streamPreview struct {
 	// hidden marks an automated turn (timer, tell, relay...): the preview keeps
 	// its state for the final reply but never creates a platform message, so
 	// a turn that ends silent sends nothing and recalls nothing.
-	hidden bool
+	hidden    bool
+	segmented SegmentedPreviewer
 }
 
 // ToolStepKind identifies the kind of progress row shown in rich cards.
@@ -181,6 +189,15 @@ type PreviewStarter interface {
 	SendPreviewStart(ctx context.Context, replyCtx any, content string) (previewHandle any, err error)
 }
 
+// SegmentedPreviewer owns pacing and separate body/progress elements for a turn.
+// Start is called only for admitted human turns; DeletePreviewMessage must stop it.
+type SegmentedPreviewer interface {
+	StartSegmentedPreview(context.Context, any, StreamPreviewCfg, *I18n) (any, error)
+	SetPreviewBody(context.Context, any, string) error
+	AddPreviewProgress(context.Context, any, string) error
+	FinishSegmentedPreview(context.Context, any, string) error
+}
+
 // PreviewCleaner is an optional interface for platforms that need to clean up
 // the preview message after a separate final response is sent (e.g. Discord deletes
 // the preview and sends a fresh message).
@@ -241,7 +258,38 @@ func (sp *streamPreview) replacePreview(text string) bool {
 	return sp.replacePreviewLocked(text)
 }
 
+func (sp *streamPreview) startSegmentedLocked() bool {
+	if sp.degraded || sp.hidden {
+		return false
+	}
+	if sp.previewMsgID != nil {
+		return true
+	}
+	sp.previewStartedAt = time.Now()
+	handle, err := sp.segmented.StartSegmentedPreview(sp.ctx, sp.replyCtx, sp.cfg, sp.progressI18n)
+	if err != nil {
+		slog.Warn("segmented preview start failed", "error", err)
+		sp.degraded = true
+		return false
+	}
+	sp.previewMsgID = handle
+	return handle != nil
+}
+
 func (sp *streamPreview) replacePreviewLocked(text string) bool {
+	if sp.segmented != nil {
+		if !sp.startSegmentedLocked() {
+			return false
+		}
+		if sp.transform != nil {
+			text = sp.transform(text)
+		}
+		if err := sp.segmented.AddPreviewProgress(sp.ctx, sp.previewMsgID, text); err != nil {
+			slog.Warn("segmented preview progress failed", "error", err)
+			return false
+		}
+		return true
+	}
 	if sp.degraded {
 		return false
 	}
@@ -293,7 +341,7 @@ func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx contex
 	if pref, ok := p.(ProgressMergePreference); ok {
 		mergeCfg = pref.ProgressMergeConfig()
 	}
-	return &streamPreview{
+	sp := &streamPreview{
 		cfg:          cfg,
 		mergeCfg:     mergeCfg,
 		progressI18n: NewI18n(LangChinese),
@@ -303,10 +351,18 @@ func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx contex
 		transform:    transform,
 		timerStop:    make(chan struct{}),
 	}
+	if cfg.Segmented {
+		sp.segmented, _ = p.(SegmentedPreviewer)
+	}
+	return sp
 }
 
 // Immediate-preview platforms defer acknowledgement until output is visible.
 func (e *Engine) acknowledgeTurnStart(p Platform, replyCtx any, sp *streamPreview, hasStreamingCard bool) {
+	if sp.segmented != nil && sp.canPreview() {
+		sp.startPlaceholder(e.i18n.T(MsgPreviewThinking))
+		return
+	}
 	if hasStreamingCard {
 		return
 	}
@@ -370,6 +426,9 @@ func (sp *streamPreview) startPlaceholder(text string) bool {
 		return false
 	}
 
+	if sp.segmented != nil {
+		return sp.startSegmentedLocked()
+	}
 	if starter, ok := sp.platform.(PreviewStarter); ok {
 		handle, err := starter.SendPreviewStart(sp.ctx, sp.replyCtx, sp.markTyping(text))
 		if err != nil {
@@ -402,6 +461,23 @@ func (sp *streamPreview) startPlaceholder(text string) bool {
 // token-level deltas from the agent become a card that grows every interval.
 // A later replacePreview/finish/discard cancels any pending frame.
 func (sp *streamPreview) streamReplace(text string) {
+	if sp.segmented != nil {
+		if !sp.canPreview() {
+			return
+		}
+		text, _ = stripTrailingSilent(text)
+		if sp.transform != nil {
+			text = sp.transform(text)
+		}
+		sp.mu.Lock()
+		defer sp.mu.Unlock()
+		if sp.startSegmentedLocked() {
+			if err := sp.segmented.SetPreviewBody(sp.ctx, sp.previewMsgID, text); err != nil {
+				slog.Warn("segmented preview body failed", "error", err)
+			}
+		}
+		return
+	}
 	text, _ = stripTrailingSilent(text)
 	if strings.TrimSpace(text) == "" {
 		return
@@ -583,6 +659,13 @@ func (sp *streamPreview) freeze() {
 	defer sp.mu.Unlock()
 
 	sp.cancelTimerLocked()
+	if sp.segmented != nil && sp.previewMsgID != nil {
+		if err := sp.segmented.FinishSegmentedPreview(sp.ctx, sp.previewMsgID, ""); err != nil {
+			slog.Warn("segmented preview freeze failed", "error", err)
+		}
+		sp.degraded = true
+		return
+	}
 
 	if sp.previewMsgID != nil && !sp.degraded {
 		if updater, ok := sp.platform.(MessageUpdater); ok {
@@ -697,6 +780,16 @@ func (sp *streamPreview) finish(finalText, statusFooter string) bool {
 
 	if sp.transform != nil {
 		finalText = sp.transform(finalText)
+	}
+	if sp.segmented != nil {
+		if sp.previewMsgID == nil || finalText == "" {
+			return false
+		}
+		if err := sp.segmented.FinishSegmentedPreview(sp.ctx, sp.previewMsgID, finalText); err != nil {
+			slog.Warn("segmented preview finish failed", "error", err)
+			return false
+		}
+		return true
 	}
 	keepPreview := false
 	if pref, ok := sp.platform.(PreviewFinishPreference); ok {
@@ -893,7 +986,11 @@ func (sp *streamPreview) keepInPlace() bool {
 func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform, any, string) error, failureText string) bool {
 	// 平台要求保留预览（飞书 keep_preview_on_finish）时，把过程卡原地更新成最终回复；失败再走撤回/重发。
 	// 超过单条上限（按字符计，与分块一致）时，第一块原地完成，其余块接着另发。
-	if pref, ok := sp.platform.(PreviewFinishPreference); ok && pref.KeepPreviewOnFinish() && sp.keepInPlace() {
+	if sp.segmented != nil {
+		footer = ""
+	}
+	pref, hasPref := sp.platform.(PreviewFinishPreference)
+	if (sp.segmented != nil || (hasPref && pref.KeepPreviewOnFinish())) && sp.keepInPlace() {
 		chunks := SplitMessageCodeFenceAware(body, maxPlatformMessageLen)
 		rest := chunks[1:]
 		firstFooter := footer

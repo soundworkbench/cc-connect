@@ -3077,6 +3077,18 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	turnStart := time.Now()
 
 	e.i18n.DetectAndSet(msg.Content)
+	var admittedPreview *streamPreview
+	if e.streamPreview.Segmented && isHumanTurn(msg) && !msg.scheduledMute {
+		preview := newStreamPreview(e.streamPreview, p, msg.ReplyCtx, e.ctx, func(text string) string {
+			return e.renderOutgoingContentForWorkspace(p, text, workspaceDir)
+		})
+		preview.progressI18n = e.i18n
+		if preview.segmented != nil && preview.canPreview() {
+			admittedPreview = preview
+			e.acknowledgeTurnStart(p, msg.ReplyCtx, preview, false)
+			defer preview.discard()
+		}
+	}
 	if !msg.historyPreseeded {
 		session.AddHistory("user", msg.Content)
 	}
@@ -3118,6 +3130,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	}
 	state.platform = p
 	state.replyCtx = msg.ReplyCtx
+	if admittedPreview != nil {
+		state.activePreview = admittedPreview
+	}
 	if msg.scheduledInputID != "" {
 		if state.steerMessageIDs == nil {
 			state.steerMessageIDs = make(map[string]bool)
@@ -4277,14 +4292,17 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 	if !muteScheduledNotices {
 		startStreamCard(state.platform, state.replyCtx)
 	}
-	sp := newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+	sp := state.activePreview
+	if sp == nil || sp.segmented == nil {
+		sp = newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+	}
 	sp.hidden = automated
 	sp.progressI18n = e.i18n
-	sp.keepProgressCard = e.display.KeepProgressCard
+	sp.keepProgressCard = e.display.KeepProgressCard && sp.segmented == nil
 	cp := newCompactProgressWriter(e.ctx, state.platform, state.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), workspaceRenderer)
-	thinkingProcessPreview := false
+	thinkingProcessPreview := sp.segmented != nil && sp.canPreview()
 	if pref, ok := state.platform.(ThinkingProcessPreviewPreference); ok {
-		thinkingProcessPreview = pref.UseThinkingProcessPreview() && streamCard == nil && e.display.CardMode != "rich" && sp.canPreview()
+		thinkingProcessPreview = thinkingProcessPreview || (pref.UseThinkingProcessPreview() && streamCard == nil && e.display.CardMode != "rich" && sp.canPreview())
 	}
 	state.activePreview = sp
 	if state.stopped {
@@ -4513,7 +4531,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 		richCardSupporter, hasRichCard := p.(RichCardSupporter)
 		// Card 2.0 rich-card path is opt-in via [display] mode = "rich".
 		// Default "legacy" keeps upstream behavior for all platforms.
-		if e.display.CardMode != "rich" || automated {
+		if e.display.CardMode != "rich" || automated || sp.segmented != nil {
 			hasRichCard = false
 		}
 		richMarkdownResolver, hasRichMarkdownResolver := p.(RichCardMarkdownResolver)
@@ -4533,6 +4551,12 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				break
 			}
 			if thinkingProcessPreview {
+				if sp.segmented != nil {
+					if e.display.ThinkingMessages && !e.display.appendProgress() {
+						sp.replacePreview(event.Content)
+					}
+					break
+				}
 				if e.display.appendProgress() {
 					break // Private thinking never enters append history, even if enabled.
 				}
@@ -4643,6 +4667,15 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 
 		case EventToolUse:
 			toolCount++
+			if thinkingProcessPreview && sp.segmented != nil {
+				if partialText != "" && !couldBeSilentPrefix(partialText) {
+					sp.appendProgressEvent(Event{Type: EventProgress}, strings.NewReplacer("\r", " ", "\n", " ").Replace(partialText))
+				}
+				partialText = ""
+				sp.streamReplace("")
+				sp.appendProgressEvent(event, publicToolProgress(event))
+				break
+			}
 			if thinkingProcessPreview {
 				if e.display.appendProgress() {
 					if e.display.ToolProgressLines == nil || *e.display.ToolProgressLines > 0 {
@@ -4859,6 +4892,16 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			// Preview only (agent option stream_partial_text): the block the agent is
 			// still writing. Final content still arrives as EventText/EventResult.
 			if thinkingProcessPreview {
+				if sp.segmented != nil {
+					block := event.Content
+					if e.display.HideAgentFooter {
+						block = stripAgentFooterLines(block)
+					}
+					if !couldBeSilentPrefix(block) {
+						sp.streamReplace(block)
+					}
+					break
+				}
 				block := strings.TrimSpace(event.Content)
 				if e.display.HideAgentFooter {
 					block = strings.TrimSpace(stripAgentFooterLines(block))
@@ -4880,6 +4923,10 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			// switch. Other display modes retain ordinary text behavior.
 			if thinkingProcessPreview {
 				preview := strings.TrimSpace(event.Content)
+				if sp.segmented != nil {
+					sp.appendProgressEvent(event, preview)
+					break
+				}
 				if e.display.appendProgress() {
 					sp.appendProgressEvent(event, preview)
 					break
@@ -4949,6 +4996,9 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 					}
 					textParts = append(textParts, content)
 					partialText += content
+					if sp.segmented != nil && !silentHold {
+						sp.streamReplace(partialText)
+					}
 					if hasRichCard {
 						if !silentHold {
 							// Lazy creation: if we held during the first text events and
@@ -5203,6 +5253,12 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			sdkPlausible := event.InputTokens >= 100
 			selfPct := parseSelfReportedCtx(fullResponse)
 			cleanResponse := e.cleanAgentReply(fullResponse)
+			if sp.segmented != nil {
+				cleanResponse = ctxSelfReportRe.ReplaceAllString(fullResponse, "")
+				if e.display.HideAgentFooter {
+					cleanResponse = stripAgentFooterLines(cleanResponse)
+				}
+			}
 			baseResponse := cleanResponse
 
 			contextEstimate := estimateTokensWithPendingAssistant(session.GetHistory(0), baseResponse)
@@ -5645,7 +5701,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
 				sp.hidden = automated
 				sp.progressI18n = e.i18n
-				sp.keepProgressCard = e.display.KeepProgressCard
+				sp.keepProgressCard = e.display.KeepProgressCard && sp.segmented == nil
 				state.mu.Lock()
 				state.activePreview = sp
 				if state.stopped {
@@ -5655,7 +5711,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				cp = newCompactProgressWriter(e.ctx, queued.platform, queued.replyCtx, e.agent.Name(), e.i18n.CurrentLang(), queuedRenderer)
 				thinkingPreviewText.Reset()
 				toolProgressRows = nil
-				thinkingProcessPreview = false
+				thinkingProcessPreview = sp.segmented != nil && sp.canPreview()
 
 				// Reset streaming card state for the next turn
 				streamCard = nil
@@ -5670,7 +5726,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 
 				if streamCard == nil {
 					if pref, ok := queued.platform.(ThinkingProcessPreviewPreference); ok {
-						thinkingProcessPreview = pref.UseThinkingProcessPreview() && e.display.CardMode != "rich" && sp.canPreview()
+						thinkingProcessPreview = thinkingProcessPreview || (pref.UseThinkingProcessPreview() && e.display.CardMode != "rich" && sp.canPreview())
 					}
 				}
 				if !muteScheduledNotices && !automated {

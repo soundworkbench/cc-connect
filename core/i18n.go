@@ -176,6 +176,10 @@ const (
 const MsgFeishuCardImageUnavailable MsgKey = "feishu_card_image_unavailable"
 
 const (
+	MsgPreviewThinking           MsgKey = "preview_thinking"
+	MsgPreviewElapsed            MsgKey = "preview_elapsed"
+	MsgPreviewSteps              MsgKey = "preview_steps"
+	MsgPreviewProcess            MsgKey = "preview_process"
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
 	MsgTool                      MsgKey = "tool"
@@ -706,6 +710,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgProgressMCP:         {LangChinese: "调用工具", LangEnglish: "Call tool", LangTraditionalChinese: "呼叫工具", LangJapanese: "ツールを呼び出す", LangSpanish: "Invocar herramienta"},
 	MsgProgressOperation:   {LangChinese: "执行操作", LangEnglish: "Perform operation", LangTraditionalChinese: "執行操作", LangJapanese: "操作を実行", LangSpanish: "Realizar operación"},
 
+	MsgPreviewThinking: {LangEnglish: "Thinking…", LangChinese: "思考中…", LangTraditionalChinese: "思考中…", LangJapanese: "考え中…", LangSpanish: "Pensando…"},
+	MsgPreviewElapsed:  {LangEnglish: "Thinking · %ds", LangChinese: "思考中 · %ds", LangTraditionalChinese: "思考中 · %ds", LangJapanese: "考え中 · %d秒", LangSpanish: "Pensando · %ds"},
+	MsgPreviewSteps:    {LangEnglish: "%d steps executed", LangChinese: "已执行 %d 步", LangTraditionalChinese: "已執行 %d 步", LangJapanese: "%dステップ実行済み", LangSpanish: "%d pasos ejecutados"},
+	MsgPreviewProcess:  {LangEnglish: "Process (%d steps)", LangChinese: "过程（%d 步）", LangTraditionalChinese: "過程（%d 步）", LangJapanese: "プロセス（%dステップ）", LangSpanish: "Proceso (%d pasos)"},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",

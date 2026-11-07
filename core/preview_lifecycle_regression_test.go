@@ -114,6 +114,7 @@ func TestProcessInteractiveEvents_PreviewLifecycleErrorRecalls(t *testing.T) {
 }
 
 func TestCUJ_PreviewLifecycleThreeTurns(t *testing.T) {
+	t.Run("segmented_normal_silent_normal", testPreviewLifecycleSegmentedThreeTurns)
 	t.Run("public_progress_hidden_thinking", testPreviewLifecyclePublicProgressThreeTurns)
 	t.Run("silent_visible_normal", testPreviewLifecycleSilentVisibleThreeTurns)
 	for _, outcome := range []string{"success", "error", "nil_handle", "disabled"} {

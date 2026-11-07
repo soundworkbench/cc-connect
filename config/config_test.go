@@ -3474,3 +3474,26 @@ func TestRemoveGlobalProvider_CleansUpProviderRefs(t *testing.T) {
 		t.Errorf("proj2 provider_refs: want [], got %v", refs2)
 	}
 }
+
+func TestStreamPreviewSegmentedConfig(t *testing.T) {
+	var defaults Config
+	if _, err := toml.Decode("[stream_preview]\nenabled = true\n", &defaults); err != nil {
+		t.Fatal(err)
+	}
+	if defaults.StreamPreview.Segmented {
+		t.Fatal("new streaming behavior must default off")
+	}
+	var cfg Config
+	if _, err := toml.Decode(`[stream_preview]
+segmented = true
+push_interval_ms = 250
+typing_interval_ms = 50
+typing_step = 8
+`, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	sp := cfg.StreamPreview
+	if !sp.Segmented || sp.PushIntervalMs != 250 || sp.TypingIntervalMs != 50 || sp.TypingStep != 8 {
+		t.Fatalf("stream preview config not decoded: %+v", sp)
+	}
+}

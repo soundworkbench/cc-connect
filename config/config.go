@@ -266,6 +266,10 @@ type DisplayConfig struct {
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
 type StreamPreviewConfig struct {
+	Segmented         bool     `toml:"segmented"`                    // opt-in Feishu segmented streaming; default false
+	PushIntervalMs    int      `toml:"push_interval_ms"`             // default 200
+	TypingIntervalMs  int      `toml:"typing_interval_ms"`           // default 40
+	TypingStep        int      `toml:"typing_step"`                  // default 6
 	Enabled           *bool    `toml:"enabled"`                      // default true
 	DisabledPlatforms []string `toml:"disabled_platforms,omitempty"` // platforms where preview is disabled (e.g. ["feishu"])
 	IntervalMs        *int     `toml:"interval_ms"`                  // min ms between updates; default 1500
