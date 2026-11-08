@@ -110,6 +110,12 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 			}
 			i++
 			req.TTSText = args[i]
+		case "--react":
+			if i+1 >= len(args) {
+				return req, "", fmt.Errorf("%s requires an emoji type", args[i])
+			}
+			i++
+			req.React = strings.TrimSpace(args[i])
 		case "--image":
 			if i+1 >= len(args) {
 				return req, "", fmt.Errorf("--image requires a path")
@@ -208,8 +214,8 @@ func parseSendArgs(args []string) (core.SendRequest, string, error) {
 	req.Audios = audioFiles
 	req.Videos = videoFiles
 
-	if req.Message == "" && req.TTSText == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {
-		return req, "", fmt.Errorf("message, tts text, or attachment is required")
+	if req.Message == "" && req.TTSText == "" && req.React == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {
+		return req, "", fmt.Errorf("message, tts text, react, or attachment is required")
 	}
 
 	return req, dataDir, nil
@@ -366,6 +372,7 @@ func printSendUsage() {
        cc-connect send [options] --audio <path>
        cc-connect send [options] --video <path>
        cc-connect send [options] --tts <text>
+       cc-connect send [options] --react <emoji>
        echo "msg" | cc-connect send [options] --stdin
 
 Send a message, attachment, or synthesized voice message to an active cc-connect session.
@@ -375,6 +382,7 @@ Options:
       --cwd <path>         Start a new session in this working directory
       --work-dir <path>    Alias for --cwd
       --tts <text>         Synthesize text and send it as a voice/audio message
+      --react <emoji>      Add an emoji reaction to the message that started this turn (Feishu emoji type, e.g. OK, THUMBSUP, DONE)
       --image <path>       Send an image attachment (repeatable)
       --file <path>        Send a file attachment (repeatable)
       --audio <path>       Send an audio attachment (repeatable)
@@ -395,6 +403,7 @@ Examples:
   cc-connect send --video /tmp/demo.mp4
   cc-connect send --audio /tmp/voice.opus
   cc-connect send --tts "Hello from cc-connect"
+  cc-connect send --react OK
   cc-connect send --stdin <<'EOF'
     Long message with "special" chars, $variables, and newlines
   EOF`)

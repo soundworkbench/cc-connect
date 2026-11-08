@@ -539,3 +539,35 @@ func TestSetMaxAttachmentSize_ConcurrentSafe(t *testing.T) {
 	}
 	<-done
 }
+
+type reactingStubPlatform struct {
+	stubPlatformEngine
+	gotCtx   any
+	gotEmoji string
+}
+
+func (p *reactingStubPlatform) AddReaction(_ context.Context, replyCtx any, emoji string) error {
+	p.gotCtx, p.gotEmoji = replyCtx, emoji
+	return nil
+}
+
+func TestHandleSend_ReactOnlyReactsToTriggerMessage(t *testing.T) {
+	platform := &reactingStubPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	engine := NewEngine("test", &stubAgent{}, []Platform{platform}, "", LangEnglish)
+	engine.interactiveStates["session-1"] = &interactiveState{platform: platform, replyCtx: "trigger-msg"}
+	api := &APIServer{engines: map[string]*Engine{"test": engine}}
+	body, _ := json.Marshal(SendRequest{Project: "test", SessionKey: "session-1", React: "OK"})
+
+	rec := httptest.NewRecorder()
+	api.handleSend(rec, httptest.NewRequest(http.MethodPost, "/send", bytes.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if platform.gotCtx != "trigger-msg" || platform.gotEmoji != "OK" {
+		t.Fatalf("reaction = (%v, %q), want (trigger-msg, OK)", platform.gotCtx, platform.gotEmoji)
+	}
+	if len(platform.sent) != 0 {
+		t.Fatalf("react-only send also sent text: %v", platform.sent)
+	}
+}

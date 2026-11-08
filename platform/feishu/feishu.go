@@ -1017,7 +1017,15 @@ func (p *Platform) addReactionWithEmoji(messageID, emojiType string) string {
 	if emojiType == "" {
 		return ""
 	}
-	resp, err := p.client.Im.MessageReaction.Create(context.Background(),
+	id, err := p.createReaction(context.Background(), messageID, emojiType)
+	if err != nil {
+		slog.Debug(p.tag()+": add reaction failed", "error", err)
+	}
+	return id
+}
+
+func (p *Platform) createReaction(ctx context.Context, messageID, emojiType string) (string, error) {
+	resp, err := p.client.Im.MessageReaction.Create(ctx,
 		larkim.NewCreateMessageReactionReqBuilder().
 			MessageId(messageID).
 			Body(larkim.NewCreateMessageReactionReqBodyBuilder().
@@ -1025,17 +1033,25 @@ func (p *Platform) addReactionWithEmoji(messageID, emojiType string) string {
 				Build()).
 			Build())
 	if err != nil {
-		slog.Debug(p.tag()+": add reaction failed", "error", err)
-		return ""
+		return "", err
 	}
 	if !resp.Success() {
-		slog.Debug(p.tag()+": add reaction failed", "code", resp.Code, "msg", resp.Msg)
-		return ""
+		return "", fmt.Errorf("feishu reaction: code=%d msg=%s", resp.Code, resp.Msg)
 	}
 	if resp.Data != nil && resp.Data.ReactionId != nil {
-		return *resp.Data.ReactionId
+		return *resp.Data.ReactionId, nil
 	}
-	return ""
+	return "", nil
+}
+
+// AddReaction puts an emoji reaction on the turn's trigger message.
+func (p *Platform) AddReaction(ctx context.Context, rctx any, emoji string) error {
+	rc, ok := rctx.(replyContext)
+	if !ok || rc.messageID == "" {
+		return fmt.Errorf("feishu: no trigger message to react to in this session")
+	}
+	_, err := p.createReaction(ctx, rc.messageID, emoji)
+	return err
 }
 
 func (p *Platform) removeReaction(messageID, reactionID string) {

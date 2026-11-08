@@ -62,6 +62,7 @@ type SendRequest struct {
 	Videos     []FileAttachment  `json:"videos,omitempty"`
 	AtUsers    []string          `json:"at_users,omitempty"`
 	AtAll      bool              `json:"at_all,omitempty"`
+	React      string            `json:"react,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -222,8 +223,8 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Message == "" && strings.TrimSpace(req.TTSText) == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {
-		http.Error(w, "message, tts_text, or attachment is required", http.StatusBadRequest)
+	if req.Message == "" && strings.TrimSpace(req.TTSText) == "" && strings.TrimSpace(req.React) == "" && len(req.Images) == 0 && len(req.Files) == 0 && len(req.Audios) == 0 && len(req.Videos) == 0 {
+		http.Error(w, "message, tts_text, react, or attachment is required", http.StatusBadRequest)
 		return
 	}
 
@@ -280,6 +281,13 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	if strings.TrimSpace(req.TTSText) != "" {
 		if err := engine.SendTTSToSession(req.SessionKey, req.TTSText); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	if emoji := strings.TrimSpace(req.React); emoji != "" {
+		if err := engine.ReactToSession(req.SessionKey, emoji); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

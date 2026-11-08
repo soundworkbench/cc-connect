@@ -11027,6 +11027,19 @@ func videoFormatHint(v FileAttachment) string {
 	return audioFormatHint(v)
 }
 
+// ReactToSession puts an emoji reaction on the session's current trigger message.
+func (e *Engine) ReactToSession(sessionKey, emoji string) error {
+	_, p, replyCtx, err := e.resolveOutboundSessionTarget(sessionKey, false)
+	if err != nil {
+		return err
+	}
+	reactor, ok := p.(MessageReactor)
+	if !ok {
+		return fmt.Errorf("platform %s: %w", p.Name(), ErrNotSupported)
+	}
+	return reactor.AddReaction(e.ctx, replyCtx, emoji)
+}
+
 func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments bool) (*interactiveState, Platform, any, error) {
 	e.interactiveMu.Lock()
 

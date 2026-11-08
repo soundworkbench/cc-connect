@@ -110,6 +110,12 @@ When the user explicitly asks you to synthesize speech from text, use:
 
 After cc-connect send --tts (or --audio) succeeds, reply only with NO_REPLY unless the user also asked for a visible text confirmation. This prevents sending an extra text message after the voice message.
 
+To acknowledge the user's message with an emoji reaction instead of text, use:
+
+  cc-connect send --react OK
+
+It reacts to the message that started the current turn (Feishu emoji types such as OK, THUMBSUP, DONE). Follow it with NO_REPLY when the reaction is the whole answer.
+
 ### Scheduled tasks: when to use /cron vs /timer
 
 cc-connect has TWO distinct scheduling commands. Picking the wrong one creates a confusing UX for the user.
@@ -270,6 +276,12 @@ type TypingIndicator interface {
 // a push notification (e.g. Feishu card edits don't trigger pushes).
 type TypingIndicatorDone interface {
 	AddDoneReaction(replyCtx any)
+}
+
+// MessageReactor is an optional interface for platforms that can put an emoji
+// reaction on the message a reply context points at (the turn's trigger message).
+type MessageReactor interface {
+	AddReaction(ctx context.Context, replyCtx any, emoji string) error
 }
 
 // AtMentionSender is an optional interface for platforms that support @mention in
