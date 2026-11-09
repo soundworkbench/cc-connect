@@ -223,6 +223,35 @@ func (cs *claudeSession) completeInputs(raw map[string]any) bool {
 	return cs.inputActive
 }
 
+// resultPrecedesInputs reports whether a result belongs to a turn the CLI
+// started before it read our input: it names none of the pending inputs, and
+// no pending input has been replayed yet. The CLI replays a user message when
+// it starts that turn, so a result seen first closes someone else's turn (for
+// example one triggered by a background task notification).
+func (cs *claudeSession) resultPrecedesInputs(raw map[string]any) bool {
+	cs.inputMu.Lock()
+	defer cs.inputMu.Unlock()
+	if len(cs.inputs) == 0 {
+		return false
+	}
+	for _, p := range cs.inputs {
+		if p.replayed {
+			return false
+		}
+	}
+	if id, _ := raw["user_message_uuid"].(string); id != "" && cs.inputs[id] != nil {
+		return false
+	}
+	if list, ok := raw["user_message_uuids"].([]any); ok {
+		for _, v := range list {
+			if id, _ := v.(string); id != "" && cs.inputs[id] != nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Ordinary Send is bounded too, so it cannot hold inputMu indefinitely and
 // prevent steering or completion from acquiring it. Test buffers use writeJSON.
 func (cs *claudeSession) writeBoundedUser(v any) error {

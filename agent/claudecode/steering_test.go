@@ -354,3 +354,51 @@ func TestClaudeSteer_FilesAndLargeImagesInjectPaths(t *testing.T) {
 		}
 	}
 }
+
+// An internal turn (background task notification) is already running when the
+// bridge writes the user message. Its result arrives before the replay of that
+// message and must not complete the foreground turn.
+func TestClaudeSend_InternalTurnResultBeforeReplayIsNotForeground(t *testing.T) {
+	cs, ch := steerFixture(t)
+	assistantText := func(text string) {
+		cs.handleAssistant(map[string]any{"type": "assistant", "message": map[string]any{
+			"content": []any{map[string]any{"type": "text", "text": text}},
+		}})
+	}
+	assistantText("NO_REPLY")
+	if err := cs.Send("更新了吗", "", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	in := takeInput(t, ch)
+
+	// Result of the internal turn: names none of our inputs.
+	cs.handleResult(map[string]any{"type": "result", "result": "NO_REPLY", "num_turns": float64(1)})
+	select {
+	case evt := <-cs.events:
+		t.Fatalf("internal turn result reached the foreground turn: %+v", evt)
+	default:
+	}
+
+	ack(cs, in)
+	assistantText("已更新")
+	cs.handleResult(map[string]any{"type": "result", "result": "已更新", "user_message_uuid": in["uuid"]})
+
+	var texts []string
+	var result *core.Event
+	for len(cs.events) > 0 {
+		evt := <-cs.events
+		if evt.Type == core.EventText {
+			texts = append(texts, evt.Content)
+		}
+		if evt.Type == core.EventResult {
+			e := evt
+			result = &e
+		}
+	}
+	if result == nil || !result.Done || result.Content != "已更新" {
+		t.Fatalf("foreground result = %+v", result)
+	}
+	if len(texts) != 1 || texts[0] != "已更新" {
+		t.Fatalf("foreground texts = %q, want only the reply to the user", texts)
+	}
+}
