@@ -14,6 +14,7 @@ type QueueBatchConfig struct {
 	MaxMessages      int
 	MaxChars         int
 	Hold             time.Duration
+	Debounce         time.Duration // idle wait for a person's follow-up messages; zero disables
 	ImmediateSources []string
 }
 
@@ -33,8 +34,9 @@ func (e *Engine) SetQueueBatchConfig(cfg QueueBatchConfig) {
 }
 
 type queueHold struct {
-	until time.Time
-	wake  chan struct{}
+	until    time.Time
+	wake     chan struct{}
+	debounce bool // short wait for a person's follow-ups, not an automation hold
 }
 
 func messageSource(msg *Message) string {
@@ -91,8 +93,20 @@ func isHumanQueuedTurn(q queuedMessage) bool {
 	return false
 }
 
+// holdable excludes control input and anything that must start a turn now.
+func (e *Engine) holdable(msg *Message) bool {
+	return e.queueBatch.Enabled && !msg.Urgent && !msg.individualReply && msg.ModeOverride == "" && !msg.IsPermissionResponse && !msg.preflightSent &&
+		!strings.HasPrefix(strings.TrimSpace(msg.Content), "/") && !strings.HasPrefix(strings.TrimSpace(msg.Content), "!")
+}
+
+// shouldDebounce reports whether an idle person's message waits briefly so
+// that messages sent right after it join the same turn.
+func (e *Engine) shouldDebounce(msg *Message) bool {
+	return e.queueBatch.Debounce > 0 && e.holdable(msg) && isHumanTurn(msg)
+}
+
 func (e *Engine) shouldHold(msg *Message) bool {
-	if !e.queueBatch.Enabled || e.queueBatch.Hold <= 0 || msg.Urgent || msg.individualReply || msg.ModeOverride != "" || msg.IsPermissionResponse || msg.preflightSent || strings.HasPrefix(strings.TrimSpace(msg.Content), "/") || strings.HasPrefix(strings.TrimSpace(msg.Content), "!") {
+	if e.queueBatch.Hold <= 0 || !e.holdable(msg) {
 		return false
 	}
 	source := messageSource(msg)
@@ -109,14 +123,19 @@ func (e *Engine) shouldHold(msg *Message) bool {
 
 // The caller owns the session lock. Admission persists before the timer starts.
 func (e *Engine) holdIdleMessage(p Platform, msg *Message, session *Session, sessions *SessionManager, agent Agent, key, workspace string) (bool, error) {
-	if !e.shouldHold(msg) {
+	debounce := e.shouldDebounce(msg)
+	if !debounce && !e.shouldHold(msg) {
 		return false, nil
+	}
+	wait := e.queueBatch.Hold
+	if debounce {
+		wait = e.queueBatch.Debounce
 	}
 	e.interactiveMu.Lock()
 	state := e.ensureInteractiveStateForQueueingLocked(key, p, msg.ReplyCtx, session)
 	state.mu.Lock()
 	state.workspaceDir = workspace
-	hold := &queueHold{until: time.Now().Add(e.queueBatch.Hold), wake: make(chan struct{}, 1)}
+	hold := &queueHold{until: time.Now().Add(wait), wake: make(chan struct{}, 1), debounce: debounce}
 	state.hold = hold
 	if state.stopCh == nil {
 		state.stopCh = make(chan struct{})
@@ -164,7 +183,7 @@ func (e *Engine) waitQueueHold(state *interactiveState) {
 }
 
 func (e *Engine) wakeQueueHoldLocked(state *interactiveState, msg *Message) {
-	if state.hold != nil && !e.shouldHold(msg) {
+	if state.hold != nil && !e.shouldHold(msg) && !(state.hold.debounce && e.shouldDebounce(msg)) {
 		select {
 		case state.hold.wake <- struct{}{}:
 		default:

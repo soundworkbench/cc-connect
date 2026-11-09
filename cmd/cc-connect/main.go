@@ -720,7 +720,7 @@ func main() {
 		}
 
 		batch := cfg.QueueBatch.Resolve()
-		engine.SetQueueBatchConfig(core.QueueBatchConfig{Enabled: batch.Enabled, MaxMessages: batch.MaxMessages, MaxChars: batch.MaxChars, Hold: time.Duration(batch.HoldSeconds) * time.Second, ImmediateSources: batch.ImmediateSources})
+		engine.SetQueueBatchConfig(core.QueueBatchConfig{Enabled: batch.Enabled, MaxMessages: batch.MaxMessages, MaxChars: batch.MaxChars, Hold: time.Duration(batch.HoldSeconds) * time.Second, Debounce: time.Duration(batch.DebounceMs) * time.Millisecond, ImmediateSources: batch.ImmediateSources})
 
 		// Wire queue depth
 		if cfg.Queue.MaxDepth != nil && *cfg.Queue.MaxDepth > 0 {

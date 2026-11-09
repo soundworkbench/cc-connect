@@ -2536,7 +2536,7 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	if msg.scheduledPrompt {
+	if msg.scheduledPrompt || (state.hold != nil && state.hold.debounce) {
 		return true, nil
 	}
 	if state.steerWriteFailed {

@@ -157,6 +157,7 @@ type QueueBatchConfig struct {
 	MaxMessages      *int     `toml:"max_messages"`
 	MaxChars         *int     `toml:"max_chars"`
 	HoldSeconds      *int     `toml:"hold_seconds"`
+	DebounceMs       *int     `toml:"debounce_ms"` // idle wait for a person's follow-up messages; 0 disables
 	ImmediateSources []string `toml:"immediate_sources"`
 }
 
@@ -165,11 +166,12 @@ type ResolvedQueueBatch struct {
 	MaxMessages      int
 	MaxChars         int
 	HoldSeconds      int
+	DebounceMs       int
 	ImmediateSources []string
 }
 
 func (c QueueBatchConfig) Resolve() ResolvedQueueBatch {
-	r := ResolvedQueueBatch{Enabled: true, MaxMessages: 20, MaxChars: 20000, HoldSeconds: 60, ImmediateSources: []string{"human"}}
+	r := ResolvedQueueBatch{Enabled: true, MaxMessages: 20, MaxChars: 20000, HoldSeconds: 60, DebounceMs: 1500, ImmediateSources: []string{"human"}}
 	if c.Enabled != nil {
 		r.Enabled = *c.Enabled
 	}
@@ -181,6 +183,9 @@ func (c QueueBatchConfig) Resolve() ResolvedQueueBatch {
 	}
 	if c.HoldSeconds != nil {
 		r.HoldSeconds = *c.HoldSeconds
+	}
+	if c.DebounceMs != nil {
+		r.DebounceMs = *c.DebounceMs
 	}
 	if c.ImmediateSources != nil {
 		r.ImmediateSources = append([]string{}, c.ImmediateSources...)
@@ -197,6 +202,9 @@ func (c QueueBatchConfig) validate() error {
 	}
 	if c.HoldSeconds != nil && (*c.HoldSeconds < 0 || int64(*c.HoldSeconds) > int64(1<<63-1)/int64(time.Second)) {
 		return fmt.Errorf("config: queue_batch.hold_seconds must fit a non-negative duration")
+	}
+	if c.DebounceMs != nil && (*c.DebounceMs < 0 || *c.DebounceMs > 60000) {
+		return fmt.Errorf("config: queue_batch.debounce_ms must be between 0 and 60000")
 	}
 	for _, source := range c.ImmediateSources {
 		if strings.TrimSpace(source) == "" {
