@@ -108,6 +108,18 @@ func parsePreviewJSON(t *testing.T, text any) map[string]any {
 	return obj
 }
 
+// isStructureUpdate reports a full card update sent mid-stream to add or drop an element
+// (the card is still in streaming mode), as opposed to the settled card.
+func isStructureUpdate(t *testing.T, c previewCall) bool {
+	t.Helper()
+	card, ok := c.body["card"].(map[string]any)
+	if !ok {
+		return false
+	}
+	cfg, _ := parsePreviewJSON(t, card["data"])["config"].(map[string]any)
+	return cfg["streaming_mode"] == true
+}
+
 func previewElements(card map[string]any) []any {
 	return card["body"].(map[string]any)["elements"].([]any)
 }
@@ -140,13 +152,16 @@ func TestSegmentedPreview_SeparateBodyProgressAndFinalCollapse(t *testing.T) {
 	h := startFixturePreview(t, f, p)
 	initial := parsePreviewJSON(t, f.read()[0].body["data"])
 	elements := previewElements(initial)
-	bodyID := elements[0].(map[string]any)["element_id"].(string)
-	progressID := elements[1].(map[string]any)["element_id"].(string)
+	if len(elements) != 1 {
+		t.Fatalf("initial card should hold only the progress row: %v", elements)
+	}
+	bodyID := h.live.bodyID
+	progressID := elements[0].(map[string]any)["element_id"].(string)
 	valid := regexp.MustCompile(`^p[0-9a-f]{18}$`)
 	if !valid.MatchString(bodyID) || !valid.MatchString(progressID) || bodyID == progressID {
 		t.Fatalf("invalid element IDs: %s %s", bodyID, progressID)
 	}
-	if elements[0].(map[string]any)["content"] != "" || elements[1].(map[string]any)["content"] != "思考中 · 0s" {
+	if elements[0].(map[string]any)["content"] != "思考中 · 0s" {
 		t.Fatalf("initial elements: %v", elements)
 	}
 	settings := initial["config"].(map[string]any)["streaming_config"].(map[string]any)
@@ -375,7 +390,7 @@ func TestSegmentedPreview_EngineImmediateCounterSilentAndSwitchOff(t *testing.T)
 				if c.method == http.MethodDelete {
 					deletes++
 				}
-				if c.body["card"] != nil {
+				if c.body["card"] != nil && !isStructureUpdate(t, c) {
 					finals++
 				}
 				if c.method == http.MethodPost && c.body["msg_type"] != nil {
@@ -401,7 +416,7 @@ func TestSegmentedPreview_EngineImmediateCounterSilentAndSwitchOff(t *testing.T)
 					t.Fatalf("unexpected final delivery: deletes=%d finals=%d sends=%d", deletes, finals, sends)
 				}
 				for _, c := range calls {
-					if c.body["card"] != nil {
+					if c.body["card"] != nil && !isStructureUpdate(t, c) {
 						parts := previewElements(parsePreviewJSON(t, c.body["card"].(map[string]any)["data"]))
 						wantBody := body
 						if scenario == "multipart" {
@@ -575,12 +590,10 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 	start := h.live.started
 
 	initial := previewElements(parsePreviewJSON(t, f.read()[0].body["data"]))
-	if len(initial) != 3 || initial[1].(map[string]any)["content"] != "◐ 思考中" {
-		t.Fatalf("initial layout: %v", initial)
+	if len(initial) != 1 || initial[0].(map[string]any)["content"] != "◐ 思考中" {
+		t.Fatalf("initial card should hold only the spinner row: %v", initial)
 	}
-	doneID := initial[0].(map[string]any)["element_id"].(string)
-	progressID := initial[1].(map[string]any)["element_id"].(string)
-	bodyID := initial[2].(map[string]any)["element_id"].(string)
+	bodyID := h.live.bodyID
 
 	h.live.mu.Lock()
 	h.live.addRow(start.Add(1*time.Second), "先看第一个文件", false)
@@ -595,19 +608,25 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 	publishFixture(t, p, h, start.Add(8*time.Second))
 	wantDone := "<font color='green'>✓</font> 先看第一个文件"
 	want := "◐ 再看第二个文件\n<font color='grey'>└ Read b.go</font>"
-	var gotProgress, gotBody, gotDone string
-	for _, c := range f.read()[before:] {
-		switch {
-		case strings.HasSuffix(c.path, "/elements/"+doneID):
-			gotDone = parsePreviewJSON(t, c.body["element"])["content"].(string)
-		case strings.HasSuffix(c.path, "/elements/"+progressID):
-			gotProgress = parsePreviewJSON(t, c.body["element"])["content"].(string)
-		case strings.HasSuffix(c.path, "/elements/"+bodyID+"/content"):
-			gotBody = c.body["content"].(string)
-		}
+	calls := f.read()[before:]
+	// One structure update brings in the done and body elements, then the text streams.
+	if len(calls) != 2 {
+		t.Fatalf("want structure update plus body stream, got %d calls: %v", len(calls), calls)
 	}
-	if gotProgress != want || gotDone != wantDone || gotBody != "正在写第三段" {
-		t.Fatalf("progress=%q done=%q body=%q", gotProgress, gotDone, gotBody)
+	card, ok := calls[0].body["card"].(map[string]any)
+	if !ok {
+		t.Fatalf("first call should be a full card update: %v", calls[0])
+	}
+	els := previewElements(parsePreviewJSON(t, card["data"]))
+	if len(els) != 3 {
+		t.Fatalf("card should hold done, spinner and body: %v", els)
+	}
+	got := func(i int) map[string]any { return els[i].(map[string]any) }
+	if got(0)["element_id"] != h.live.rows[0].id || got(0)["content"] != wantDone || got(1)["content"] != want || got(2)["element_id"] != bodyID || got(2)["content"] != "" {
+		t.Fatalf("structure update elements: %v", els)
+	}
+	if !strings.HasSuffix(calls[1].path, "/elements/"+bodyID+"/content") || calls[1].body["content"] != "正在写第三段" {
+		t.Fatalf("body stream: %v", calls[1])
 	}
 
 	// Time alone only moves the spinner glyph: one list update, no body rewrite.
@@ -625,7 +644,7 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 	if err := p.FinishSegmentedPreview(ctx, h, "最终回复"); err != nil {
 		t.Fatal(err)
 	}
-	calls := f.read()
+	calls = f.read()
 	final := previewElements(parsePreviewJSON(t, calls[len(calls)-1].body["card"].(map[string]any)["data"]))
 	if len(final) != 1 || final[0].(map[string]any)["content"] != "最终回复" || strings.Contains(fmt.Sprint(final), "已用") || strings.Contains(fmt.Sprint(final), "⏳") {
 		t.Fatalf("final card should hold only the reply: %v", final)

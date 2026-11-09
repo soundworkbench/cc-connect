@@ -22,6 +22,17 @@ import (
 //go:embed assets/spinner.gif
 var spinnerGIF []byte
 
+//go:embed assets/check.gif
+var checkGIF []byte
+
+//go:embed assets/blank.gif
+var blankGIF []byte
+
+// stepIconKeys are the uploaded images that fill the icon slot of a step row: the running
+// spinner, a finished check, and a blank for the "N more done" line. They share one canvas
+// and footprint, so every row's text starts at the same left edge.
+type stepIconKeys struct{ spinner, check, blank string }
+
 // Frames of the glyph spinner used when the GIF cannot be uploaded.
 var spinnerGlyphs = []string{"◐", "◓", "◑", "◒"}
 
@@ -42,11 +53,14 @@ type segmentedPreview struct {
 	i18n                           *core.I18n
 	started                        time.Time
 	bodyID, sentBodyID, progressID string
-	doneID, lastDone               string
+	doneID                         string
 	body, lastBody, lastProgress   string
 	// spinnerKey is the uploaded spinner image; empty means the glyph spinner,
-	// whose frame is frame.
+	// whose frame is frame. checkKey and blankKey fill the same slot of finished rows
+	// and of the "N more done" line; without them those rows lead with a text glyph.
 	spinnerKey    string
+	checkKey      string
+	blankKey      string
 	frame         int
 	steps         int
 	recent        []string
@@ -78,9 +92,29 @@ type segmentedPreview struct {
 	clientAt      time.Time
 	rows          []stepRow
 	toolCalls     int
+
+	// sent is which optional elements the card on the server holds. Empty elements
+	// are left out of the card, since each one adds a blank line.
+	sent previewLayout
+}
+
+// previewLayout names the optional elements of a live card; the spinner row is always there.
+// done is the finished-step rows (ID and text each), body whether the reply element is present.
+type previewLayout struct {
+	done string
+	body bool
+}
+
+func (v *segmentedPreview) layoutFor(body string) previewLayout {
+	var sig strings.Builder
+	for _, d := range v.doneItems() {
+		sig.WriteString(d.id + "\x00" + d.text + "\x00")
+	}
+	return previewLayout{done: sig.String(), body: body != ""}
 }
 
 type stepRow struct {
+	id         string // card element ID of the finished row, set when it first shows
 	text       string
 	tool       string // latest tool call under this step
 	toolOnly   bool   // no step line from the agent; the row is the tool call itself
@@ -135,15 +169,16 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 	if err != nil {
 		return nil, err
 	}
-	doneID, err := previewElementID()
+	doneID, err := previewElementID() // the "N more done" line
 	if err != nil {
 		return nil, err
 	}
 	v := &segmentedPreview{stopCh: make(chan struct{}), cfg: cfg, i18n: i18n, started: time.Now(), bodyID: bodyID, sentBodyID: bodyID, progressID: progressID, footerID: footerID, doneID: doneID}
 	if cfg.StepList {
-		v.spinnerKey = p.spinnerImageKey(ctx)
+		icons := p.stepIconKeys(ctx)
+		v.spinnerKey, v.checkKey, v.blankKey = icons.spinner, icons.check, icons.blank
 	}
-	v.lastDone = v.doneLines()
+	v.sent = v.layoutFor(v.body)
 	v.lastProgress = v.progress(v.started)
 	v.lastFooter = v.footer(v.started)
 	handle, err := p.SendPreviewStart(ctx, rc, v.card(false))
@@ -331,16 +366,16 @@ func secondsBetween(from, to time.Time) int {
 	return 0
 }
 
-// spinnerImageKey uploads the spinner GIF once per platform and caches its key.
-// After a failed upload it returns "" (glyph spinner) and tries again only after a back-off.
-func (p *Platform) spinnerImageKey(ctx context.Context) string {
+// stepIconKeys uploads the step-row images once per platform and caches their keys. After a
+// failed upload it returns empty keys (glyph spinner, text check) and tries again only after a back-off.
+func (p *Platform) stepIconKeys(ctx context.Context) stepIconKeys {
 	p.spinnerMu.Lock()
 	defer p.spinnerMu.Unlock()
-	if p.spinnerKey != "" {
-		return p.spinnerKey
+	if p.stepIcons.spinner != "" {
+		return p.stepIcons
 	}
 	if !p.spinnerFailed.IsZero() && time.Since(p.spinnerFailed) < spinnerRetryBackoff {
-		return ""
+		return stepIconKeys{}
 	}
 	upload := p.spinnerUpload
 	if upload == nil {
@@ -348,31 +383,88 @@ func (p *Platform) spinnerImageKey(ctx context.Context) string {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	key, err := upload(ctx, spinnerGIF)
-	if err != nil || key == "" {
-		slog.Warn("feishu: spinner upload failed; using glyph spinner", "error", err)
-		p.spinnerFailed = time.Now()
-		return ""
-	}
-	p.spinnerKey = key
-	return key
-}
-
-// doneLines renders the finished steps: a green check each, the last few only.
-func (v *segmentedPreview) doneLines() string {
-	var done []string
-	for _, r := range v.rows {
-		if !r.end.IsZero() {
-			done = append(done, r.text)
+	var keys stepIconKeys
+	var err error
+	for _, img := range []struct {
+		data []byte
+		key  *string
+	}{{spinnerGIF, &keys.spinner}, {checkGIF, &keys.check}, {blankGIF, &keys.blank}} {
+		if *img.key, err = upload(ctx, img.data); err != nil || *img.key == "" {
+			slog.Warn("feishu: step icon upload failed; using glyphs", "error", err)
+			p.spinnerFailed = time.Now()
+			return stepIconKeys{}
 		}
 	}
-	var lines []string
-	if len(done) > doneRowsShown {
-		lines = append(lines, fmt.Sprintf("<font color='grey'>另有 %d 步已完成</font>", len(done)-doneRowsShown))
-		done = done[len(done)-doneRowsShown:]
+	p.stepIcons = keys
+	return keys
+}
+
+type doneItem struct {
+	id, text string
+	summary  bool
+}
+
+// doneItems lists what the finished steps show: the last few rows, led by an "N more" line
+// when older ones dropped off. Row IDs are assigned on first show and stay with the row.
+func (v *segmentedPreview) doneItems() []doneItem {
+	if !v.cfg.StepList {
+		return nil
 	}
-	for _, t := range done {
-		lines = append(lines, "<font color='green'>\u2713</font> "+t)
+	var idx []int
+	for i, r := range v.rows {
+		if !r.end.IsZero() {
+			idx = append(idx, i)
+		}
+	}
+	var items []doneItem
+	if len(idx) > doneRowsShown {
+		items = append(items, doneItem{id: v.doneID, summary: true, text: fmt.Sprintf("<font color='grey'>另有 %d 步已完成</font>", len(idx)-doneRowsShown)})
+		idx = idx[len(idx)-doneRowsShown:]
+	}
+	for _, i := range idx {
+		if v.rows[i].id == "" {
+			id, err := previewElementID()
+			if err != nil {
+				id = fmt.Sprintf("pdone%013d", i)
+			}
+			v.rows[i].id = id
+		}
+		items = append(items, doneItem{id: v.rows[i].id, text: v.rows[i].text})
+	}
+	return items
+}
+
+// doneElements renders the finished steps as one markdown element each. With the check image
+// each row carries it as its icon, in the slot the running row's spinner uses; without it the
+// row leads with a text check.
+func (v *segmentedPreview) doneElements() []map[string]any {
+	var els []map[string]any
+	for _, d := range v.doneItems() {
+		el := map[string]any{"tag": "markdown", "element_id": d.id, "content": d.text}
+		switch {
+		case v.checkKey == "" && !d.summary:
+			el["content"] = "<font color='green'>\u2713</font> " + d.text
+		case v.checkKey != "":
+			key := v.checkKey
+			if d.summary {
+				key = v.blankKey
+			}
+			el["icon"] = map[string]any{"tag": "custom_icon", "img_key": key}
+		}
+		els = append(els, el)
+	}
+	return els
+}
+
+// doneLines is the finished steps as plain text, one line each.
+func (v *segmentedPreview) doneLines() string {
+	var lines []string
+	for _, d := range v.doneItems() {
+		if d.summary {
+			lines = append(lines, d.text)
+		} else {
+			lines = append(lines, "<font color='green'>\u2713</font> "+d.text)
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -438,24 +530,28 @@ func (v *segmentedPreview) progressElement(content string) map[string]any {
 	return el
 }
 
-func (v *segmentedPreview) doneElement(content string) map[string]any {
-	return map[string]any{"tag": "markdown", "element_id": v.doneID, "content": content}
+func (v *segmentedPreview) card(final bool) string {
+	return v.cardWith(final, v.body, v.layoutFor(v.body))
 }
 
-func (v *segmentedPreview) card(final bool) string {
+// cardWith renders the card with body as the reply text and the optional elements lay names.
+func (v *segmentedPreview) cardWith(final bool, body string, lay previewLayout) string {
 	config := map[string]any{"width_mode": "default", "summary": map[string]any{"content": v.i18n.T(core.MsgPreviewThinking)}}
 	if !final && !v.fallback {
 		platformValues := func(n int) map[string]int { return map[string]int{"default": n, "android": n, "ios": n, "pc": n} }
 		config["streaming_mode"] = true
 		config["streaming_config"] = map[string]any{"print_frequency_ms": platformValues(v.cfg.TypingIntervalMs), "print_step": platformValues(v.cfg.TypingStep), "print_strategy": v.cfg.PrintStrategy}
 	}
-	if v.body != "" {
-		config["summary"] = map[string]any{"content": string([]rune(v.body)[:min(len([]rune(v.body)), 120)])}
+	if body != "" {
+		config["summary"] = map[string]any{"content": string([]rune(body)[:min(len([]rune(body)), 120)])}
 	}
 	if v.cfg.StepList {
-		return v.stepCard(config, final)
+		return v.stepCard(config, final, body, lay)
 	}
-	elements := []map[string]any{{"tag": "markdown", "element_id": v.bodyID, "content": v.body}}
+	var elements []map[string]any
+	if final || lay.body {
+		elements = append(elements, map[string]any{"tag": "markdown", "element_id": v.bodyID, "content": body})
+	}
 	if !final {
 		elements = append(elements, v.progressElement(v.progress(time.Now())))
 	} else if v.steps > 0 {
@@ -466,21 +562,21 @@ func (v *segmentedPreview) card(final bool) string {
 	b, err := json.Marshal(map[string]any{"schema": "2.0", "config": config, "body": map[string]any{"elements": elements}})
 	if err != nil {
 		slog.Error("feishu: marshal segmented preview", "error", err)
-		return buildCardJSON(v.body)
+		return buildCardJSON(body)
 	}
 	return string(b)
 }
 
 // stepCard lays out the step list on top and the text being written under it. Once final, the list folds into a collapsed process panel.
-func (v *segmentedPreview) stepCard(config map[string]any, final bool) string {
+func (v *segmentedPreview) stepCard(config map[string]any, final bool, text string, lay previewLayout) string {
 	now := time.Now()
-	body := map[string]any{"tag": "markdown", "element_id": v.bodyID, "content": v.body}
+	body := map[string]any{"tag": "markdown", "element_id": v.bodyID, "content": text}
 	var elements []map[string]any
 	if final {
 		// Settled cards stay quiet: the reply alone, or a single grey "done" line in a compact card
 		// when the reply goes out as its own message.
 		v.closeRow(now)
-		if v.body == "" || v.body == v.i18n.T(core.MsgPreviewDoneBare) {
+		if text == "" || text == v.i18n.T(core.MsgPreviewDoneBare) {
 			done := v.i18n.T(core.MsgPreviewDoneBare)
 			config["width_mode"] = "compact"
 			config["summary"] = map[string]any{"content": done}
@@ -488,13 +584,16 @@ func (v *segmentedPreview) stepCard(config map[string]any, final bool) string {
 			body["text_size"] = "notation"
 		}
 	} else {
-		elements = append(elements, v.doneElement(v.doneLines()), v.progressElement(v.liveLine()))
+		elements = append(elements, v.doneElements()...)
+		elements = append(elements, v.progressElement(v.liveLine()))
 	}
-	elements = append(elements, body)
+	if final || lay.body {
+		elements = append(elements, body)
+	}
 	b, err := json.Marshal(map[string]any{"schema": "2.0", "config": config, "body": map[string]any{"elements": elements}})
 	if err != nil {
 		slog.Error("feishu: marshal segmented preview", "error", err)
-		return buildCardJSON(v.body)
+		return buildCardJSON(text)
 	}
 	return string(b)
 }
@@ -555,8 +654,28 @@ func (p *Platform) replaceSegmentedElement(ctx context.Context, h *feishuPreview
 	return p.cardKitMutation(ctx, h, http.MethodPut, "/elements/"+id, map[string]any{"element": string(b)})
 }
 
+// ensureLayout updates the card structure with one full update when an element has
+// to appear or go away, so element-level updates always find their element.
+func (p *Platform) ensureLayout(ctx context.Context, h *feishuPreviewHandle) error {
+	v := h.live
+	want := v.layoutFor(v.body)
+	if want == v.sent {
+		return nil
+	}
+	card := v.cardWith(false, "", want)
+	if err := p.updateCardEntity(ctx, h, card); err != nil {
+		return err
+	}
+	v.sent, v.sentBodyID, v.lastBody = want, v.bodyID, ""
+	v.lastProgress = v.progress(time.Now())
+	return nil
+}
+
 func (p *Platform) streamSegmentedBody(ctx context.Context, h *feishuPreviewHandle) error {
 	v := h.live
+	if err := p.ensureLayout(ctx, h); err != nil {
+		return err
+	}
 	if v.sentBodyID != v.bodyID || !strings.HasPrefix(v.body, v.lastBody) {
 		if err := p.replaceSegmentedElement(ctx, h, v.sentBodyID, map[string]any{"tag": "markdown", "element_id": v.bodyID, "content": ""}); err != nil {
 			return err
@@ -691,15 +810,11 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 		v.advanceFrame(now)
 	}
 	progress := v.progress(now)
-	done := v.lastDone
-	if v.cfg.StepList {
-		done = v.doneLines()
-	}
 	footer := v.lastFooter
 	if v.cfg.StepList {
 		footer = v.footer(now)
 	}
-	if v.body == v.lastBody && progress == v.lastProgress && done == v.lastDone && footer == v.lastFooter && v.bodyID == v.sentBodyID {
+	if v.body == v.lastBody && progress == v.lastProgress && footer == v.lastFooter && v.bodyID == v.sentBodyID && v.layoutFor(v.body) == v.sent {
 		return nil
 	}
 	if !v.fallback {
@@ -707,14 +822,11 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 		if err == nil && progress != v.lastProgress {
 			err = p.replaceSegmentedElement(ctx, h, v.progressID, v.progressElement(progress))
 		}
-		if err == nil && done != v.lastDone {
-			err = p.replaceSegmentedElement(ctx, h, v.doneID, v.doneElement(done))
-		}
 		if err == nil && footer != v.lastFooter {
 			err = p.replaceSegmentedElement(ctx, h, v.footerID, v.footerElement(footer))
 		}
 		if err == nil {
-			v.lastProgress, v.lastDone, v.lastFooter = progress, done, footer
+			v.lastProgress, v.lastFooter = progress, footer
 			v.lastPublished = now
 			return nil
 		}
@@ -725,7 +837,8 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 	if err := p.replaceSegmentedCard(ctx, h, false); err != nil {
 		return err
 	}
-	v.lastBody, v.lastProgress, v.lastDone, v.lastFooter, v.sentBodyID = v.body, progress, done, footer, v.bodyID
+	v.lastBody, v.lastProgress, v.lastFooter, v.sentBodyID = v.body, progress, footer, v.bodyID
+	v.sent = v.layoutFor(v.body)
 	v.lastPublished = now
 	return nil
 }

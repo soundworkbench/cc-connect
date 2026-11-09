@@ -118,7 +118,7 @@ type replyContext struct {
 type Platform struct {
 	mu                         sync.RWMutex
 	spinnerMu                  sync.Mutex
-	spinnerKey                 string
+	stepIcons                  stepIconKeys
 	spinnerFailed              time.Time
 	spinnerUpload              func(ctx context.Context, data []byte) (string, error) // nil: uploadImageKey
 	platformName               string

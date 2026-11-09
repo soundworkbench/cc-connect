@@ -77,13 +77,13 @@ func TestDotsStandStillWhileTextFlows(t *testing.T) {
 	_ = p.AddPreviewTool(ctx, h, "再跑一步")
 	_ = p.SetPreviewBody(ctx, h, strings.Repeat("字", 40))
 	publishAt(t, p, h, time.Now().Add(4*time.Second))
-	if got := f.countSuffix(progressPath) - base; got != 1 {
-		t.Fatalf("step change updates: %d, want 1", got)
+	if got := f.countSuffix(progressPath) - base; got != 0 {
+		t.Fatalf("step change sent %d element updates, want its one structure update instead", got)
 	}
 
 	// No text for longer than the pause: the dots move again.
 	publishAt(t, p, h, time.Now().Add(11*time.Second))
-	if got := f.countSuffix(progressPath) - base; got != 2 {
+	if got := f.countSuffix(progressPath) - base; got != 1 {
 		t.Fatalf("dots did not resume when text stopped: %d updates", got)
 	}
 }

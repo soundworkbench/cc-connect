@@ -50,7 +50,7 @@ func TestSpinnerRunningRowCarriesCachedIcon(t *testing.T) {
 	if icon["tag"] != "custom_icon" || icon["img_key"] != "img_spin" || el["content"] != "跑检查" || el["tag"] != "markdown" {
 		t.Fatalf("running row: %v", el)
 	}
-	if first := previewElements(parsePreviewJSON(t, f.read()[0].body["data"]))[1].(map[string]any); first["icon"] == nil {
+	if first := previewElements(parsePreviewJSON(t, f.read()[0].body["data"]))[0].(map[string]any); first["icon"] == nil {
 		t.Fatalf("initial card lacks the icon: %v", first)
 	}
 	// A second turn on the same platform reuses the key.
@@ -61,7 +61,7 @@ func TestSpinnerRunningRowCarriesCachedIcon(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(h2.(*feishuPreviewHandle).live.stop)
-	if uploads != 1 || h2.(*feishuPreviewHandle).live.spinnerKey != "img_spin" {
+	if uploads != 3 || h2.(*feishuPreviewHandle).live.spinnerKey != "img_spin" {
 		t.Fatalf("uploads=%d", uploads)
 	}
 }
@@ -142,5 +142,60 @@ func TestSpinnerDoneRowsUseCheckAndCapAtFive(t *testing.T) {
 	}
 	if live := v.liveLine(); live != "步骤 8" {
 		t.Fatalf("running row: %q", live)
+	}
+}
+
+// Every step row puts its text in the same icon slot: finished rows carry the check image,
+// the "N more" line a blank one, the running row the spinner. A finished step costs one card call.
+func TestStepRowsShareIconSlot(t *testing.T) {
+	f, p := newPreviewFixture(t)
+	p.spinnerUpload = func(_ context.Context, data []byte) (string, error) {
+		switch string(data) {
+		case string(spinnerGIF):
+			return "img_spin", nil
+		case string(checkGIF):
+			return "img_check", nil
+		}
+		return "img_blank", nil
+	}
+	cfg := core.DefaultStreamPreviewCfg()
+	cfg.Segmented, cfg.StepList = true, true
+	cfg.PushIntervalMs = 60000
+	handle, err := p.StartSegmentedPreview(context.Background(), replyContext{chatID: "oc"}, cfg, core.NewI18n(core.LangChinese))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ph := handle.(*feishuPreviewHandle)
+	t.Cleanup(ph.live.stop)
+	t0 := ph.live.started
+	for i := 0; i < 8; i++ {
+		before := len(f.read())
+		ph.live.mu.Lock()
+		ph.live.addRow(t0.Add(time.Duration(i)*time.Second), fmt.Sprintf("步骤 %d", i), false)
+		ph.live.mu.Unlock()
+		publishAt(t, p, ph, t0.Add(time.Duration(i)*time.Second))
+		if got := len(f.read()) - before; got > 1 {
+			t.Fatalf("step %d took %d calls, want at most 1", i, got)
+		}
+	}
+	calls := f.read()
+	card := previewElements(parsePreviewJSON(t, calls[len(calls)-1].body["card"].(map[string]any)["data"]))
+	// 7 finished (5 shown + the "2 more" line) and the running row.
+	if len(card) != 7 {
+		t.Fatalf("elements: %v", card)
+	}
+	wantIcon := []string{"img_blank", "img_check", "img_check", "img_check", "img_check", "img_check", "img_spin"}
+	for i, e := range card {
+		el := e.(map[string]any)
+		icon, _ := el["icon"].(map[string]any)
+		if icon["tag"] != "custom_icon" || icon["img_key"] != wantIcon[i] {
+			t.Fatalf("element %d icon: %v", i, el)
+		}
+		if strings.Contains(el["content"].(string), "✓") {
+			t.Fatalf("text check beside an icon: %v", el)
+		}
+	}
+	if card[0].(map[string]any)["content"] != "<font color='grey'>另有 2 步已完成</font>" {
+		t.Fatalf("summary: %v", card[0])
 	}
 }
