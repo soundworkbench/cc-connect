@@ -153,3 +153,6 @@ credentials/
 
 .codex
 cc-connect-new
+
+# Session files written by engine tests that run without a store path
+core/test_ws_*.json
