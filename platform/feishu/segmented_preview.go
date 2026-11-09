@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"context"
+	_ "embed"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +19,17 @@ import (
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 )
 
+//go:embed assets/spinner.gif
+var spinnerGIF []byte
+
+// Frames of the glyph spinner used when the GIF cannot be uploaded.
+var spinnerGlyphs = []string{"◐", "◓", "◑", "◒"}
+
+const (
+	doneRowsShown       = 5
+	spinnerRetryBackoff = 5 * time.Minute
+)
+
 var _ core.SegmentedPreviewer = (*Platform)(nil)
 var _ core.PreviewToolRecorder = (*Platform)(nil)
 
@@ -30,7 +42,12 @@ type segmentedPreview struct {
 	i18n                           *core.I18n
 	started                        time.Time
 	bodyID, sentBodyID, progressID string
+	doneID, lastDone               string
 	body, lastBody, lastProgress   string
+	// spinnerKey is the uploaded spinner image; empty means the glyph spinner,
+	// whose frame is frame.
+	spinnerKey string
+	frame      int
 	steps                          int
 	recent                         []string
 	fallback                       bool
@@ -69,8 +86,6 @@ type stepRow struct {
 	toolOnly   bool   // no step line from the agent; the row is the tool call itself
 	start, end time.Time
 }
-
-const stepRowsShown = 8
 
 func previewElementID() (string, error) {
 	var b [9]byte
@@ -120,7 +135,15 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 	if err != nil {
 		return nil, err
 	}
-	v := &segmentedPreview{stopCh: make(chan struct{}), cfg: cfg, i18n: i18n, started: time.Now(), bodyID: bodyID, sentBodyID: bodyID, progressID: progressID, footerID: footerID}
+	doneID, err := previewElementID()
+	if err != nil {
+		return nil, err
+	}
+	v := &segmentedPreview{stopCh: make(chan struct{}), cfg: cfg, i18n: i18n, started: time.Now(), bodyID: bodyID, sentBodyID: bodyID, progressID: progressID, footerID: footerID, doneID: doneID}
+	if cfg.StepList {
+		v.spinnerKey = p.spinnerImageKey(ctx)
+	}
+	v.lastDone = v.doneLines()
 	v.lastProgress = v.progress(v.started)
 	v.lastFooter = v.footer(v.started)
 	handle, err := p.SendPreviewStart(ctx, rc, v.card(false))
@@ -308,34 +331,75 @@ func secondsBetween(from, to time.Time) int {
 	return 0
 }
 
-// runningDots shows that work is still going on: one to three dots, changing
-// every second. The card shows no timers.
-func runningDots(since, now time.Time) string {
-	return strings.Repeat(".", 1+secondsBetween(since, now)%3)
+// spinnerImageKey uploads the spinner GIF once per platform and caches its key.
+// After a failed upload it returns "" (glyph spinner) and tries again only after a back-off.
+func (p *Platform) spinnerImageKey(ctx context.Context) string {
+	p.spinnerMu.Lock()
+	defer p.spinnerMu.Unlock()
+	if p.spinnerKey != "" {
+		return p.spinnerKey
+	}
+	if !p.spinnerFailed.IsZero() && time.Since(p.spinnerFailed) < spinnerRetryBackoff {
+		return ""
+	}
+	upload := p.spinnerUpload
+	if upload == nil {
+		upload = p.uploadImageKey
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	key, err := upload(ctx, spinnerGIF)
+	if err != nil || key == "" {
+		slog.Warn("feishu: spinner upload failed; using glyph spinner", "error", err)
+		p.spinnerFailed = time.Now()
+		return ""
+	}
+	p.spinnerKey = key
+	return key
 }
 
-// stepList renders the steps, finished ones marked done and the open one running.
-func (v *segmentedPreview) stepList(now time.Time) string {
-	if len(v.rows) == 0 {
-		return strings.TrimRight(v.i18n.T(core.MsgPreviewThinking), "…") + runningDots(v.started, now)
-	}
-	rows := v.rows
-	var lines []string
-	if len(rows) > stepRowsShown {
-		lines = append(lines, fmt.Sprintf("… +%d", len(rows)-stepRowsShown))
-		rows = rows[len(rows)-stepRowsShown:]
-	}
-	for _, r := range rows {
-		if r.end.IsZero() {
-			lines = append(lines, r.text+" "+runningDots(r.start, now))
-			if r.tool != "" {
-				lines = append(lines, "　└ "+r.tool)
-			}
-			continue
+// doneLines renders the finished steps: a green check each, the last few only.
+func (v *segmentedPreview) doneLines() string {
+	var done []string
+	for _, r := range v.rows {
+		if !r.end.IsZero() {
+			done = append(done, r.text)
 		}
-		lines = append(lines, "✔ "+r.text)
+	}
+	var lines []string
+	if len(done) > doneRowsShown {
+		lines = append(lines, fmt.Sprintf("<font color='grey'>另有 %d 步已完成</font>", len(done)-doneRowsShown))
+		done = done[len(done)-doneRowsShown:]
+	}
+	for _, t := range done {
+		lines = append(lines, "<font color='green'>\u2713</font> "+t)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// liveLine renders the open step. With the spinner image the client draws the
+// spinner as the element's icon; otherwise a glyph leads the text.
+func (v *segmentedPreview) liveLine() string {
+	text := strings.TrimRight(v.i18n.T(core.MsgPreviewThinking), "…")
+	tool := ""
+	if n := len(v.rows); n > 0 && v.rows[n-1].end.IsZero() {
+		text, tool = v.rows[n-1].text, v.rows[n-1].tool
+	}
+	if v.spinnerKey == "" {
+		text = spinnerGlyphs[v.frame%len(spinnerGlyphs)] + " " + text
+	}
+	if tool != "" {
+		text += "\n<font color='grey'>\u2514 " + tool + "</font>"
+	}
+	return text
+}
+
+// advanceFrame moves the glyph spinner one frame per second, except while the
+// reply text is growing, so the card calls go to the text.
+func (v *segmentedPreview) advanceFrame(now time.Time) {
+	if v.spinnerKey == "" && !v.textFlowing(now) {
+		v.frame = secondsBetween(v.started, now) % len(spinnerGlyphs)
+	}
 }
 
 func (v *segmentedPreview) footer(now time.Time) string {
@@ -351,7 +415,7 @@ func (v *segmentedPreview) footerElement(content string) map[string]any {
 
 func (v *segmentedPreview) progress(now time.Time) string {
 	if v.cfg.StepList {
-		return v.stepList(now)
+		return v.liveLine()
 	}
 	var lines []string
 	if v.body == "" {
@@ -368,8 +432,14 @@ func (v *segmentedPreview) progressElement(content string) map[string]any {
 	el := map[string]any{"tag": "markdown", "element_id": v.progressID, "content": content}
 	if !v.cfg.StepList {
 		el["text_size"] = "notation"
+	} else if v.spinnerKey != "" {
+		el["icon"] = map[string]any{"tag": "custom_icon", "img_key": v.spinnerKey}
 	}
 	return el
+}
+
+func (v *segmentedPreview) doneElement(content string) map[string]any {
+	return map[string]any{"tag": "markdown", "element_id": v.doneID, "content": content}
 }
 
 func (v *segmentedPreview) card(final bool) string {
@@ -418,7 +488,7 @@ func (v *segmentedPreview) stepCard(config map[string]any, final bool) string {
 			body["text_size"] = "notation"
 		}
 	} else {
-		elements = append(elements, v.progressElement(v.stepList(now)))
+		elements = append(elements, v.doneElement(v.doneLines()), v.progressElement(v.liveLine()))
 	}
 	elements = append(elements, body)
 	b, err := json.Marshal(map[string]any{"schema": "2.0", "config": config, "body": map[string]any{"elements": elements}})
@@ -601,15 +671,6 @@ func (v *segmentedPreview) textFlowing(now time.Time) bool {
 	return !v.lastText.IsZero() && now.Sub(v.lastText) < time.Duration(v.cfg.DotsPauseMs)*time.Millisecond
 }
 
-// stripDots drops the running dots at the end of each line.
-func stripDots(s string) string {
-	lines := strings.Split(s, "\n")
-	for i, l := range lines {
-		lines[i] = strings.TrimRight(l, ".")
-	}
-	return strings.Join(lines, "\n")
-}
-
 func (v *segmentedPreview) fullyShown() bool {
 	return v.cfg.RevealCps <= 0 || v.shown >= len([]rune(v.target))
 }
@@ -626,15 +687,19 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 	if v.fallback && !v.lastPublished.IsZero() && now.Sub(v.lastPublished) < 700*time.Millisecond {
 		return nil
 	}
+	if v.cfg.StepList {
+		v.advanceFrame(now)
+	}
 	progress := v.progress(now)
-	if v.cfg.StepList && progress != v.lastProgress && v.textFlowing(now) && stripDots(progress) == stripDots(v.lastProgress) {
-		progress = v.lastProgress // only the dots moved; the text goes first
+	done := v.lastDone
+	if v.cfg.StepList {
+		done = v.doneLines()
 	}
 	footer := v.lastFooter
 	if v.cfg.StepList {
 		footer = v.footer(now)
 	}
-	if v.body == v.lastBody && progress == v.lastProgress && footer == v.lastFooter && v.bodyID == v.sentBodyID {
+	if v.body == v.lastBody && progress == v.lastProgress && done == v.lastDone && footer == v.lastFooter && v.bodyID == v.sentBodyID {
 		return nil
 	}
 	if !v.fallback {
@@ -642,11 +707,14 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 		if err == nil && progress != v.lastProgress {
 			err = p.replaceSegmentedElement(ctx, h, v.progressID, v.progressElement(progress))
 		}
+		if err == nil && done != v.lastDone {
+			err = p.replaceSegmentedElement(ctx, h, v.doneID, v.doneElement(done))
+		}
 		if err == nil && footer != v.lastFooter {
 			err = p.replaceSegmentedElement(ctx, h, v.footerID, v.footerElement(footer))
 		}
 		if err == nil {
-			v.lastProgress, v.lastFooter = progress, footer
+			v.lastProgress, v.lastDone, v.lastFooter = progress, done, footer
 			v.lastPublished = now
 			return nil
 		}
@@ -657,7 +725,7 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 	if err := p.replaceSegmentedCard(ctx, h, false); err != nil {
 		return err
 	}
-	v.lastBody, v.lastProgress, v.lastFooter, v.sentBodyID = v.body, progress, footer, v.bodyID
+	v.lastBody, v.lastProgress, v.lastDone, v.lastFooter, v.sentBodyID = v.body, progress, done, footer, v.bodyID
 	v.lastPublished = now
 	return nil
 }

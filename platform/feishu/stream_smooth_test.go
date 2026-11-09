@@ -48,8 +48,8 @@ func publishAt(t *testing.T, p *Platform, h *feishuPreviewHandle, now time.Time)
 	}
 }
 
-// While text flows, the running dots stand still, so every card call carries text.
-// Step changes still go out at once, and the dots move again when text stops.
+// While text flows, the glyph spinner stands still, so every card call carries text.
+// Step changes still go out at once, and the glyph moves again when text stops.
 func TestDotsStandStillWhileTextFlows(t *testing.T) {
 	f, p, h := newSmoothPreview(t, nil)
 	ctx := context.Background()
@@ -62,7 +62,7 @@ func TestDotsStandStillWhileTextFlows(t *testing.T) {
 	base := f.countSuffix(progressPath)
 
 	_ = p.SetPreviewBody(ctx, h, "第一段文字")
-	for i := 1; i <= 3; i++ { // dots would change on each of these seconds
+	for i := 1; i <= 3; i++ { // glyph would change on each of these seconds
 		_ = p.SetPreviewBody(ctx, h, strings.Repeat("字", 5+i*5))
 		publishAt(t, p, h, time.Now().Add(time.Duration(i)*500*time.Millisecond))
 	}

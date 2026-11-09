@@ -33,9 +33,9 @@ func TestStepListToolRowsUseToolDescription(t *testing.T) {
 		}
 	}
 	h.live.mu.Lock()
-	got := h.live.stepList(time.Now().Add(3 * time.Second))
+	got := h.live.doneLines() + "\n" + h.live.liveLine()
 	h.live.mu.Unlock()
-	if !strings.Contains(got, "✔ 清理测试对话\n") || !strings.Contains(got, "读取文件 main.go .") || strings.Contains(got, "运行命令") {
+	if !strings.Contains(got, "✓</font> 清理测试对话\n") || !strings.Contains(got, "◐ 读取文件 main.go") || strings.Contains(got, "运行命令") {
 		t.Fatalf("rows:\n%s", got)
 	}
 }
@@ -50,12 +50,12 @@ func TestStepListShowsNoTimers(t *testing.T) {
 	stale := h.live.started.Add(-5 * time.Second)
 	h.live.mu.Lock()
 	defer h.live.mu.Unlock()
-	for name, text := range map[string]string{"list": h.live.stepList(stale), "footer": h.live.footer(stale), "progress": h.live.progress(stale)} {
+	for name, text := range map[string]string{"list": h.live.liveLine(), "footer": h.live.footer(stale), "progress": h.live.progress(stale)} {
 		if strings.ContainsAny(text, "-0123456789秒") {
 			t.Fatalf("%s shows a time: %q", name, text)
 		}
 	}
-	if got := h.live.stepList(stale); got != "跑检查 ." {
+	if got := h.live.liveLine(); got != "◐ 跑检查" {
 		t.Fatalf("running row: %q", got)
 	}
 }

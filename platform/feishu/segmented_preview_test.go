@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -76,6 +77,8 @@ func newPreviewFixture(t *testing.T) (*previewFixture, *Platform) {
 	}))
 	t.Cleanup(srv.Close)
 	p := &Platform{client: lark.NewClient(t.Name(), "fixture", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())), platformName: "feishu", useInteractiveCard: true, progressStyle: "compact", keepPreviewMaxAge: 120 * time.Second, finalReplyOrder: core.FinalReplyRecallFirst}
+	// No real image upload from tests: the glyph spinner is the default here.
+	p.spinnerUpload = func(context.Context, []byte) (string, error) { return "", errors.New("fixture: no upload") }
 	return f, p
 }
 
@@ -572,11 +575,12 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 	start := h.live.started
 
 	initial := previewElements(parsePreviewJSON(t, f.read()[0].body["data"]))
-	if len(initial) != 2 || initial[0].(map[string]any)["content"] != "思考中." {
+	if len(initial) != 3 || initial[1].(map[string]any)["content"] != "◐ 思考中" {
 		t.Fatalf("initial layout: %v", initial)
 	}
-	progressID := initial[0].(map[string]any)["element_id"].(string)
-	bodyID := initial[1].(map[string]any)["element_id"].(string)
+	doneID := initial[0].(map[string]any)["element_id"].(string)
+	progressID := initial[1].(map[string]any)["element_id"].(string)
+	bodyID := initial[2].(map[string]any)["element_id"].(string)
 
 	h.live.mu.Lock()
 	h.live.addRow(start.Add(1*time.Second), "先看第一个文件", false)
@@ -589,21 +593,24 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 	}
 	before := len(f.read())
 	publishFixture(t, p, h, start.Add(8*time.Second))
-	want := "✔ 先看第一个文件\n再看第二个文件 .\n　└ Read b.go"
-	var gotProgress, gotBody string
+	wantDone := "<font color='green'>✓</font> 先看第一个文件"
+	want := "◐ 再看第二个文件\n<font color='grey'>└ Read b.go</font>"
+	var gotProgress, gotBody, gotDone string
 	for _, c := range f.read()[before:] {
 		switch {
+		case strings.HasSuffix(c.path, "/elements/"+doneID):
+			gotDone = parsePreviewJSON(t, c.body["element"])["content"].(string)
 		case strings.HasSuffix(c.path, "/elements/"+progressID):
 			gotProgress = parsePreviewJSON(t, c.body["element"])["content"].(string)
 		case strings.HasSuffix(c.path, "/elements/"+bodyID+"/content"):
 			gotBody = c.body["content"].(string)
 		}
 	}
-	if gotProgress != want || gotBody != "正在写第三段" {
-		t.Fatalf("progress=%q body=%q", gotProgress, gotBody)
+	if gotProgress != want || gotDone != wantDone || gotBody != "正在写第三段" {
+		t.Fatalf("progress=%q done=%q body=%q", gotProgress, gotDone, gotBody)
 	}
 
-	// Time alone only moves the running dots: one list update, no body rewrite.
+	// Time alone only moves the spinner glyph: one list update, no body rewrite.
 	before = len(f.read())
 	publishFixture(t, p, h, start.Add(9*time.Second))
 	for _, c := range f.read()[before:] {
@@ -638,9 +645,12 @@ func TestSegmentedPreview_StepListToolOnlyRowsAndCap(t *testing.T) {
 	if v.toolCalls != 12 || len(v.rows) != 12 {
 		t.Fatalf("tool-only calls should each be a step: %d calls, %d rows", v.toolCalls, len(v.rows))
 	}
-	lines := strings.Split(v.stepList(now.Add(12*time.Second)), "\n")
-	if len(lines) != stepRowsShown+1 || lines[0] != "… +4" || !strings.HasPrefix(lines[len(lines)-1], "读取 11 .") {
+	lines := strings.Split(v.doneLines(), "\n")
+	if len(lines) != doneRowsShown+1 || lines[0] != "<font color='grey'>另有 6 步已完成</font>" || !strings.HasSuffix(lines[len(lines)-1], " 读取 10") {
 		t.Fatalf("capped list: %q", lines)
+	}
+	if live := v.liveLine(); live != "◐ 读取 11" {
+		t.Fatalf("running row: %q", live)
 	}
 	v.addRow(now, "多\n行\n文本", false)
 	if got := v.rows[len(v.rows)-1].text; got != "多 行 文本" {
