@@ -1,43 +1,89 @@
 # soundworkbench/cc-connect
 
-这是 [chenhg5/cc-connect](https://github.com/chenhg5/cc-connect) 的分叉。cc-connect 把 Claude Code、Codex 等编程代理接到飞书等聊天工具上。我们在上游的发布版上加了一组补丁，主要改进飞书里的进度卡、运行中插话、消息排队和定时任务，自己构建单个可执行文件运行。
+A fork of [chenhg5/cc-connect](https://github.com/chenhg5/cc-connect). cc-connect connects coding agents such as Claude Code and Codex to chat apps. This fork runs the upstream release v1.5.0 plus a set of patches, mostly for Feishu/Lark: a streaming progress card, messages that join a running turn, message queues, and scheduled or automated turns. It is built as a single executable and has been in daily use with several long-running agents.
 
-> English: a fork of chenhg5/cc-connect. The `local` branch is an upstream release (v1.5.0) plus our patches, mostly for Feishu progress cards, steering a running turn, message queueing and scheduled turns. For cc-connect itself, read the [upstream README](https://github.com/chenhg5/cc-connect#readme).
+For installation and the features that come from upstream, read the [upstream README](https://github.com/chenhg5/cc-connect#readme).
 
-## 和上游的区别
+## What you see in Feishu/Lark
 
-| 方面 | 改动 |
-|---|---|
-| 进度卡 | 代理没有输出文字时，用中文显示它正在跑的命令和工具。进度按时间只追加、不改写。中途有实质内容时并入最终回复。可选先撤回进度卡再发最终回复，或反过来。Codex 的命令只显示程序名和已知子命令，不显示参数。 |
-| 运行中插话 | 代理正在回答时，新消息（含图片）直接送进当前回合，不必等它结束。送达后在原消息上加表情回执。Claude Code 首条写入有期限，写失败时结束进程，下一条消息用 `--resume` 续上会话并提示重发。Codex 用 `app_server` 后端插话。 |
-| 消息排队 | 排队的消息写到磁盘，重启后恢复。`/stop` 只停当前回合，不丢队列。同一会话排队的几条消息合成一个回合。每条排队消息各自计算单轮最长时长。 |
-| 定时与自动消息 | 定时、转告、助手接口发来的消息不发占位卡和流式预览，结尾是 `NO_REPLY` 时不发任何消息。静音的定时任务只隐藏开始提示，回复和附件照常送达。`timer --at` 必须带时区偏移，回显 UTC+8 时间。 |
-| 飞书 | 私聊里每个话题一个会话（可选）。交互卡片和合并转发的内容读成文字交给代理。 |
-| 用量与档位 | `/usage` 读 Claude Code 的额度改为直接查账号的用量接口；新增 OpenCode（Grok 订阅）的额度窗口。思考档位按各模型官方支持的档位提供。 |
-| 本机助手接口 | 本机 Unix 套接字接口新增 `/assistant/inject`、`/assistant/state`、`/assistant/rotate`：本机程序可以往已有会话投递消息，或带摘要换新会话。 |
-| Codex 后台任务 | 可选：Codex 的后台子代理完成后，自动唤醒父会话处理结果，有轮数和时长上限。 |
-| 关停 | 停止服务前先等正在跑的回合结束。异常退出留下的实例锁可以复用。 |
+With the step-list card turned on (see [Configuration](#configuration)):
 
-附件回传和多项目是上游已有的功能，这个分叉没有改它们的用法。每项改动的细节和配置项见 [soundworkbench/README.md](soundworkbench/README.md)。
+- **Reaction first.** Your message gets an emoji reaction as soon as the bot picks it up, before any card appears.
+- **One progress card per turn.** The card opens with a single row: an animated spinner and "思考中…" ("Thinking…" in English). There are no empty lines above or below it.
+- **Steps.** When the agent writes a short progress sentence ("Reading the config"), it shows in the spinner row. When the agent moves on, the row becomes a finished step with a check icon. Tool calls without a sentence are labelled with what they do (the Bash description, a file name, a page host, a search query). Spinner and check icons share one slot, so all step texts start at the same left edge. The card shows the last five finished steps and one "另有 N 步已完成" line for the rest.
+- **Reply in the body.** Only the reply goes into the card body, below the steps. Progress sentences never appear in the body. The reply is typed out at a steady pace while the agent writes it.
+- **End of turn.** For a short turn, the card settles to the reply only. For a long turn, the card shrinks to one grey "已完成" line and the reply is sent as a new message, so your phone notifies you. Nothing is recalled.
+- **Card width.** All cards use the default card width, not full width, including the settled "已完成" card.
+- **Messages during a turn.** A message you send while the agent is working goes into the running turn instead of waiting for the turn to end. Images and files are included: they are saved in the work directory and the agent gets their paths. The message gets a reaction when it is accepted, and the reaction changes to DONE when the agent has taken it in. A message that cannot be injected at once is queued and retried at the next tool boundary.
+- **Queued messages.** Messages that wait behind a turn are sent to the agent as one turn, in order, each marked with its source and time.
+- **Silent replies.** An agent can answer `NO_REPLY` to say nothing. The marker is never shown, not in the card and not as a message, also when it is repeated (`NO_REPLYNO_REPLY`) or followed by a footer.
+- **Automated turns.** Scheduled prompts, relays from other bots and messages from the local assistant API do not open a progress card. They send one message at the end, or nothing for `NO_REPLY`. A muted scheduled job hides only its start notice; the reply and attachments still arrive.
+- **Decision cards** (opt-in, `[decision] enabled = true`). An agent can send a card with buttons (`cc-connect send --decision card.json`). Your tap, or the default when the deadline passes, comes back to the session as a message.
 
-## 分支
+Other changes: one session per thread in direct chats (optional), interactive cards and merged forwards are read as text, queued messages survive a restart, `/stop` ends only the current turn, usage windows in `/usage`, per-model effort levels, a local assistant API, and Codex background-task wake-up. The full list with config keys and source files is in [soundworkbench/README.md](soundworkbench/README.md).
 
-- `local`：上游发布标签 `v1.5.0` 加我们的提交。可执行文件只从这个分支构建。
-- `main`：跟上游，不放我们的改动。
+## Configuration
 
-## 构建
+The step-list card is off by default. The settings below give the behaviour described above.
 
-```sh
-soundworkbench/build.sh            # 从 local 构建
-soundworkbench/build.sh <提交号>    # 从指定提交构建
+```toml
+[display]
+mode = "quiet"
+thinking_messages = true
+tool_messages = false
+
+[stream_preview]
+enabled = true
+segmented = true          # streaming card (Feishu CardKit)
+step_list = true          # step rows with spinner and check icons
+end_mode = "settle"       # never recall the card; "recall" is the default
+notify_after_ms = 60000   # turns at least this long send the reply as a new message
+reveal_cps = 90           # type the reply at about this many characters per second; 0 = off
+print_strategy = "delay"  # "fast" (default) or "delay"
+
+[[projects]]
+name = "my-project"
+
+[projects.agent]
+type = "claudecode"
+
+[projects.agent.options]
+stream_partial_text = true   # stream Claude text deltas into the card
+
+[[projects.platforms]]
+type = "feishu"
+
+[projects.platforms.options]
+# app_id / app_secret as in upstream
+reaction_emoji = "OnIt"         # reaction on new messages; "none" turns it off
+keep_preview_on_finish = false
+p2p_thread_isolation = true     # optional: one session per thread in direct chats
 ```
 
-脚本先在 Docker 的 Go 镜像里跑改动相关包的测试，不通过就停；通过后编译出一个 Linux 可执行文件，放在 `dist/`。版本号是 `<上游版本>-sw.<序号>`，例如 `v1.5.0-sw.41`。
+Queue batching is on by default and is set in a top-level `[queue_batch]` section. See [soundworkbench/README.md](soundworkbench/README.md#configuration-reference) for all keys and defaults, and `config.example.toml` for comments.
 
-## 升级与回退
+## Branches
 
-升级上游版本时，把 `local` 变基到新的发布标签，变基前给旧的 `local` 打标签留底。回退时，换回上一版可执行文件，或从留底的标签重新构建。步骤见 [soundworkbench/README.md](soundworkbench/README.md)。
+- `local`: the upstream release tag `v1.5.0` plus the fork's commits. Build from this branch.
+- `main`: follows upstream, without the fork's changes.
 
-## 上游
+## Build
 
-cc-connect 的功能、安装和配置，见上游的 [README](https://github.com/chenhg5/cc-connect#readme)（[中文](https://github.com/chenhg5/cc-connect/blob/main/README.zh-CN.md)）。本仓库沿用上游的 MIT 许可证，见 [LICENSE](LICENSE)。
+```sh
+soundworkbench/build.sh            # build local
+soundworkbench/build.sh <commit>   # build a given commit
+```
+
+The script runs the tests of the changed packages in a `golang:1.25` Docker container and stops if they fail. Then it builds one Linux executable into `dist/`, versioned `<upstream version>-sw.<n>`, for example `v1.5.0-sw.73`. Details are in [soundworkbench/README.md](soundworkbench/README.md#build).
+
+## Updating to a new upstream release
+
+Rebase `local` onto the new upstream tag and tag the old `local` first, so you can rebuild it. The steps and the usual conflicts are in [soundworkbench/README.md](soundworkbench/README.md#maintaining-the-local-branch).
+
+## 中文简介
+
+这是 cc-connect 的分叉，在上游 v1.5.0 上加了一组补丁，主要改进飞书：流式进度卡（一行转圈的思考行、打勾的步骤行、正文只放回复、结束时收成回复或一行灰色“已完成”）、回合中发的消息（含图片和文件）直接并入当前回合、排队消息合并成一个回合、`NO_REPLY` 不发消息、定时和自动消息不开进度卡。配置见上面的 Configuration，改动清单和维护步骤见 [soundworkbench/README.md](soundworkbench/README.md)。
+
+## License
+
+MIT, the same as upstream. See [LICENSE](LICENSE). cc-connect is written by its upstream authors at [chenhg5/cc-connect](https://github.com/chenhg5/cc-connect).

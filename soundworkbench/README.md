@@ -1,84 +1,137 @@
-# soundworkbench/cc-connect：改动与维护
+# soundworkbench/cc-connect: changes and maintenance
 
-> English summary: this fork carries our patches on top of the upstream cc-connect release v1.5.0, on the `local` branch. `soundworkbench/build.sh` tests the touched packages and builds one executable, versioned `<upstream version>-sw.<n>`.
+This fork carries its patches on top of the upstream cc-connect release `v1.5.0`, on the `local` branch. `main` follows upstream and has none of these changes. Executables are built only from `local`. To see every commit: `git log v1.5.0..local`.
 
-## 为什么有这个分叉
+The fork exists because several coding agents stay online in Feishu all day. That use needs a quieter progress display, messages that can join a running turn, durable queues, and scheduled turns that do not flood the chat.
 
-我们用 cc-connect 把 Claude Code、Codex 等编程代理接到飞书，几个代理同时长期在线。上游的进度显示、插话、排队和定时任务不够这种用法，所以在上游发布版上加了补丁。补丁放在 `local` 分支：`local` = 上游发布标签 `v1.5.0` + 我们的提交。`main` 跟上游，不放我们的改动。
+## Changes
 
-可执行文件只从 `local` 构建。全部提交见 `git log --first-parent v1.5.0..local`。
+### Streaming progress card (Feishu)
 
-## 改动
+Turned on with `[stream_preview] segmented = true` and `step_list = true`. The card is a Feishu CardKit streaming card (`platform/feishu/segmented_preview.go`, `core/streaming.go`).
 
-### 进度卡
+- The card starts with one row: an animated spinner GIF and "思考中…" ("Thinking…" in English). Elements without content are left out of the card, so there are no blank lines.
+- A short single-line text from the agent (up to 60 characters) is a progress sentence. It shows in the spinner row, never in the body. When the agent starts the next sentence or the step ends, the row becomes a finished step with a check icon.
+- A tool call without a sentence becomes its own step, labelled with the tool's description: the Bash or Agent description, the file base name, the page host, or the search query. The current tool shows in grey under the running row.
+- Finished rows and the running row share one icon slot, so all step texts line up. The card shows the last 5 finished rows and one "另有 N 步已完成" line for older ones. If the icons cannot be uploaded, the card falls back to text glyphs.
+- Longer or multi-line text is the reply and goes to the card body. With `reveal_cps` set, the body is revealed at a steady rate. The event loop never waits on card API calls.
+- End of turn with `end_mode = "settle"`: a turn shorter than `notify_after_ms` finishes in the card, which then holds only the reply. A longer turn collapses the card to one grey "已完成" line and sends the reply as a new message, so the phone notifies. With `end_mode = "recall"` (default) the card is recalled and the reply is sent as a new message; if the recall fails, the card becomes the reply, so the reply never shows twice.
+- All cards use `width_mode = "default"` (fixed default width) instead of full width.
+- `trace_file` writes per-event streaming timings as JSON lines, for tuning.
 
-- 中文进度：代理在调用工具前没有输出文字时，卡片显示中文的工具和命令进度（`agent/claudecode/chinese_progress.go`，`core/tool_progress.go`，`core/shell_progress.go`）。
-- 只追加：进度按时间往下追加，不改写已经显示的行。配置 `progress_history = "append" | "recent"`，`tool_progress_lines`（0 关闭），`keep_progress_card`（回复后是否保留进度卡）。
-- 中途内容并入最终回复：中途有较长的实质文字或 Markdown 表格时，最终回复里保留它们，撤回进度卡不会丢内容。配置 `merge_progress_into_final`、`merge_progress_min_chars`、`merge_progress_tables`（`core/merge_progress.go`）。
-- 最终回复与撤回的顺序：`final_reply_order = "recall_first"`（默认，先撤回进度卡再发回复）或 `"send_first"`（先发回复再撤回）。两种顺序在手机和手表上的通知效果不同。
-- Codex 命令标签：只显示程序名和已知子命令，参数、路径、带口令字样的命令一律只显示“执行命令”（`agent/codex/command_progress.go`）。已知子命令表在 `progressSubcommands`，按需要增减。
+Without `step_list`, `segmented` gives a simpler streaming card: elapsed time, step count and recent steps above the typed reply, settled in place at the end.
 
-### 运行中插话
+### Other preview options
 
-- Claude Code：代理在回答时，新消息直接写进当前回合（`agent/claudecode/steering.go`），图片也可以；大图只传文件路径。送达后在原消息上加表情回执（`core/steering.go`）。
-- 首条写入期限：每个回合的首条输入有期限，默认 60 秒，配置 `first_write_timeout`。超时、管道断开或只写了一半时，判定进程失效并结束整个进程组；下一条消息用 `--resume` 续上会话，并提示用户重发。
-- 首条大消息写得慢时，插话不再等全局锁：插话返回“未接受”，消息进队列，下一回合送达。
-- Codex：在 agent 的 options 里设 `backend = "app_server"`，运行中的消息经 `turn/steer` 并入当前回合。
+- `stream_partial_text = true` (Claude Code agent option) passes `--include-partial-messages` and streams text deltas into the preview. The deltas feed the preview only; the reply is still the final text.
+- `keep_preview_on_finish = true` (Feishu option) turns the preview card into the final reply. An in-place edit does not notify, so this happens only while the card is still the newest message in the chat and the turn ran within `keep_preview_max_secs` (default 120). Otherwise the card is recalled and the reply is sent as a new message.
+- `typing_marker` shows a fixed marker (for example `...`) under a running preview. The final reply carries none.
 
-### 消息排队
+### Reactions
 
-- 排队消息写到磁盘（`core/queue_store.go`），重启后恢复。`/stop` 只停当前回合，队列保留；`/new` 丢弃队列时列出丢了哪几条。见 [docs/queued-messages.md](../docs/queued-messages.md)。
-- 合并排队消息：同一会话排队的多条消息合成一个回合，每条标出来源和时间。顶层配置 `[queue_batch]`：`enabled`（默认开）、`max_messages`（20）、`max_chars`（20000）、`hold_seconds`（60，自动消息最多等这么久再开回合）、`immediate_sources`（哪些来源立即开回合，默认 `["human"]`）。
-- 单轮最长时长 `max_turn_time` 对每条排队消息重新计时。原来连续排队的几轮会累计计时，被误判超时。
+- The reaction on a new message (`reaction_emoji`, default `OnIt`, `"none"` turns it off) is added before the preview card is sent.
+- A message injected into a running turn gets the reaction when it is accepted. When the agent has taken it in, `DONE` is added first and the old reaction is removed after, so the message is never without a reaction.
+- `cc-connect send --react <emoji>` adds a reaction to the message that started the turn.
 
-### 定时与自动消息
+### Messages during a running turn
 
-- 自动消息（定时 timer/cron、角色间转告、本机助手接口、heartbeat、webhook）不发“思考中”占位卡和流式预览，只在结尾发一条。结尾是 `NO_REPLY` 时一条也不发。合并的一批里只要有一条真人消息，就按真人回合处理（`core/queue_batch.go` 的来源判断）。
-- 定时提示带上来源，开始提示带图标（`core/scheduled_prompt.go`，`core/scheduled_start_notice.go`）。
-- 静音的定时任务只隐藏开始提示，代理的回复和附件照常送达，静音不带到下一轮。
-- `timer --at` 的绝对时间必须带时区偏移（`+08:00`、`Z` 等），不确定时用 `--delay`。创建和列表输出另外显示 UTC+8 时间（`core/timer.go` 的 `FormatTimerBeijingTime`）。
+- Claude Code: a message sent while the agent works is written into the current turn (`agent/claudecode/steering.go`, `core/steering.go`). Images and files are saved under the work directory and the injected text carries their paths. Large images are passed by path only.
+- A message that cannot be injected at once stays queued and is retried at each tool boundary, in FIFO order. An injected message is removed from the queue snapshot before it is written, so a restart never replays it.
+- The first write of each turn has a deadline, `first_write_timeout` (default `60s`). On a timeout, broken pipe or short write, the process group is ended; the next message resumes the session with `--resume` and asks the user to send again. While a slow first write holds the input, an injected message is not accepted and goes to the queue instead of waiting.
+- A result the CLI emits for a turn it started on its own (for example a background task notification), before it has replayed our message, does not finish our turn. Such an earlier result is dropped only when it ends silent.
+- Codex: set `backend = "app_server"` in the agent options; messages join the turn through `turn/steer`.
 
-### 飞书
+### Queues
 
-- 私聊话题：`p2p_thread_isolation = true` 时，私聊里每个话题一个会话；普通消息和引用回复仍在原会话。
-- 交互卡片和合并转发：读出卡片里的文字、图片和嵌套的合并转发，交给代理（`platform/feishu/interactive_content.go`）。跨应用卡片的图片飞书不让下载，会写明原因。
+- Queued messages are written to `data_dir/queues/` and restored after a restart (`core/queue_store.go`). `/stop` ends only the current turn and keeps the queue; `/new` discards it and lists what was dropped. See [docs/queued-messages.md](../docs/queued-messages.md).
+- Batching: consecutive queued messages of one session go to the agent as one turn, in order, each part headed with its index, source and `HH:MM` time (Asia/Shanghai). Set in the top-level `[queue_batch]` section.
+- `max_turn_time` is counted again for each queued message.
 
-### 用量与档位
+### Silent replies and automated turns
 
-- `/usage`：Claude Code 改为直接查账号的用量接口，读不到再用终端探测（`agent/claudecode/claude_usage_*.go`）。OpenCode 新增 Grok 订阅的额度窗口，需要在 agent options 里设 `usage_cmd` 指向已登录的 Grok 客户端（`agent/opencode/usage.go`）。
-- 思考档位：Claude Code 和 Codex 按各模型官方支持的档位提供 `/effort` 选项（`effort_models.go`）。
+- `NO_REPLY` as the whole reply sends nothing. The marker is never rendered into a card, also when it repeats (`NO_REPLYNO_REPLY`, a turn that ends twice) or when a footer or context indicator follows it.
+- Automated turns (timer, cron, relay from another bot, local assistant API, heartbeat, webhook) get no placeholder and no preview card. They send the whole reply once at the end, or nothing for `NO_REPLY`. A batch that contains one human message counts as a human turn (`core/queue_batch.go`).
+- Scheduled prompts carry their source, and start notices have icons (`core/scheduled_prompt.go`, `core/scheduled_start_notice.go`).
+- A muted scheduled job hides only its start notice. The reply and attachments are still delivered, and the mute does not carry over to the next turn.
+- `timer --at` requires a timezone offset (`+08:00`, `Z`); use `--delay` otherwise. Creation and list output also show the time in UTC+8.
 
-### 本机助手接口
+### Earlier progress display (quiet mode, no step list)
 
-本机 Unix 套接字接口（`cc-connect send` 用的同一个）新增三个端点（`core/assistant_api.go`）：
+- When the agent writes no text before a tool call, the card shows the tool or command in Chinese (`agent/claudecode/chinese_progress.go`, `core/tool_progress.go`, `core/shell_progress.go`).
+- Progress is appended in time order and never rewritten: `progress_history = "append" | "recent"`, `tool_progress_lines` (0 turns it off), `keep_progress_card`.
+- Long substantive progress text or Markdown tables are kept in the final reply, so recalling the card loses nothing: `merge_progress_into_final`, `merge_progress_min_chars`, `merge_progress_tables` (`core/merge_progress.go`).
+- `final_reply_order = "recall_first"` (default) or `"send_first"`: the two orders notify differently on phones and watches.
+- Codex command labels show only the program and known subcommands (`progressSubcommands` in `agent/codex/command_progress.go`); arguments and paths are never shown.
 
-- `/assistant/inject`：往已有的会话投递一条消息，按来源排队，可标记紧急。
-- `/assistant/state`：读会话状态。
-- `/assistant/rotate`：带一段摘要换新会话。
+### Feishu
 
-请求带 `request_id`，重复请求返回第一次的结果。只能投到已有的绑定，不会新建路由。
+- `p2p_thread_isolation = true`: one session per thread in direct chats. Plain messages and quote replies stay in the existing session.
+- Interactive cards and merged forwards are read as text, images and nested forwards for the agent (`platform/feishu/interactive_content.go`). Images in cards from other apps cannot be downloaded; the text says so.
+- Decision cards (`core/decision.go`, opt-in with `[decision] enabled = true`): `cc-connect send --decision card.json` posts a card with one button per option. The JSON has `question`, `options` (recommended first), `note`, `no_default` and `deadline_minutes`. A tap, or the default when the deadline passes (`default_hours`, 12), is delivered back to the session as a message, and the card is rewritten so it cannot be used again.
 
-### Codex 后台任务唤醒
+### Usage and effort
 
-可选，`app_server` 后端。Codex 的后台子代理完成后，自动开一个回合让父会话处理结果。有轮数和时长上限，真人的 `/stop` 或停止类消息会关掉它。见 [docs/codex-background-wakeup.md](../docs/codex-background-wakeup.md)。
+- `/usage` for Claude Code reads the account usage API first and falls back to the terminal probe (`agent/claudecode/claude_usage_*.go`). OpenCode gets usage windows for a Grok subscription; set `usage_cmd` in the agent options (`agent/opencode/usage.go`).
+- `/effort` offers the levels each model officially supports, for Claude Code and Codex (`effort_models.go`).
+- Claude Code `config_dirs` (agent option): extra Claude config directories that hold transcripts, for launchers that set `CLAUDE_CONFIG_DIR` only on the child. `CLAUDE_CONFIG_DIR` from the project env or the process env is also honoured. Saved sessions are validated and listed across all of them.
 
-### 关停与启动
+### Local assistant API
 
-- 停止服务前先等正在跑的回合结束（`core/shutdown_drain.go`）。
-- 异常退出留下的实例锁文件可以复用（`cmd/cc-connect/instance_lock.go`）。
+The local Unix socket API (the one `cc-connect send` uses) has three more endpoints (`core/assistant_api.go`):
 
-### 其他
+- `/assistant/inject`: deliver a message to an existing session, queued by source, optionally urgent.
+- `/assistant/state`: read the session state.
+- `/assistant/rotate`: start a new session with a handoff summary.
 
-- 定时、心跳、cron 的代码从 `core/engine.go` 拆到 `engine_timer.go`、`engine_heartbeat.go`、`engine_cron.go`。行为不变，但上游改 `engine.go` 的这几块时，变基会冲突。
-- `tests/release_local/` 下的 live 测试默认跳过，只在设了对应环境变量时连真实后端跑。
+Requests carry a `request_id`; a repeated request returns the first result. Only existing bindings are used; no new routes are created.
 
-### 是否提给上游
+### Codex background wake-up
 
-都没有提。哪些适合提给上游，待确认。上游合入同等功能后，在下一次变基时丢掉我们的那个提交。
+Optional, `app_server` backend. When a Codex background sub-agent finishes, a turn is started so the parent session can handle the result. Turns and time are capped; a human `/stop` ends it. See [docs/codex-background-wakeup.md](../docs/codex-background-wakeup.md).
 
-## 维护 local 分支
+### Shutdown and startup
 
-远端约定：`upstream` = chenhg5/cc-connect，`origin` = soundworkbench/cc-connect。
+- On stop, the service waits for running turns to finish (`core/shutdown_drain.go`).
+- An instance lock left by a crash can be reused (`cmd/cc-connect/instance_lock.go`).
+
+### Code layout
+
+- Timer, heartbeat and cron code moved from `core/engine.go` to `engine_timer.go`, `engine_heartbeat.go` and `engine_cron.go`. Behaviour is the same, but upstream changes to those parts of `engine.go` conflict on rebase.
+- Live tests under `tests/release_local/` are skipped unless their environment variables are set.
+
+None of these changes has been offered upstream. When upstream adds an equivalent feature, drop the fork's commit at the next rebase.
+
+## Configuration reference
+
+Keys added by the fork. Defaults in parentheses.
+
+| Section | Key | Meaning |
+|---|---|---|
+| `[stream_preview]` | `segmented` (false) | Feishu CardKit streaming card |
+| | `step_list` (false) | With `segmented`: step rows with spinner and check icons |
+| | `end_mode` (`"recall"`) | `"settle"`: never recall; finish in the card or collapse to "已完成" |
+| | `notify_after_ms` (60000) | Settle mode: turns this long or longer send the reply as a new message |
+| | `reveal_cps` (0) | Reveal the reply at about this many characters per second; 0 = off |
+| | `reveal_catchup_ms` (4000) | Speed the reveal up so a backlog clears within this time |
+| | `drain_max_ms` (8000) | At end of turn, keep revealing the rest for at most this long |
+| | `finish_catchup_ms` (3000) | Longest wait for the card to type out the reply before a recall; negative = off |
+| | `dots_pause_ms` (2000) | Spinner glyph stands still while text grew within this time |
+| | `print_strategy` (`"fast"`) | Client typing: `"fast"` flushes buffered text on new text, `"delay"` finishes typing it first |
+| | `push_interval_ms` (200), `typing_interval_ms` (40), `typing_step` (6) | Card push cadence and client typing speed |
+| | `typing_marker` (off) | Marker under a running preview |
+| | `trace_file` (off) | Streaming timings as JSON lines |
+| `[display]` | `progress_history`, `keep_progress_card`, `tool_progress_lines` | Quiet-mode progress (see above) |
+| `[queue_batch]` | `enabled` (true), `max_messages` (20), `max_chars` (20000), `hold_seconds` (60), `immediate_sources` (`["human"]`) | Queue batching; automation waits up to `hold_seconds` for more messages |
+| `[decision]` | `enabled` (false), `default_hours` (12) | Decision cards |
+| Claude Code options | `stream_partial_text` (false), `first_write_timeout` (`"60s"`), `config_dirs` | See above |
+| Codex options | `backend` (`"exec"`), `background_wakeup`, `background_wakeup_max_turns`, `background_wakeup_timeout_mins` | Steering and background wake-up |
+| Feishu options | `keep_preview_on_finish` (false), `keep_preview_max_secs` (120), `p2p_thread_isolation` (false), `final_reply_order`, `merge_progress_into_final`, `merge_progress_min_chars`, `merge_progress_tables` | See above |
+
+`config.example.toml` has comments for the main keys.
+
+## Maintaining the local branch
+
+Remotes: `upstream` is chenhg5/cc-connect, `origin` is soundworkbench/cc-connect.
 
 ```sh
 git remote add upstream https://github.com/chenhg5/cc-connect.git
@@ -86,27 +139,27 @@ git fetch upstream --tags
 git fetch origin
 ```
 
-### 升级到上游新版本
+### Rebasing onto a new upstream release
 
-例：从 v1.5.0 升到 v1.6.0。
+Example: from v1.5.0 to v1.6.0.
 
 ```sh
-git tag sw/v1.5.0 origin/local              # 留住旧的 local，回退时能重新构建
+git tag sw/v1.5.0 origin/local              # keep the old local so it can be rebuilt
 git push origin sw/v1.5.0
 git switch -C local origin/local
 git rebase --onto v1.6.0 v1.5.0 local
 ```
 
-`local` 里有合并提交。`git rebase` 会把它们拉平成一条线，原来在合并时解决过的冲突（主要在 `core/cuj_test.go`、`core/engine.go`）会在对应的提交上再出现一次。
+`local` contains merge commits. `git rebase` flattens them, so conflicts that were resolved in a merge (mostly in `core/cuj_test.go` and `core/engine.go`) come back once on the commit concerned.
 
-冲突时：
+On a conflict:
 
-1. 按上游新代码改我们的提交，保持行为不变。改完跑相关包的测试（`build.sh` 里的包列表）。
-2. 根目录 `README.md` 冲突时，保留我们的版本（`git checkout --theirs README.md`，变基时 theirs 指我们的提交）。
-3. 上游已经有同等功能时，`git rebase --skip` 丢掉这个提交，并在本文“改动”里删掉它。
-4. 改不动又不能丢时，停在当前版本，不升级。
+1. Adapt the fork's commit to the new upstream code and keep its behaviour. Run the tests of the touched packages (the list in `build.sh`).
+2. If `README.md` conflicts, keep the fork's version: `git checkout --theirs README.md` (during a rebase, "theirs" is the fork's commit).
+3. If upstream already has the same feature, drop the commit with `git rebase --skip` and remove it from this file.
+4. If a commit can neither be adapted nor dropped, stay on the current release.
 
-冲突太多时，可以先把我们的改动压成一个提交再变基，只解决一轮冲突，代价是丢掉逐个提交的历史：
+With many conflicts, squash the fork first and resolve one round, at the cost of the per-commit history:
 
 ```sh
 git switch -C local-squash origin/local
@@ -114,53 +167,52 @@ git reset --soft v1.5.0 && git commit -m "soundworkbench patches on v1.5.0"
 git rebase --onto v1.6.0 v1.5.0 local-squash
 ```
 
-变基后用 `soundworkbench/build.sh` 构建并跑测试，通过后推送：
+Build and test with `soundworkbench/build.sh`, then push:
 
 ```sh
 git push --force-with-lease origin local
 ```
 
-提交信息沿用上游的写法：`<类型>(<模块>): <一句话描述行为>`，正文写问题和做法。
+Commit messages follow upstream: `<type>(<area>): <what the change does>`, with the problem and the approach in the body.
 
-## 构建
+## Build
 
 ```sh
-soundworkbench/build.sh            # 从 local 构建
-soundworkbench/build.sh <提交>     # 从指定提交构建
+soundworkbench/build.sh            # build local
+soundworkbench/build.sh <commit>   # build a given commit
 ```
 
-脚本做三件事：
+The script:
 
-1. 用 `git archive` 取出这个提交的源码，工作树里没提交的改动不进构建。
-2. 在 `golang:1.25` 容器里跑改动相关包的测试：`./agent/claudecode/ ./agent/codex/ ./agent/opencode/ ./core/ ./platform/feishu/ ./config/ ./cmd/cc-connect/`。不过就停，退出码 3。
-3. 用构建标签 `no_web,goolm`、`CGO_ENABLED=0` 编译出一个可执行文件，放在 `dist/`，打印它的 sha256 和版本。
+1. Takes the commit's source with `git archive`, so uncommitted changes are not built.
+2. Runs the tests of the touched packages in a `golang:1.25` container: `./agent/claudecode/ ./agent/codex/ ./agent/opencode/ ./core/ ./platform/feishu/ ./config/ ./cmd/cc-connect/`. On failure it stops with exit code 3.
+3. Builds one executable with tags `no_web,goolm` and `CGO_ENABLED=0` into `dist/`, and prints its sha256 and version.
 
-版本号规则：
-
-| 项 | 写法 | 例 |
+| Item | Format | Example |
 |---|---|---|
-| 程序版本（`cc-connect --version`） | `<上游版本>-sw.<序号>` | `v1.5.0-sw.41` |
-| 文件名 | `cc-connect-<版本>-<系统>-<架构>` | `cc-connect-v1.5.0-sw.41-linux-amd64` |
+| Version (`cc-connect --version`) | `<upstream version>-sw.<n>` | `v1.5.0-sw.73` |
+| File name | `cc-connect-<version>-<os>-<arch>` | `cc-connect-v1.5.0-sw.73-linux-amd64` |
 
-上游版本取 `git describe --tags --match 'v*'`，即 `local` 下面最近的上游标签，所以要先 `git fetch upstream --tags`。序号是从这个标签到所构建提交的提交数，`local` 每加一个提交就变大，变基到新标签后重新计数。程序里另外记录提交号（`--version` 的 commit 一行）。
+The upstream version is `git describe --tags --match 'v*'`, the nearest upstream tag below the commit, so run `git fetch upstream --tags` first. `<n>` is the number of commits from that tag to the built commit. The commit SHA is also recorded (`--version`).
 
-环境变量：`GOOS`、`GOARCH`（默认 linux/amd64），`CPUS`（容器可用的 CPU 数，默认 4），`GO_IMAGE`（默认 `golang:1.25`），`OUT`（输出目录，默认 `dist`），`SKIP_TESTS=1`（只编译，用于重建已测过的版本）。
+Environment: `GOOS`, `GOARCH` (default linux/amd64), `CPUS` (default 4), `GO_IMAGE` (default `golang:1.25`), `OUT` (default `dist`), `SKIP_TESTS=1` (build only, for rebuilding a tested commit).
 
-不带网页管理界面（`no_web`）。需要网页界面时按上游 `Makefile` 先构建 `web/`。
+The web admin UI is not included (`no_web`). To include it, build `web/` first as in the upstream `Makefile`.
 
-## 换版与回退
+## Deploy and roll back
 
-换版：把新的可执行文件放到运行目录，旧文件改名保留，重启服务。验证：
+Deploy: put the new executable in place, keep the old one under another name, restart the service. Check:
 
-- `cc-connect --version` 显示新版本。
-- 在飞书里给每个项目发一条消息，代理正常回复，进度卡正常出现和撤回。
-- `/usage` 能显示额度。
+- `cc-connect --version` shows the new version.
+- Send a message to each project in Feishu: the agent replies and the progress card appears and settles or is recalled.
+- `/usage` shows the usage windows.
 
-回退：换回旧的可执行文件并重启。旧文件已删时，从 `sw/<旧上游版本>` 标签或旧提交重新构建（`SKIP_TESTS=1 soundworkbench/build.sh <提交>`）。
+Roll back: put the old executable back and restart. If it is gone, rebuild from the `sw/<old upstream version>` tag or the old commit (`SKIP_TESTS=1 soundworkbench/build.sh <commit>`).
 
-会话、排队消息和配置都在数据目录里，换可执行文件不动它们。新版本新增的配置项在旧版本里会被忽略。
+Sessions, queued messages and configuration live in the data directory and are not touched by a binary swap. Keys added by a newer version are ignored by an older one.
 
-## 已知问题
+## Known issues
 
-- `timer` 的回显固定按 UTC+8 显示，没有做成配置项。
-- `go build ./...` 在没有构建 `web/dist` 时会失败，这是上游的行为；用 `-tags no_web` 构建，或先构建网页。
+- Timer output, decision deadlines and queue batch headers use UTC+8 (Asia/Shanghai). This is not configurable.
+- `go build ./...` fails when `web/dist` has not been built; this is upstream behaviour. Build with `-tags no_web` or build the web UI first.
+- Engine tests that run without a store path leave `core/test_ws_*.json` files behind; they are ignored by `.gitignore`.

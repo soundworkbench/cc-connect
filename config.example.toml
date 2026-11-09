@@ -265,6 +265,11 @@ level = "info" # debug, info, warn, error
 # push_interval_ms = 200    # CardKit push cadence in segmented mode
 # typing_interval_ms = 40   # Client typing tick in segmented mode
 # typing_step = 6           # Characters per client tick in segmented mode
+# end_mode = "recall"       # With step_list: "settle" never recalls; short turns finish in the card, long ones collapse to "done" and send the reply as a new message
+# notify_after_ms = 60000   # Settle mode: turns at least this long send the reply as a new message
+# reveal_cps = 0            # Reveal the reply at about this many characters per second; 0 = off
+# print_strategy = "fast"   # "fast" flushes buffered text on new text; "delay" finishes typing it first
+# trace_file = ""           # Append per-event streaming timings (JSON lines) to this file
 
 # =============================================================================
 # Instant Reply / 即时确认回复
