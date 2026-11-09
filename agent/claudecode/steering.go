@@ -19,11 +19,19 @@ type claudeInput struct {
 	ack      chan struct{}
 	replayed bool
 	steered  bool
+	content  any  // user message content of a steer, kept for one resend
+	resent   bool // already written a second time under a new UUID
 }
 
 var _ core.AgentSessionSteerer = (*claudeSession)(nil)
 
 const claudeInputTimeout = 3 * time.Second
+
+// steerGrace is how long the CLI may stay silent after a native result that
+// left a steered message unreplayed. The CLI announces the next native turn
+// within milliseconds, so silence this long means the frame was not taken.
+var steerGrace = 20 * time.Second
+
 const claudeFirstWriteTimeout = 60 * time.Second
 
 // claudeInlineImageLimit caps base64 image bytes sent inline in one user
@@ -146,6 +154,7 @@ func (cs *claudeSession) SteerAsync(prompt, messageID string, images []core.Imag
 		}
 		content = parts
 	}
+	input.content = content
 	data, _ := json.Marshal(map[string]any{"type": "user", "uuid": id, "message": map[string]any{"role": "user", "content": content}})
 	data = append(data, '\n')
 	n, err := cs.stdin.Write(data)
@@ -301,4 +310,76 @@ func (cs *claudeSession) writeInputBytes(b []byte, userInput bool) (int, error) 
 		cs.firstWriteDone = true
 	}
 	return n, nil
+}
+
+// armSteerGrace watches a result that left steered input unaccounted for.
+func (cs *claudeSession) armSteerGrace() {
+	cs.inputMu.Lock()
+	defer cs.inputMu.Unlock()
+	if cs.graceTimer == nil {
+		cs.graceDur = steerGrace
+		cs.graceTimer = time.AfterFunc(cs.graceDur, cs.steerGraceExpired)
+	}
+}
+
+// steerGraceExpired runs when a result left a steered message unreplayed. While
+// the CLI is still producing output (a notification turn, a tool) the wait
+// continues. Once it has been silent for the whole window, the message is
+// written once more as a new input so it starts its own turn; if that is not
+// replayed either, the turn ends with an error instead of waiting for the
+// engine's idle kill.
+func (cs *claudeSession) steerGraceExpired() {
+	cs.inputMu.Lock()
+	cs.graceTimer = nil
+	if !cs.alive.Load() {
+		cs.inputMu.Unlock()
+		return
+	}
+	if idle := time.Since(time.Unix(0, cs.lastLine.Load())); idle < cs.graceDur {
+		cs.graceTimer = time.AfterFunc(cs.graceDur-idle, cs.steerGraceExpired)
+		cs.inputMu.Unlock()
+		return
+	}
+	gaveUp := false
+	waiting := false
+	// Collect first: the loop below adds entries to the same map.
+	lost := map[string]*claudeInput{}
+	for id, p := range cs.inputs {
+		if p.steered && !p.replayed {
+			lost[id] = p
+		}
+	}
+	for id, p := range lost {
+		delete(cs.inputs, id)
+		if p.resent {
+			gaveUp = true
+			continue
+		}
+		nid := newInputID()
+		frame := map[string]any{"type": "user", "uuid": nid, "message": map[string]any{"role": "user", "content": p.content}}
+		cs.inputs[nid] = &claudeInput{ack: p.ack, steered: true, content: p.content, resent: true}
+		if err := cs.writeBoundedUser(frame); err != nil {
+			delete(cs.inputs, nid)
+			gaveUp = true
+			continue
+		}
+		slog.Warn("claudeSession: steered input not replayed after result; written again", "session", cs.CurrentSessionID())
+		waiting = true
+	}
+	cs.inputActive = len(cs.inputs) > 0
+	if waiting {
+		cs.graceTimer = time.AfterFunc(cs.graceDur, cs.steerGraceExpired)
+	}
+	cs.inputMu.Unlock()
+	if gaveUp && !waiting {
+		cs.emitSteerLost()
+	}
+}
+
+func (cs *claudeSession) emitSteerLost() {
+	defer func() { _ = recover() }() // events is closed once the process has ended
+	select {
+	case cs.events <- core.Event{Type: core.EventError, Error: errors.New("claude: a message sent during the turn was not picked up; please send it again")}:
+	case <-cs.ctx.Done():
+	}
 }

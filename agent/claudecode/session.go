@@ -84,6 +84,9 @@ type claudeSession struct {
 	inputMu           sync.Mutex
 	inputs            map[string]*claudeInput
 	inputActive       bool
+	graceTimer        *time.Timer   // guarded by inputMu
+	graceDur          time.Duration // guarded by inputMu
+	lastLine          atomic.Int64  // UnixNano of the last stdout line
 	firstWriteTimeout time.Duration
 	firstWriteDone    bool // guarded by stdinMu
 	inputFailure      atomic.Pointer[core.InputWriteError]
@@ -577,6 +580,7 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 		return
 	}
 
+	cs.lastLine.Store(time.Now().UnixNano())
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
 		slog.Debug("claudeSession: non-JSON line", "line", line)
@@ -945,6 +949,9 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	inputPending := false
 	if !isCompaction {
 		inputPending = cs.completeInputs(raw)
+		if inputPending {
+			cs.armSteerGrace()
+		}
 	}
 	if isCompaction {
 		slog.Info("claudeSession: mid-turn compaction event; continuing turn", "subtype", resultSubtype(raw))
