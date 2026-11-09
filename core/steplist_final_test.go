@@ -46,12 +46,20 @@ func (p *stepListPlatform) DeletePreviewMessage(ctx context.Context, id any) err
 	return p.cujSegmentedPlatform.DeletePreviewMessage(ctx, id)
 }
 
-func runStepListEngineTurn(t *testing.T, p *stepListPlatform, events ...Event) {
+func runStepListEngineTurn(t *testing.T, p Platform, events ...Event) {
+	t.Helper()
+	runStepListEngineTurnCfg(t, p, nil, events...)
+}
+
+func runStepListEngineTurnCfg(t *testing.T, p Platform, mod func(*StreamPreviewCfg), events ...Event) {
 	t.Helper()
 	s := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 1)}
 	e := NewEngine("segmented", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
 	cfg := DefaultStreamPreviewCfg()
 	cfg.Segmented, cfg.StepList = true, true
+	if mod != nil {
+		mod(&cfg)
+	}
 	e.SetStreamPreviewCfg(cfg)
 	t.Cleanup(func() { _ = e.Stop() })
 	key := "segmented:user"
@@ -111,5 +119,110 @@ func TestStepListFailedRecallSettlesCardInPlace(t *testing.T) {
 	all := p.stubPlatformEngine.getSent()
 	if len(all) != 1 || all[0] != "answer" {
 		t.Fatalf("want the card settled as the only message, got %q", all)
+	}
+}
+
+// catchUpPlatform records the order of catch-up and recall.
+type catchUpPlatform struct {
+	stepListPlatform
+	order []string
+	final string
+}
+
+func (p *catchUpPlatform) CatchUpPreview(_ context.Context, _ any, final string) {
+	p.mu2.Lock()
+	defer p.mu2.Unlock()
+	p.order = append(p.order, "catchup")
+	p.final = final
+}
+
+func (p *catchUpPlatform) DeletePreviewMessage(ctx context.Context, id any) error {
+	p.mu2.Lock()
+	p.order = append(p.order, "recall")
+	p.mu2.Unlock()
+	return p.stepListPlatform.DeletePreviewMessage(ctx, id)
+}
+
+// With keep_preview_on_finish off, the card catches up to the whole reply, then is
+// recalled, then the reply is sent.
+func TestStepListCatchesUpBeforeRecall(t *testing.T) {
+	p := &catchUpPlatform{stepListPlatform: stepListPlatform{cujSegmentedPlatform: cujSegmentedPlatform{stubPlatformEngine{n: "segmented"}}}}
+	runStepListEngineTurn(t, p,
+		Event{Type: EventToolUse, ToolName: "Bash", ProgressID: "a", Metadata: map[string]any{"public_tool_progress": "运行命令"}},
+		Event{Type: EventTextDelta, Content: "ans"},
+		Event{Type: EventResult, Content: "answer", Done: true},
+	)
+	p.mu2.Lock()
+	defer p.mu2.Unlock()
+	if len(p.order) != 2 || p.order[0] != "catchup" || p.order[1] != "recall" || p.final != "answer" {
+		t.Fatalf("order %v final %q, want catchup then recall with the full reply", p.order, p.final)
+	}
+	if all := p.stubPlatformEngine.getSent(); len(all) != 2 || all[1] != "answer" {
+		t.Fatalf("sent %q", all)
+	}
+}
+
+// settlePlatform records how a turn ends in settle mode.
+type settlePlatform struct {
+	stepListPlatform
+	finished  []string
+	collapsed int
+	delay     time.Duration
+}
+
+func (p *settlePlatform) AddPreviewTool(ctx context.Context, id any, text string) error {
+	time.Sleep(p.delay)
+	return p.stepListPlatform.AddPreviewTool(ctx, id, text)
+}
+
+func (p *settlePlatform) FinishSegmentedPreview(ctx context.Context, id any, text string) error {
+	p.mu2.Lock()
+	p.finished = append(p.finished, text)
+	p.mu2.Unlock()
+	return p.stepListPlatform.FinishSegmentedPreview(ctx, id, text)
+}
+
+func (p *settlePlatform) CollapsePreview(context.Context, any) error {
+	p.mu2.Lock()
+	defer p.mu2.Unlock()
+	p.collapsed++
+	return nil
+}
+
+func settleTurn(t *testing.T, delay time.Duration, notifyAfterMs int) *settlePlatform {
+	p := &settlePlatform{stepListPlatform: stepListPlatform{cujSegmentedPlatform: cujSegmentedPlatform{stubPlatformEngine{n: "segmented"}}}, delay: delay}
+	runStepListEngineTurnCfg(t, p, func(c *StreamPreviewCfg) { c.EndMode, c.NotifyAfterMs = "settle", notifyAfterMs },
+		Event{Type: EventToolUse, ToolName: "Bash", ProgressID: "a", Metadata: map[string]any{"public_tool_progress": "运行命令"}},
+		Event{Type: EventTextDelta, Content: "ans"},
+		Event{Type: EventResult, Content: "answer", Done: true},
+	)
+	return p
+}
+
+// A short turn finishes the reply inside the card: no recall, no second message.
+func TestSettleShortTurnFinishesInCard(t *testing.T) {
+	p := settleTurn(t, 0, 60000)
+	p.mu2.Lock()
+	defer p.mu2.Unlock()
+	if p.recallSeen != 0 || p.collapsed != 0 || len(p.finished) != 1 || p.finished[0] != "answer" {
+		t.Fatalf("recalls %d collapses %d finished %q", p.recallSeen, p.collapsed, p.finished)
+	}
+	if all := p.stubPlatformEngine.getSent(); len(all) != 1 || all[0] != "answer" {
+		t.Fatalf("want the card as the only message, got %q", all)
+	}
+}
+
+// A long turn collapses the card to its steps and sends the reply as a new message
+// (which notifies the reader); the card is never recalled.
+func TestSettleLongTurnCollapsesCardAndSendsNewMessage(t *testing.T) {
+	p := settleTurn(t, 10*time.Millisecond, 1)
+	p.mu2.Lock()
+	defer p.mu2.Unlock()
+	if p.recallSeen != 0 || p.collapsed != 1 || len(p.finished) != 0 {
+		t.Fatalf("recalls %d collapses %d finished %q", p.recallSeen, p.collapsed, p.finished)
+	}
+	all := p.stubPlatformEngine.getSent()
+	if len(all) != 2 || all[1] != "answer" {
+		t.Fatalf("want the card plus one new reply, got %q", all)
 	}
 }

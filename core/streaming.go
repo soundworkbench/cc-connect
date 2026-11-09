@@ -18,6 +18,10 @@ type StreamPreviewCfg struct {
 	RevealCps         int      // paced reveal: base characters per second released to the card (0 = release text as it arrives)
 	RevealCatchupMs   int      // paced reveal: speed up so a backlog clears within this time (capped at the client typing speed); default 4000
 	DrainMaxMs        int      // paced reveal: at the end of a turn, keep pacing the remaining text for at most this long; default 8000
+	EndMode           string   // end of turn with a step list: "settle" (never recall: short turns finish in the card, long ones collapse it and send the reply as a new message) or "recall" (default)
+	NotifyAfterMs     int      // settle mode: turns at least this long send the reply as a new message so the phone notifies; default 60000
+	DotsPauseMs       int      // step list: while text grew within this long, the running dots stand still; default 2000
+	FinishCatchupMs   int      // recall flow: before the card is recalled, wait at most this long for the client to type the rest of the reply (0 = 3000, negative = off)
 	PrintStrategy     string   // client typing strategy: "fast" (flush buffered text when new text arrives) or "delay" (finish typing the buffered text first); default fast
 	Enabled           bool     // global toggle
 	DisabledPlatforms []string // platforms where streaming preview is disabled (e.g. "feishu")
@@ -207,6 +211,18 @@ type SegmentedPreviewer interface {
 // apart from the agent's own step lines (StreamPreviewCfg.StepList).
 type PreviewToolRecorder interface {
 	AddPreviewTool(context.Context, any, string) error
+}
+
+// PreviewCatchUp lets a platform bring a streaming card up to the final reply
+// before the card is recalled and the reply sent as a new message.
+type PreviewCatchUp interface {
+	CatchUpPreview(ctx context.Context, previewHandle any, finalText string)
+}
+
+// PreviewCollapser lets a platform settle a streaming card to a collapsed
+// summary of its steps with no reply text, so the reply can follow as a new message.
+type PreviewCollapser interface {
+	CollapsePreview(ctx context.Context, previewHandle any) error
 }
 
 // PreviewCleaner is an optional interface for platforms that need to clean up
@@ -1020,6 +1036,11 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 	if sp.segmented != nil {
 		footer = ""
 	}
+	if sp.segmented != nil && sp.cfg.StepList && sp.cfg.EndMode == "settle" {
+		if sp.deliverSettled(body, footer, sendFn, failureText) {
+			return true
+		}
+	}
 	pref, hasPref := sp.platform.(PreviewFinishPreference)
 	keep := hasPref && pref.KeepPreviewOnFinish()
 	if sp.segmented != nil && !sp.cfg.StepList {
@@ -1035,6 +1056,7 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 	if sp.segmented != nil && sp.cfg.StepList && !keep && order == FinalReplyRecallFirst {
 		// Recall the card ahead of delivery. If the platform cannot take it down
 		// the card becomes the reply, so the chat never shows the reply twice.
+		sp.catchUpPreview(body)
 		if sp.recallPreview() {
 			return sp.deliverFinalInOrder(body, footer, sendFn, failureText, order)
 		}
@@ -1043,6 +1065,40 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 		}
 	}
 	return sp.deliverFinalInOrder(body, footer, sendFn, failureText, order)
+}
+
+// deliverSettled ends a turn without recalling the card. A short turn finishes the
+// reply inside the card. A long turn collapses the card to its step summary and
+// sends the reply as a new message, which is what notifies the reader. It reports
+// false, leaving the card untouched, when the platform cannot do this.
+func (sp *streamPreview) deliverSettled(body, footer string, sendFn func(Platform, any, string) error, failureText string) bool {
+	sp.mu.Lock()
+	handle, started := sp.previewMsgID, sp.previewStartedAt
+	sp.mu.Unlock()
+	if handle == nil {
+		return false
+	}
+	notifyAfter := time.Duration(sp.cfg.NotifyAfterMs) * time.Millisecond
+	if notifyAfter <= 0 {
+		notifyAfter = time.Minute
+	}
+	if time.Since(started) < notifyAfter {
+		sp.catchUpPreview(SplitMessageCodeFenceAware(body, maxPlatformMessageLen)[0])
+		return sp.settleInPlace(body, footer, sendFn)
+	}
+	c, ok := sp.platform.(PreviewCollapser)
+	if !ok {
+		return false
+	}
+	if err := c.CollapsePreview(sp.ctx, handle); err != nil {
+		slog.Warn("final response: collapse card failed", "error", err)
+		return false
+	}
+	sp.mu.Lock()
+	sp.previewMsgID = nil
+	sp.degraded = true
+	sp.mu.Unlock()
+	return sp.deliverFinalInOrder(body, footer, sendFn, failureText, FinalReplySendFirst)
 }
 
 // settleInPlace turns the preview card into the final reply; the chunks that do
@@ -1075,6 +1131,24 @@ func (sp *streamPreview) settleInPlace(body, footer string, sendFn func(Platform
 		return true
 	}
 	return false
+}
+
+// catchUpPreview lets the card show the whole reply before it is recalled.
+func (sp *streamPreview) catchUpPreview(body string) {
+	c, ok := sp.platform.(PreviewCatchUp)
+	if !ok {
+		return
+	}
+	sp.mu.Lock()
+	handle := sp.previewMsgID
+	sp.mu.Unlock()
+	if handle == nil {
+		return
+	}
+	if sp.transform != nil {
+		body = sp.transform(body)
+	}
+	c.CatchUpPreview(sp.ctx, handle, body)
 }
 
 // recallPreview takes the preview card down and gives up ownership of it. It

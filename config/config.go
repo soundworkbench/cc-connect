@@ -281,6 +281,10 @@ type StreamPreviewConfig struct {
 	RevealCps         int      `toml:"reveal_cps"`                   // paced reveal base chars/s; 0 = off
 	RevealCatchupMs   int      `toml:"reveal_catchup_ms"`            // default 4000
 	DrainMaxMs        int      `toml:"drain_max_ms"`                 // default 8000
+	EndMode           string   `toml:"end_mode"`                     // "settle" (never recall; see notify_after_ms) or "recall" (default)
+	NotifyAfterMs     int      `toml:"notify_after_ms"`              // settle mode: turns this long or longer send the reply as a new message; default 60000
+	DotsPauseMs       int      `toml:"dots_pause_ms"`                // step list dots stand still while text grew within this long; default 2000
+	FinishCatchupMs   int      `toml:"finish_catchup_ms"`            // max wait for the card to type out the reply before it is recalled; default 3000, negative = off
 	PrintStrategy     string   `toml:"print_strategy"`               // "fast" (default) or "delay"
 	Enabled           *bool    `toml:"enabled"`                      // default true
 	DisabledPlatforms []string `toml:"disabled_platforms,omitempty"` // platforms where preview is disabled (e.g. ["feishu"])

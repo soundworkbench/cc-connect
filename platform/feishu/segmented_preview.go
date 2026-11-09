@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"time"
@@ -50,8 +51,16 @@ type segmentedPreview struct {
 	revealAcc  float64
 	lastReveal time.Time
 	draining   bool
-	rows                 []stepRow
-	toolCalls            int
+
+	// lastText is when the visible text last grew. While text is flowing the step
+	// list keeps its dots still, so the card API calls go to the text.
+	lastText time.Time
+	// Model of the client typing queue (characters not yet typed at clientAt), fed by
+	// each text update; the end-of-turn catch-up waits for it to run out.
+	clientBacklog float64
+	clientAt      time.Time
+	rows          []stepRow
+	toolCalls     int
 }
 
 type stepRow struct {
@@ -89,6 +98,12 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 	}
 	if cfg.DrainMaxMs <= 0 {
 		cfg.DrainMaxMs = 8000
+	}
+	if cfg.DotsPauseMs <= 0 {
+		cfg.DotsPauseMs = 2000
+	}
+	if cfg.FinishCatchupMs == 0 {
+		cfg.FinishCatchupMs = 3000
 	}
 	if cfg.PrintStrategy != "delay" {
 		cfg.PrintStrategy = "fast"
@@ -208,6 +223,7 @@ func (v *segmentedPreview) setBody(text string) error {
 		v.bodyID = id
 	}
 	v.body = text
+	v.lastText = time.Now()
 	return nil
 }
 
@@ -393,7 +409,10 @@ func (v *segmentedPreview) stepCard(config map[string]any, final bool) string {
 	if final {
 		v.closeRow(now)
 		if len(v.rows) > 0 {
-			panel := buildRichPanel(v.i18n.Tf(core.MsgPreviewProcess, len(v.rows)), false, []map[string]any{{"tag": "markdown", "content": v.stepList(now)}})
+			if v.body == "" {
+				config["summary"] = map[string]any{"content": v.i18n.Tf(core.MsgPreviewDone, len(v.rows))}
+			}
+			panel := buildRichPanel(v.i18n.Tf(core.MsgPreviewDone, len(v.rows)), false, []map[string]any{{"tag": "markdown", "content": v.stepList(now)}})
 			panel["element_id"] = v.progressID
 			elements = append(elements, panel)
 		}
@@ -420,8 +439,10 @@ func (p *Platform) cardKitMutation(ctx context.Context, h *feishuPreviewHandle, 
 	var resp *larkcore.ApiResp
 	if core.StreamTraceOn() {
 		from := time.Now()
+		reused := false
+		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(i httptrace.GotConnInfo) { reused = i.Reused }})
 		defer func() {
-			core.StreamTrace("api", map[string]any{"m": method, "p": suffix, "ms": float64(time.Since(from).Microseconds()) / 1000, "n": len([]rune(fmt.Sprint(body["content"])))})
+			core.StreamTrace("api", map[string]any{"m": method, "p": suffix, "ms": float64(time.Since(from).Microseconds()) / 1000, "n": len([]rune(fmt.Sprint(body["content"]))), "reused": reused})
 		}()
 	}
 	err := p.withFreshTenantAccessTokenRetry(ctx, "preview element", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
@@ -474,9 +495,11 @@ func (p *Platform) streamSegmentedBody(ctx context.Context, h *feishuPreviewHand
 	if v.body == v.lastBody {
 		return nil
 	}
+	added := len([]rune(v.body)) - len([]rune(v.lastBody))
 	if err := p.cardKitMutation(ctx, h, http.MethodPut, "/elements/"+v.bodyID+"/content", map[string]any{"content": v.body}); err != nil {
 		return err
 	}
+	v.noteClientText(added, time.Now())
 	v.lastBody = v.body
 	return nil
 }
@@ -493,6 +516,19 @@ func (p *Platform) replaceSegmentedCard(ctx context.Context, h *feishuPreviewHan
 		return p.updateCardEntity(ctx, h, card)
 	}
 	return p.patchCardMessage(ctx, h.messageID, card)
+}
+
+// noteClientText updates the model of the client typing queue after a text
+// update of n new characters landed. With print_strategy "fast" the client shows
+// the older buffered text at once, so only the new characters are left to type.
+func (v *segmentedPreview) noteClientText(n int, now time.Time) {
+	if v.cfg.PrintStrategy == "fast" {
+		v.clientBacklog = 0
+	} else if !v.clientAt.IsZero() {
+		v.clientBacklog = max(0, v.clientBacklog-v.typingCps()*now.Sub(v.clientAt).Seconds())
+	}
+	v.clientBacklog += float64(max(n, 0))
+	v.clientAt = now
 }
 
 // typingCps is the speed the client types at, in characters per second.
@@ -556,6 +592,21 @@ func (v *segmentedPreview) reveal(now time.Time) {
 	}
 	v.shown += n
 	v.body = string([]rune(v.target)[:v.shown])
+	v.lastText = now
+}
+
+// textFlowing reports whether visible text grew recently.
+func (v *segmentedPreview) textFlowing(now time.Time) bool {
+	return !v.lastText.IsZero() && now.Sub(v.lastText) < time.Duration(v.cfg.DotsPauseMs)*time.Millisecond
+}
+
+// stripDots drops the running dots at the end of each line.
+func stripDots(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimRight(l, ".")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (v *segmentedPreview) fullyShown() bool {
@@ -575,6 +626,9 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 		return nil
 	}
 	progress := v.progress(now)
+	if v.cfg.StepList && progress != v.lastProgress && v.textFlowing(now) && stripDots(progress) == stripDots(v.lastProgress) {
+		progress = v.lastProgress // only the dots moved; the text goes first
+	}
 	footer := v.lastFooter
 	if v.cfg.StepList {
 		footer = v.footer(now)
@@ -635,6 +689,81 @@ func (v *segmentedPreview) pendDirtyNow() bool {
 	v.pendMu.Lock()
 	defer v.pendMu.Unlock()
 	return v.pendDirty
+}
+
+// CatchUpPreview brings the card up to the final reply before it is recalled:
+// the rest of the text goes out in one update, then the client gets time to type it,
+// up to FinishCatchupMs. It does nothing when the reply does not continue the text
+// on the card, or when the card is already complete and typed.
+func (p *Platform) CatchUpPreview(ctx context.Context, handle any, final string) {
+	h, ok := handle.(*feishuPreviewHandle)
+	if !ok || h.live == nil || h.cardID == "" {
+		return
+	}
+	v := h.live
+	if v.cfg.FinishCatchupMs < 0 {
+		return
+	}
+	if chars := []rune(final); len(chars) > 4000 {
+		final = string(chars[:4000])
+	}
+	v.mu.Lock()
+	if v.stopped || v.fallback || final == "" || !strings.HasPrefix(final, v.body) {
+		v.mu.Unlock()
+		return
+	}
+	v.stopLocked()
+	if final != v.body {
+		v.pendMu.Lock()
+		v.pend, v.pendDirty = "", false
+		v.pendMu.Unlock()
+		v.target, v.body, v.shown = final, final, len([]rune(final))
+		if err := p.streamSegmentedBody(ctx, h); err != nil {
+			slog.Warn("feishu: catch-up update failed", "error", err)
+			v.mu.Unlock()
+			return
+		}
+	}
+	remaining := v.clientBacklog - v.typingCps()*time.Since(v.clientAt).Seconds()
+	wait := time.Duration(remaining / v.typingCps() * float64(time.Second))
+	if limit := time.Duration(v.cfg.FinishCatchupMs) * time.Millisecond; wait > limit {
+		wait = limit
+	}
+	v.mu.Unlock()
+	if core.StreamTraceOn() {
+		core.StreamTrace("catchup", map[string]any{"wait_ms": wait.Milliseconds()})
+	}
+	if wait < 50*time.Millisecond {
+		return
+	}
+	select {
+	case <-time.After(wait):
+	case <-ctx.Done():
+	}
+}
+
+// CollapsePreview settles the card to its step summary, a collapsed "done · N steps"
+// panel, with no reply text. Nothing is recalled; the reply follows as a new message.
+func (p *Platform) CollapsePreview(ctx context.Context, handle any) error {
+	h, ok := handle.(*feishuPreviewHandle)
+	if !ok || h.live == nil {
+		return core.ErrNotSupported
+	}
+	v := h.live
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.stopLocked()
+	v.pendMu.Lock()
+	v.pend, v.pendDirty = "", false
+	v.pendMu.Unlock()
+	v.target, v.shown, v.body = "", 0, ""
+	if len(v.rows) == 0 {
+		v.body = v.i18n.T(core.MsgPreviewDoneBare)
+	}
+	if !v.fallback {
+		p.closeSegmentedStream(ctx, h)
+	}
+	return p.replaceSegmentedCard(ctx, h, true)
 }
 
 func (p *Platform) FinishSegmentedPreview(ctx context.Context, handle any, body string) error {

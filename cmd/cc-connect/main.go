@@ -611,6 +611,12 @@ func main() {
 			spcfg.RevealCps = cfg.StreamPreview.RevealCps
 			spcfg.RevealCatchupMs = cfg.StreamPreview.RevealCatchupMs
 			spcfg.DrainMaxMs = cfg.StreamPreview.DrainMaxMs
+			if m := cfg.StreamPreview.EndMode; m == "settle" || m == "recall" {
+				spcfg.EndMode = m
+			}
+			spcfg.NotifyAfterMs = cfg.StreamPreview.NotifyAfterMs
+			spcfg.DotsPauseMs = cfg.StreamPreview.DotsPauseMs
+			spcfg.FinishCatchupMs = cfg.StreamPreview.FinishCatchupMs
 			if s := cfg.StreamPreview.PrintStrategy; s == "fast" || s == "delay" {
 				spcfg.PrintStrategy = s
 			}
