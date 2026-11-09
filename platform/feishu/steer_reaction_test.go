@@ -48,7 +48,7 @@ func TestSteerReactionReceivedThenDone(t *testing.T) {
 			done(consumed)
 			want := []string{"OnIt", "remove"}
 			if consumed {
-				want = append(want, "DONE")
+				want = []string{"OnIt", "DONE", "remove"}
 			}
 			mu.Lock()
 			defer mu.Unlock()
