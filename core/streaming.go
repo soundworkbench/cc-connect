@@ -15,6 +15,7 @@ type StreamPreviewCfg struct {
 	PushIntervalMs    int      // segmented card push cadence; default 200
 	TypingIntervalMs  int      // client typing tick; default 40
 	TypingStep        int      // characters per client tick; default 6
+	PrintStrategy     string   // client typing strategy: "fast" (flush buffered text when new text arrives) or "delay" (finish typing the buffered text first); default fast
 	Enabled           bool     // global toggle
 	DisabledPlatforms []string // platforms where streaming preview is disabled (e.g. "feishu")
 	IntervalMs        int      // minimum ms between updates (default 1500)

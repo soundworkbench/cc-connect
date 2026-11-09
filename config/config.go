@@ -278,12 +278,14 @@ type StreamPreviewConfig struct {
 	PushIntervalMs    int      `toml:"push_interval_ms"`             // default 200
 	TypingIntervalMs  int      `toml:"typing_interval_ms"`           // default 40
 	TypingStep        int      `toml:"typing_step"`                  // default 6
+	PrintStrategy     string   `toml:"print_strategy"`               // "fast" (default) or "delay"
 	Enabled           *bool    `toml:"enabled"`                      // default true
 	DisabledPlatforms []string `toml:"disabled_platforms,omitempty"` // platforms where preview is disabled (e.g. ["feishu"])
 	IntervalMs        *int     `toml:"interval_ms"`                  // min ms between updates; default 1500
 	MinDeltaChars     *int     `toml:"min_delta_chars"`              // min new chars before update; default 30
 	MaxChars          *int     `toml:"max_chars"`                    // max preview length; default 2000
 	TypingMarker      *string  `toml:"typing_marker"`                // shown under a running preview, e.g. "..."; default off
+	TraceFile         string   `toml:"trace_file"`                   // append per-event streaming timings (JSON lines) to this file; default off
 }
 
 // InstantReplyConfig controls the immediate confirmation reply sent when a message

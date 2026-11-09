@@ -608,8 +608,14 @@ func main() {
 			if cfg.StreamPreview.TypingIntervalMs > 0 {
 				spcfg.TypingIntervalMs = cfg.StreamPreview.TypingIntervalMs
 			}
+			if s := cfg.StreamPreview.PrintStrategy; s == "fast" || s == "delay" {
+				spcfg.PrintStrategy = s
+			}
 			if cfg.StreamPreview.TypingStep > 0 {
 				spcfg.TypingStep = cfg.StreamPreview.TypingStep
+			}
+			if err := core.SetStreamTraceFile(cfg.StreamPreview.TraceFile); err != nil {
+				slog.Warn("stream preview: trace file", "error", err)
 			}
 			if cfg.StreamPreview.Enabled != nil {
 				spcfg.Enabled = *cfg.StreamPreview.Enabled

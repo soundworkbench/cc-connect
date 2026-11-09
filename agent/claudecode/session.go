@@ -656,6 +656,9 @@ func (cs *claudeSession) handleStreamEvent(raw map[string]any) {
 			return
 		}
 		cs.partialBlock.WriteString(text)
+		if core.StreamTraceOn() {
+			core.StreamTrace("up", map[string]any{"n": len([]rune(text)), "total": len([]rune(cs.partialBlock.String()))})
+		}
 		select {
 		case cs.events <- core.Event{Type: core.EventTextDelta, Content: cs.partialBlock.String()}:
 		case <-cs.ctx.Done():

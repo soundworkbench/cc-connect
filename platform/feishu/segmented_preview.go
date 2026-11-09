@@ -72,6 +72,9 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 	if cfg.TypingStep <= 0 {
 		cfg.TypingStep = 6
 	}
+	if cfg.PrintStrategy != "delay" {
+		cfg.PrintStrategy = "fast"
+	}
 	bodyID, err := previewElementID()
 	if err != nil {
 		return nil, err
@@ -148,8 +151,12 @@ func (p *Platform) SetPreviewBody(_ context.Context, handle any, text string) er
 		return core.ErrNotSupported
 	}
 	v := h.live
+	waitFrom := time.Now()
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if core.StreamTraceOn() {
+		core.StreamTrace("body", map[string]any{"n": len([]rune(text)), "wait_ms": float64(time.Since(waitFrom).Microseconds()) / 1000})
+	}
 	if v.stopped {
 		return nil
 	}
@@ -323,7 +330,7 @@ func (v *segmentedPreview) card(final bool) string {
 	if !final && !v.fallback {
 		platformValues := func(n int) map[string]int { return map[string]int{"default": n, "android": n, "ios": n, "pc": n} }
 		config["streaming_mode"] = true
-		config["streaming_config"] = map[string]any{"print_frequency_ms": platformValues(v.cfg.TypingIntervalMs), "print_step": platformValues(v.cfg.TypingStep), "print_strategy": "fast"}
+		config["streaming_config"] = map[string]any{"print_frequency_ms": platformValues(v.cfg.TypingIntervalMs), "print_step": platformValues(v.cfg.TypingStep), "print_strategy": v.cfg.PrintStrategy}
 	}
 	if v.body != "" {
 		config["summary"] = map[string]any{"content": string([]rune(v.body)[:min(len([]rune(v.body)), 120)])}
@@ -380,6 +387,12 @@ func (p *Platform) cardKitMutation(ctx context.Context, h *feishuPreviewHandle, 
 	body["sequence"] = h.sequence
 	path := "/open-apis/cardkit/v1/cards/" + h.cardID + suffix
 	var resp *larkcore.ApiResp
+	if core.StreamTraceOn() {
+		from := time.Now()
+		defer func() {
+			core.StreamTrace("api", map[string]any{"m": method, "p": suffix, "ms": float64(time.Since(from).Microseconds()) / 1000, "n": len([]rune(fmt.Sprint(body["content"])))})
+		}()
+	}
 	err := p.withFreshTenantAccessTokenRetry(ctx, "preview element", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 		var err error
 		if method == http.MethodPatch {
