@@ -273,7 +273,7 @@ func (v *segmentedPreview) stepList(now time.Time) string {
 	}
 	for _, r := range rows {
 		if r.end.IsZero() {
-			lines = append(lines, fmt.Sprintf("**%s** %s", r.text, runningDots(r.start, now)))
+			lines = append(lines, r.text+" "+runningDots(r.start, now))
 			if r.tool != "" {
 				lines = append(lines, "　└ "+r.tool)
 			}
@@ -311,7 +311,11 @@ func (v *segmentedPreview) progress(now time.Time) string {
 }
 
 func (v *segmentedPreview) progressElement(content string) map[string]any {
-	return map[string]any{"tag": "markdown", "element_id": v.progressID, "content": content, "text_size": "notation"}
+	el := map[string]any{"tag": "markdown", "element_id": v.progressID, "content": content}
+	if !v.cfg.StepList {
+		el["text_size"] = "notation"
+	}
+	return el
 }
 
 func (v *segmentedPreview) card(final bool) string {

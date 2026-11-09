@@ -35,7 +35,7 @@ func TestStepListToolRowsUseToolDescription(t *testing.T) {
 	h.live.mu.Lock()
 	got := h.live.stepList(time.Now().Add(3 * time.Second))
 	h.live.mu.Unlock()
-	if !strings.Contains(got, "✔ 清理测试对话\n") || !strings.Contains(got, "**读取文件 main.go** .") || strings.Contains(got, "运行命令") {
+	if !strings.Contains(got, "✔ 清理测试对话\n") || !strings.Contains(got, "读取文件 main.go .") || strings.Contains(got, "运行命令") {
 		t.Fatalf("rows:\n%s", got)
 	}
 }
@@ -55,7 +55,7 @@ func TestStepListShowsNoTimers(t *testing.T) {
 			t.Fatalf("%s shows a time: %q", name, text)
 		}
 	}
-	if got := h.live.stepList(stale); got != "**跑检查** ." {
+	if got := h.live.stepList(stale); got != "跑检查 ." {
 		t.Fatalf("running row: %q", got)
 	}
 }
@@ -77,5 +77,13 @@ func TestStepListFinalCardMarksLastStepDone(t *testing.T) {
 	data := last.body["card"].(map[string]any)["data"].(string)
 	if strings.Contains(data, "⏳") || !strings.Contains(data, "✔ 第二步") {
 		t.Fatalf("last step not marked done: %s", data)
+	}
+}
+
+// The step list uses the same text size as the reply under it.
+func TestStepListUsesNormalTextSize(t *testing.T) {
+	_, _, h := newStepListPreview(t)
+	if _, ok := h.live.progressElement("x")["text_size"]; ok {
+		t.Fatal("step list must not use the small notation size")
 	}
 }

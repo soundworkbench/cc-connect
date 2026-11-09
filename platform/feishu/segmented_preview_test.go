@@ -589,7 +589,7 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 	}
 	before := len(f.read())
 	publishFixture(t, p, h, start.Add(8*time.Second))
-	want := "✔ 先看第一个文件\n**再看第二个文件** .\n　└ Read b.go"
+	want := "✔ 先看第一个文件\n再看第二个文件 .\n　└ Read b.go"
 	var gotProgress, gotBody string
 	for _, c := range f.read()[before:] {
 		switch {
@@ -643,7 +643,7 @@ func TestSegmentedPreview_StepListToolOnlyRowsAndCap(t *testing.T) {
 		t.Fatalf("tool-only calls should each be a step: %d calls, %d rows", v.toolCalls, len(v.rows))
 	}
 	lines := strings.Split(v.stepList(now.Add(12*time.Second)), "\n")
-	if len(lines) != stepRowsShown+1 || lines[0] != "… +4" || !strings.HasPrefix(lines[len(lines)-1], "**读取 11** .") {
+	if len(lines) != stepRowsShown+1 || lines[0] != "… +4" || !strings.HasPrefix(lines[len(lines)-1], "读取 11 .") {
 		t.Fatalf("capped list: %q", lines)
 	}
 	v.addRow(now, "多\n行\n文本", false)
