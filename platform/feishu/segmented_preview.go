@@ -2,8 +2,8 @@ package feishu
 
 import (
 	"context"
-	_ "embed"
 	"crypto/rand"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -46,12 +46,12 @@ type segmentedPreview struct {
 	body, lastBody, lastProgress   string
 	// spinnerKey is the uploaded spinner image; empty means the glyph spinner,
 	// whose frame is frame.
-	spinnerKey string
-	frame      int
-	steps                          int
-	recent                         []string
-	fallback                       bool
-	lastPublished                  time.Time
+	spinnerKey    string
+	frame         int
+	steps         int
+	recent        []string
+	fallback      bool
+	lastPublished time.Time
 
 	// Step-list layout (cfg.StepList): the agent's step lines with done/running
 	// state, the live text under them, and a footer.
