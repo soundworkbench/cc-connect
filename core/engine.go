@@ -15728,12 +15728,14 @@ func stripAgentFooterLines(text string) string {
 // silentReplyRe matches a bare NO_REPLY marker (case-insensitive, optional surrounding whitespace).
 // When the agent emits exactly this as its full response, the platform send is suppressed
 // so the agent stays silent in group chats where a reply would be noise.
-var silentReplyRe = regexp.MustCompile(`(?i)^\s*NO_REPLY\s*$`)
+var silentReplyRe = regexp.MustCompile(`(?i)^\s*(?:NO_REPLY\s*)+$`)
 
-// silentReplyTrailingRe matches a trailing NO_REPLY marker preceded by whitespace or
+// silentReplyTrailingRe matches one or more trailing NO_REPLY markers preceded by whitespace or
 // markdown emphasis (`*`). Lets agents that narrate their reasoning before the marker
 // still suppress the marker from the delivered text (mirroring OpenClaw's stripSilentToken).
-var silentReplyTrailingRe = regexp.MustCompile(`(?i)(?:^|\s+|\*+)NO_REPLY\s*$`)
+// Repeats count too: a turn that ends twice (e.g. a Stop hook asks for a second
+// final message) arrives as "NO_REPLYNO_REPLY".
+var silentReplyTrailingRe = regexp.MustCompile(`(?i)(?:^|\s+|\*+)(?:NO_REPLY\s*)+$`)
 
 // isSilentReply reports whether text is exactly a NO_REPLY marker.
 func isSilentReply(text string) bool {
