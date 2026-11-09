@@ -2493,7 +2493,7 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 		scheduledMute:     msg.scheduledMute,
 		scheduledInputID:  msg.scheduledInputID,
 		modeOverride:      msg.ModeOverride,
-		steerRetry:        e.dataDir == "" && (!e.queueBatch.Enabled || messageSource(msg) == "human") && (!e.queueBatch.Enabled || !msg.individualReply) && !msg.scheduledPrompt && msg.ModeOverride == "" && !state.steerWriteFailed && len(msg.Files) == 0,
+		steerRetry:        (!e.queueBatch.Enabled || messageSource(msg) == "human") && (!e.queueBatch.Enabled || !msg.individualReply) && !msg.scheduledPrompt && msg.ModeOverride == "" && !state.steerWriteFailed,
 		messageID:         msg.MessageID,
 		platform:          p,
 		replyCtx:          msg.ReplyCtx,

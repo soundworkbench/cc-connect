@@ -7,6 +7,9 @@ import (
 	"errors"
 	"github.com/chenhg5/cc-connect/core"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
@@ -99,16 +102,13 @@ func TestClaudeSteer_CoalescedResultAcknowledgesWithoutReplay(t *testing.T) {
 		t.Fatal("coalesced result not terminal")
 	}
 }
-func TestClaudeSteer_CompactionAndAttachmentFallback(t *testing.T) {
+func TestClaudeSteer_Compaction(t *testing.T) {
 	cs, ch := steerFixture(t)
 	cs.Send("first", "", nil, nil)
 	a := takeInput(t, ch)
 	cs.handleResult(map[string]any{"subtype": "compact"})
 	if (<-cs.events).Done {
 		t.Fatal("compaction terminal")
-	}
-	if ok, err := cs.Steer("file", "", nil, []core.FileAttachment{{Data: []byte("x")}}); ok || err != nil {
-		t.Fatal("attachment should queue")
 	}
 	finish(cs, a["uuid"])
 	if !(<-cs.events).Done {
@@ -325,5 +325,32 @@ func TestClaudeSteer_PartialImageWriteInvalidatesStream(t *testing.T) {
 	}
 	for frame := range ch {
 		t.Fatalf("unexpected complete frame: %v", frame["type"])
+	}
+}
+
+func TestClaudeSteer_FilesAndLargeImagesInjectPaths(t *testing.T) {
+	cs, ch := steerFixture(t)
+	cs.workDir = t.TempDir()
+	if err := cs.Send("first", "m1", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	takeInput(t, ch)
+	big := make([]byte, claudeInlineImageLimit)
+	receipt, err := cs.SteerAsync("see these", "m2", []core.ImageAttachment{{Data: big, MimeType: "image/png"}}, []core.FileAttachment{{FileName: "a.txt", Data: []byte("hello")}})
+	if err != nil || receipt == nil {
+		t.Fatalf("steer: %v %v", receipt, err)
+	}
+	frame := takeInput(t, ch)
+	text, ok := frame["message"].(map[string]any)["content"].(string)
+	if !ok || len(text) > 4096 {
+		t.Fatalf("expected small text frame, got %T len=%d", frame["message"].(map[string]any)["content"], len(text))
+	}
+	if !strings.Contains(text, "see these") || !strings.Contains(text, filepath.Join(cs.workDir, ".cc-connect", "attachments")) || !strings.Contains(text, "a.txt") {
+		t.Fatalf("frame=%q", text)
+	}
+	for _, f := range regexp.MustCompile(regexp.QuoteMeta(cs.workDir) + `[^ ,)]+`).FindAllString(text, -1) {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatalf("path not on disk: %v", err)
+		}
 	}
 }

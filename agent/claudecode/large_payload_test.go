@@ -65,19 +65,25 @@ func TestWriteBoundedBytes_PartialWriteClosesSession(t *testing.T) {
 	}
 }
 
-func TestSteerAsync_LargeImageFallsBackToQueue(t *testing.T) {
+func TestSteerAsync_LargeImageInjectsPathFrame(t *testing.T) {
 	cs, ch := steerFixture(t)
+	cs.workDir = t.TempDir()
 	if err := cs.Send("first", "m1", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	first := takeInput(t, ch)
 	big := bytes.Repeat([]byte{0xff}, 200<<10)
 	receipt, err := cs.SteerAsync("看图", "m2", []core.ImageAttachment{{MimeType: "image/jpeg", Data: big}}, nil)
-	if receipt != nil || err != nil {
-		t.Fatalf("large image must not be steered inline: receipt=%v err=%v", receipt, err)
+	if receipt == nil || err != nil {
+		t.Fatalf("large image must be injected as a path frame: receipt=%v err=%v", receipt, err)
+	}
+	frame := takeInput(t, ch)
+	text, ok := frame["message"].(map[string]any)["content"].(string)
+	if !ok || !strings.Contains(text, "看图") || !strings.Contains(text, ".cc-connect") || len(text) > 4096 {
+		t.Fatalf("frame=%v", frame)
 	}
 	if !cs.Alive() {
-		t.Fatal("attachment fallback must keep the original stream usable")
+		t.Fatal("stream must stay usable")
 	}
 	finish(cs, first["uuid"])
 }

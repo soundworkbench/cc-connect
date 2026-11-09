@@ -1098,10 +1098,8 @@ func (cs *claudeSession) buildUserInput(prompt string, messageID string, images 
 
 	// Save and encode images
 	for i, img := range images {
-		ext := extFromMime(img.MimeType)
-		fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, ext)
-		fpath := filepath.Join(attachDir, fname)
-		if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
+		fpath, err := saveImageFile(attachDir, i, img)
+		if err != nil {
 			slog.Error("claudeSession: save image failed", "error", err)
 			continue
 		}
@@ -1155,6 +1153,48 @@ func (cs *claudeSession) buildUserInput(prompt string, messageID string, images 
 		"type":    "user",
 		"message": map[string]any{"role": "user", "content": parts},
 	}, nil
+}
+
+// saveImageFile writes one image attachment under attachDir and returns its path.
+func saveImageFile(attachDir string, i int, img core.ImageAttachment) (string, error) {
+	fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixMilli(), i, extFromMime(img.MimeType))
+	fpath := filepath.Join(attachDir, fname)
+	if err := os.WriteFile(fpath, img.Data, 0o644); err != nil {
+		return "", err
+	}
+	return fpath, nil
+}
+
+// attachmentTextFrame saves images and files to disk and returns the user text
+// followed by the saved paths, so a steered message stays a small text frame.
+func (cs *claudeSession) attachmentTextFrame(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) string {
+	attachDir := filepath.Join(cs.workDir, ".cc-connect", "attachments")
+	if err := os.MkdirAll(attachDir, 0o755); err != nil {
+		slog.Warn("claudeSession: mkdir attachments failed", "error", err, "path", attachDir)
+	}
+	var imgPaths []string
+	for i, img := range images {
+		fpath, err := saveImageFile(attachDir, i, img)
+		if err != nil {
+			slog.Error("claudeSession: save image failed", "error", err)
+			continue
+		}
+		imgPaths = append(imgPaths, fpath)
+	}
+	filePaths := core.SaveFilesToDisk(cs.workDir, messageID, files)
+	text := prompt
+	if text == "" && len(filePaths) > 0 {
+		text = "Please analyze the attached file(s)."
+	} else if text == "" {
+		text = "Please analyze the attached image(s)."
+	}
+	if len(imgPaths) > 0 {
+		text += "\n\n(Images saved locally, please read them with the Read tool: " + strings.Join(imgPaths, ", ") + ")"
+	}
+	if len(filePaths) > 0 {
+		text += "\n\n(Files saved locally, please read them: " + strings.Join(filePaths, ", ") + ")"
+	}
+	return text
 }
 
 func extFromMime(mime string) string {

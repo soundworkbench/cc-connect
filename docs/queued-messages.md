@@ -17,7 +17,7 @@ immediate_sources = ["human"]
 
 `enabled = false` preserves individual queued sends and disables the idle window. `hold_seconds = 0` disables the idle window while retaining queue batching. Both limits must be positive. `hold_seconds` must fit a non-negative Go duration.
 
-At dequeue, consecutive compatible messages share one `AgentSession.Send`. They keep FIFO order, all images, and all files. Each part starts with a localized message index, source label, and `HH:MM` time. Source labels include the scheduler occurrence ID or platform and sender when available. Time uses the platform creation timestamp when set, otherwise the local admission time. Old snapshots without either timestamp use `?`.
+At dequeue, consecutive compatible messages share one `AgentSession.Send`. They keep FIFO order, all images, and all files. Each part starts with a localized message index, source label, and `HH:MM` time. Source labels include the scheduler occurrence ID or platform and sender when available. Time is shown in Beijing time (Asia/Shanghai; local time if the zone database is unavailable) and uses the platform creation timestamp when set, otherwise the admission time. Old snapshots without either timestamp use `?`.
 
 `max_chars` counts Unicode characters in the combined content, including markers and separators. A batch stops before the next part would exceed either limit. Remaining parts stay in the durable FIFO. A single oversized input is sent unchanged to avoid truncation or starvation. Slash commands, shell commands, permission callbacks, preflight inputs, and messages with `ModeOverride` form individual boundaries. They are never moved past another queued input. Recognized commands still use the existing command path, including `/stop` interruption.
 
@@ -62,7 +62,7 @@ The local `/assistant/inject` API uses the same durable FIFO. Waiting assistant 
 
 Acceptance callbacks run after admission and queue locks are released. A callback can synchronously submit another message or `/stop`, including before the first agent process starts.
 
-Active-turn steering remains available for agents that accept supplements. Once an input joins a durable queue, it waits for a queued turn rather than being promoted to a supplement. Consecutive compatible inputs can share that turn. Without `data_dir`, queues retain their in-memory storage behavior while `/stop` still preserves them.
+Active-turn steering remains available for agents that accept supplements. Human inputs that cannot be injected at admission stay queued and are retried in FIFO order at each tool boundary, with or without `data_dir`; an injected input is removed from the snapshot before it is written to the agent, so a restart never replays it. Images and files are saved under the work directory and the injected text carries their paths. Consecutive compatible inputs that stay queued can share one turn. Without `data_dir`, queues retain their in-memory storage behavior while `/stop` still preserves them.
 
 ## Verification
 

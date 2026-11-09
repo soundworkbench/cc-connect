@@ -177,6 +177,14 @@ func batchable(q queuedMessage) bool {
 	return q.modeOverride == "" && !q.separateReply && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "!") && q.platform != nil
 }
 
+// batchStampLocation is Beijing time; Local when the zone database is missing.
+var batchStampLocation = func() *time.Location {
+	if loc, err := time.LoadLocation("Asia/Shanghai"); err == nil {
+		return loc
+	}
+	return time.Local
+}()
+
 func (e *Engine) batchContent(messages []queuedMessage) string {
 	var b strings.Builder
 	for i, q := range messages {
@@ -205,7 +213,7 @@ func (e *Engine) batchContent(messages []queuedMessage) string {
 		}
 		stamp := "?"
 		if !at.IsZero() {
-			stamp = at.Local().Format("15:04")
+			stamp = at.In(batchStampLocation).Format("15:04")
 		}
 		b.WriteString(e.i18n.Tf(MsgQueueBatchMarker, i+1, len(messages), strings.Join(strings.Fields(label), " "), stamp))
 		b.WriteByte('\n')

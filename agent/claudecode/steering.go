@@ -61,8 +61,8 @@ func (cs *claudeSession) Send(prompt, messageID string, images []core.ImageAttac
 	return err
 }
 
-// Steer admits text and inline images without attachment disk writes. Files
-// retain the queued path. Stop/permission
+// Steer admits text and inline images; files and large images are saved to
+// disk and injected as a text frame with their paths. Stop/permission
 // handling remains owned by Engine. No interrupt or auto-resend is performed.
 func (cs *claudeSession) Steer(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (bool, error) {
 	receipt, err := cs.SteerAsync(prompt, messageID, images, files)
@@ -82,9 +82,6 @@ func (cs *claudeSession) Steer(prompt, messageID string, images []core.ImageAtta
 // Only the write has a deadline. A tool can run much longer than three seconds.
 // Claude queues complete stdin frames itself, including across native results.
 func (cs *claudeSession) SteerAsync(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (*core.SteerReceipt, error) {
-	if len(files) > 0 {
-		return nil, nil
-	}
 	// 2026-10-09: inline base64 screenshots overflowed the pipe within the 3s
 	// steer deadline and left a partial frame. Large images take the queued
 	// path, where buildUserInput keeps them on disk and passes the path.
@@ -92,9 +89,7 @@ func (cs *claudeSession) SteerAsync(prompt, messageID string, images []core.Imag
 	for _, img := range images {
 		encoded += base64.StdEncoding.EncodedLen(len(img.Data))
 	}
-	if encoded > claudeInlineImageLimit {
-		return nil, nil
-	}
+	onDisk := len(files) > 0 || encoded > claudeInlineImageLimit
 	// Send can hold inputMu for the entire first-write timeout. Engine calls
 	// steering while holding lifecycle locks, so busy input must take the queue.
 	if !cs.inputMu.TryLock() {
@@ -109,6 +104,11 @@ func (cs *claudeSession) SteerAsync(prompt, messageID string, images []core.Imag
 	if !ok {
 		cs.inputMu.Unlock()
 		return nil, nil
+	}
+	// Files and large images go to disk; only their paths travel over stdin.
+	if onDisk {
+		prompt = cs.attachmentTextFrame(prompt, messageID, images, files)
+		images = nil
 	}
 	deadline := time.Now().Add(claudeInputTimeout)
 	for !cs.stdinMu.TryLock() {
@@ -163,6 +163,7 @@ func (cs *claudeSession) SteerAsync(prompt, messageID string, images []core.Imag
 	}
 	cs.stdinMu.Unlock()
 	cs.inputMu.Unlock()
+	slog.Info("steered message into running turn", "session", cs.CurrentSessionID(), "size", len(data))
 	return &core.SteerReceipt{Ack: input.ack, End: cs.done}, nil
 }
 
