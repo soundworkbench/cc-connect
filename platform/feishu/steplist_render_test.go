@@ -35,14 +35,14 @@ func TestStepListToolRowsUseToolDescription(t *testing.T) {
 	h.live.mu.Lock()
 	got := h.live.stepList(time.Now().Add(3 * time.Second))
 	h.live.mu.Unlock()
-	if !strings.Contains(got, "✔ 清理测试对话 · ") || !strings.Contains(got, "⏳ **读取文件 main.go**") || strings.Contains(got, "运行命令") {
+	if !strings.Contains(got, "✔ 清理测试对话\n") || !strings.Contains(got, "**读取文件 main.go** .") || strings.Contains(got, "运行命令") {
 		t.Fatalf("rows:\n%s", got)
 	}
 }
 
-// A clock sample older than the step it renders (a queued ticker value) must
-// not show a negative time anywhere on the card.
-func TestStepListNeverShowsNegativeTime(t *testing.T) {
+// The card shows no timers: a clock sample older than the step (a queued
+// ticker value) still renders the running dots and no numbers.
+func TestStepListShowsNoTimers(t *testing.T) {
 	_, p, h := newStepListPreview(t)
 	if err := p.AddPreviewTool(context.Background(), h, "跑检查"); err != nil {
 		t.Fatal(err)
@@ -51,12 +51,12 @@ func TestStepListNeverShowsNegativeTime(t *testing.T) {
 	h.live.mu.Lock()
 	defer h.live.mu.Unlock()
 	for name, text := range map[string]string{"list": h.live.stepList(stale), "footer": h.live.footer(stale), "progress": h.live.progress(stale)} {
-		if strings.Contains(text, "-") {
-			t.Fatalf("%s shows a negative time: %q", name, text)
+		if strings.ContainsAny(text, "-0123456789秒") {
+			t.Fatalf("%s shows a time: %q", name, text)
 		}
 	}
-	if !strings.Contains(h.live.stepList(stale), "· 0s") {
-		t.Fatalf("stale clock should read 0s: %q", h.live.stepList(stale))
+	if got := h.live.stepList(stale); got != "**跑检查** ." {
+		t.Fatalf("running row: %q", got)
 	}
 }
 

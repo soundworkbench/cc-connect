@@ -572,12 +572,11 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 	start := h.live.started
 
 	initial := previewElements(parsePreviewJSON(t, f.read()[0].body["data"]))
-	if len(initial) != 3 || initial[0].(map[string]any)["content"] != "⏳ 思考中 · 0s" || initial[2].(map[string]any)["content"] != "已用 0 秒 · 工具 0 次" {
+	if len(initial) != 2 || initial[0].(map[string]any)["content"] != "思考中." {
 		t.Fatalf("initial layout: %v", initial)
 	}
 	progressID := initial[0].(map[string]any)["element_id"].(string)
 	bodyID := initial[1].(map[string]any)["element_id"].(string)
-	footerID := initial[2].(map[string]any)["element_id"].(string)
 
 	h.live.mu.Lock()
 	h.live.addRow(start.Add(1*time.Second), "先看第一个文件", false)
@@ -590,23 +589,21 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 	}
 	before := len(f.read())
 	publishFixture(t, p, h, start.Add(8*time.Second))
-	want := "✔ 先看第一个文件 · 4s\n⏳ **再看第二个文件** · 3s\n　└ Read b.go"
-	var gotProgress, gotFooter, gotBody string
+	want := "✔ 先看第一个文件\n**再看第二个文件** .\n　└ Read b.go"
+	var gotProgress, gotBody string
 	for _, c := range f.read()[before:] {
 		switch {
 		case strings.HasSuffix(c.path, "/elements/"+progressID):
 			gotProgress = parsePreviewJSON(t, c.body["element"])["content"].(string)
-		case strings.HasSuffix(c.path, "/elements/"+footerID):
-			gotFooter = parsePreviewJSON(t, c.body["element"])["content"].(string)
 		case strings.HasSuffix(c.path, "/elements/"+bodyID+"/content"):
 			gotBody = c.body["content"].(string)
 		}
 	}
-	if gotProgress != want || gotFooter != "已用 8 秒 · 工具 2 次" || gotBody != "正在写第三段" {
-		t.Fatalf("progress=%q footer=%q body=%q", gotProgress, gotFooter, gotBody)
+	if gotProgress != want || gotBody != "正在写第三段" {
+		t.Fatalf("progress=%q body=%q", gotProgress, gotBody)
 	}
 
-	// Elapsed time alone refreshes the list and footer, not the body.
+	// Time alone only moves the running dots: one list update, no body rewrite.
 	before = len(f.read())
 	publishFixture(t, p, h, start.Add(9*time.Second))
 	for _, c := range f.read()[before:] {
@@ -614,8 +611,8 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 			t.Fatalf("heartbeat rewrote body: %s", c.path)
 		}
 	}
-	if len(f.read()) != before+2 {
-		t.Fatalf("want list and footer updates, got %d", len(f.read())-before)
+	if len(f.read()) != before+1 {
+		t.Fatalf("want one list update, got %d", len(f.read())-before)
 	}
 
 	if err := p.FinishSegmentedPreview(ctx, h, "最终回复"); err != nil {
@@ -623,7 +620,7 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 	}
 	calls := f.read()
 	final := previewElements(parsePreviewJSON(t, calls[len(calls)-1].body["card"].(map[string]any)["data"]))
-	if len(final) != 3 || final[0].(map[string]any)["tag"] != "collapsible_panel" || final[1].(map[string]any)["content"] != "最终回复" || final[2].(map[string]any)["element_id"] != footerID {
+	if len(final) != 2 || final[0].(map[string]any)["tag"] != "collapsible_panel" || final[1].(map[string]any)["content"] != "最终回复" || strings.Contains(fmt.Sprint(final), "已用") {
 		t.Fatalf("final layout: %v", final)
 	}
 	panel, _ := json.Marshal(final[0])
@@ -646,7 +643,7 @@ func TestSegmentedPreview_StepListToolOnlyRowsAndCap(t *testing.T) {
 		t.Fatalf("tool-only calls should each be a step: %d calls, %d rows", v.toolCalls, len(v.rows))
 	}
 	lines := strings.Split(v.stepList(now.Add(12*time.Second)), "\n")
-	if len(lines) != stepRowsShown+1 || lines[0] != "… +4" || !strings.HasPrefix(lines[len(lines)-1], "⏳ **读取 11**") {
+	if len(lines) != stepRowsShown+1 || lines[0] != "… +4" || !strings.HasPrefix(lines[len(lines)-1], "**读取 11** .") {
 		t.Fatalf("capped list: %q", lines)
 	}
 	v.addRow(now, "多\n行\n文本", false)

@@ -254,18 +254,16 @@ func secondsBetween(from, to time.Time) int {
 	return 0
 }
 
-func rowSeconds(r stepRow, now time.Time) string {
-	end := r.end
-	if end.IsZero() {
-		end = now
-	}
-	return fmt.Sprintf("%ds", secondsBetween(r.start, end))
+// runningDots shows that work is still going on: one to three dots, changing
+// every second. The card shows no timers.
+func runningDots(since, now time.Time) string {
+	return strings.Repeat(".", 1+secondsBetween(since, now)%3)
 }
 
 // stepList renders the steps, finished ones marked done and the open one running.
 func (v *segmentedPreview) stepList(now time.Time) string {
 	if len(v.rows) == 0 {
-		return "⏳ " + v.i18n.Tf(core.MsgPreviewElapsed, secondsBetween(v.started, now))
+		return strings.TrimRight(v.i18n.T(core.MsgPreviewThinking), "…") + runningDots(v.started, now)
 	}
 	rows := v.rows
 	var lines []string
@@ -275,18 +273,21 @@ func (v *segmentedPreview) stepList(now time.Time) string {
 	}
 	for _, r := range rows {
 		if r.end.IsZero() {
-			lines = append(lines, fmt.Sprintf("⏳ **%s** · %s", r.text, rowSeconds(r, now)))
+			lines = append(lines, fmt.Sprintf("**%s** %s", r.text, runningDots(r.start, now)))
 			if r.tool != "" {
 				lines = append(lines, "　└ "+r.tool)
 			}
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("✔ %s · %s", r.text, rowSeconds(r, now)))
+		lines = append(lines, "✔ "+r.text)
 	}
 	return strings.Join(lines, "\n")
 }
 
 func (v *segmentedPreview) footer(now time.Time) string {
+	if v.cfg.StepList {
+		return ""
+	}
 	return v.i18n.Tf(core.MsgPreviewFooter, secondsBetween(v.started, now), v.toolCalls)
 }
 
@@ -342,8 +343,7 @@ func (v *segmentedPreview) card(final bool) string {
 	return string(b)
 }
 
-// stepCard lays out the step list on top, the text being written under it and
-// the footer last. Once final, the list folds into a collapsed process panel.
+// stepCard lays out the step list on top and the text being written under it. Once final, the list folds into a collapsed process panel.
 func (v *segmentedPreview) stepCard(config map[string]any, final bool) string {
 	now := time.Now()
 	body := map[string]any{"tag": "markdown", "element_id": v.bodyID, "content": v.body}
@@ -358,7 +358,7 @@ func (v *segmentedPreview) stepCard(config map[string]any, final bool) string {
 	} else {
 		elements = append(elements, v.progressElement(v.stepList(now)))
 	}
-	elements = append(elements, body, v.footerElement(v.footer(now)))
+	elements = append(elements, body)
 	b, err := json.Marshal(map[string]any{"schema": "2.0", "config": config, "body": map[string]any{"elements": elements}})
 	if err != nil {
 		slog.Error("feishu: marshal segmented preview", "error", err)
