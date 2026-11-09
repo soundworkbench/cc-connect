@@ -362,6 +362,16 @@ type CardSender interface {
 	ReplyCard(ctx context.Context, replyCtx any, card *Card) error
 }
 
+// CardIDSender sends a card as a new message and returns its message ID.
+type CardIDSender interface {
+	SendCardID(ctx context.Context, replyCtx any, card *Card) (string, error)
+}
+
+// CardPatcher replaces the content of a card message that was sent earlier.
+type CardPatcher interface {
+	PatchCard(ctx context.Context, messageID, sessionKey string, card *Card) error
+}
+
 // CardNavigationHandler is called by platforms to render a card for in-place
 // card updates (e.g. Feishu card.action.trigger callback). The action string
 // uses prefixes like "nav:/model" or "act:/model 3".

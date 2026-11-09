@@ -107,6 +107,7 @@ type Config struct {
 	OutgoingRateLimit  OutgoingRateLimitConfig `toml:"outgoing_rate_limit"` // outgoing message throttling
 	Relay              RelayConfig             `toml:"relay"`               // bot-to-bot relay behavior
 	Cron               CronConfig              `toml:"cron"`
+	Decision           DecisionConfig          `toml:"decision"`
 	QueueBatch         QueueBatchConfig        `toml:"queue_batch"`
 	Queue              QueueConfig             `toml:"queue"`
 	Webhook            WebhookConfig           `toml:"webhook"`
@@ -142,6 +143,12 @@ type Config struct {
 type CronConfig struct {
 	Silent      *bool  `toml:"silent"`       // suppress cron start notification; default false
 	SessionMode string `toml:"session_mode"` // default session mode: "" or "reuse" (default) or "new_per_run"
+}
+
+// DecisionConfig controls decision cards (cc-connect send --decision).
+type DecisionConfig struct {
+	Enabled      *bool `toml:"enabled"`       // default false
+	DefaultHours int   `toml:"default_hours"` // deadline when a card sets none; default 12
 }
 
 // QueueBatchConfig controls consecutive sends and idle automation waiting.

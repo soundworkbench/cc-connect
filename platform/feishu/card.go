@@ -52,6 +52,45 @@ func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core
 	return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
 }
 
+// SendCardID sends a card as a new message to the chat and returns the message
+// ID so the card can be patched later (core.CardIDSender).
+func (p *interactivePlatform) SendCardID(ctx context.Context, rctx any, card *core.Card) (string, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return "", fmt.Errorf("%s: invalid reply context type %T", p.tag(), rctx)
+	}
+	if rc.chatID == "" {
+		return "", fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
+	}
+	return p.createMessageID(ctx, rc.chatID, larkim.MsgTypeInteractive, renderCard(card, rc.sessionKey), "send card")
+}
+
+// PatchCard replaces the content of an already sent card message
+// (core.CardPatcher).
+func (p *interactivePlatform) PatchCard(ctx context.Context, messageID, sessionKey string, card *core.Card) error {
+	if messageID == "" {
+		return fmt.Errorf("%s: empty card messageID", p.tag())
+	}
+	req := larkim.NewPatchMessageReqBuilder().
+		MessageId(messageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().
+			Content(renderCard(card, sessionKey)).
+			Build()).
+		Build()
+	return p.withTransientRetry(ctx, "patch card", func() error {
+		return p.withFreshTenantAccessTokenRetry(ctx, "patch card", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
+			resp, err := client.Im.Message.Patch(ctx, req, options...)
+			if err != nil {
+				return fmt.Errorf("%s: patch card: %w", p.tag(), err)
+			}
+			if !resp.Success() {
+				return fmt.Errorf("%s: patch card code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
+			}
+			return nil
+		})
+	})
+}
+
 // RefreshCard updates a previously rendered card in-place using the Patch API.
 // It looks up the messageID stored from the most recent card action callback
 // for the given session key and patches that message with the new card content.

@@ -1025,6 +1025,17 @@ func main() {
 		}
 	}
 
+	// Decision cards (opt-in)
+	if cfg.Decision.Enabled != nil && *cfg.Decision.Enabled {
+		if decStore, err := core.NewDecisionStore(cfg.DataDir); err != nil {
+			slog.Warn("decision store unavailable", "error", err)
+		} else {
+			for _, e := range engines {
+				e.SetDecisionStore(decStore, cfg.Decision.DefaultHours)
+			}
+		}
+	}
+
 	// Start heartbeat scheduler
 	heartbeatSched := core.NewHeartbeatScheduler(cfg.DataDir)
 	for i, proj := range cfg.Projects {

@@ -19,6 +19,12 @@ import (
 )
 
 func runSend(args []string) {
+	for _, a := range args {
+		if a == "--decision" {
+			runSendDecision(args)
+			return
+		}
+	}
 	req, dataDir, err := parseSendArgs(args)
 	if err != nil {
 		if errors.Is(err, errSendUsage) {
@@ -64,6 +70,80 @@ func runSend(args []string) {
 	}
 
 	fmt.Println("Message sent successfully.")
+}
+
+// runSendDecision posts a decision card described by a JSON file:
+//
+//	cc-connect send --decision card.json
+//
+// The call returns as soon as the card is sent; the answer arrives later as a
+// normal message in the same session.
+func runSendDecision(args []string) {
+	var file, project, sessionKey, dataDir string
+	for i := 0; i < len(args); i++ {
+		next := func() string {
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "Error: %s requires a value\n", args[i])
+				os.Exit(1)
+			}
+			i++
+			return args[i]
+		}
+		switch args[i] {
+		case "--decision":
+			file = next()
+		case "--project", "-p":
+			project = next()
+		case "--session", "-s":
+			sessionKey = next()
+		case "--data-dir":
+			dataDir = next()
+		}
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	var req core.DecisionRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid decision JSON: %v\n", err)
+		os.Exit(1)
+	}
+	if project != "" {
+		req.Project = project
+	} else if req.Project == "" {
+		req.Project = strings.TrimSpace(os.Getenv("CC_PROJECT"))
+	}
+	if sessionKey != "" {
+		req.SessionKey = sessionKey
+	} else if req.SessionKey == "" {
+		req.SessionKey = strings.TrimSpace(os.Getenv("CC_SESSION_KEY"))
+	}
+	payload, _ := json.Marshal(req)
+
+	sockPath := resolveSocketPath(dataDir)
+	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		os.Exit(1)
+	}
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return net.Dial("unix", sockPath)
+		},
+	}}
+	resp, err := client.Post("http://unix/decision", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to connect: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+	fmt.Println("Decision card sent.")
 }
 
 var errSendUsage = errors.New("show send usage")
@@ -373,6 +453,7 @@ func printSendUsage() {
        cc-connect send [options] --video <path>
        cc-connect send [options] --tts <text>
        cc-connect send [options] --react <emoji>
+       cc-connect send [options] --decision <card.json>
        echo "msg" | cc-connect send [options] --stdin
 
 Send a message, attachment, or synthesized voice message to an active cc-connect session.
@@ -383,6 +464,7 @@ Options:
       --work-dir <path>    Alias for --cwd
       --tts <text>         Synthesize text and send it as a voice/audio message
       --react <emoji>      Add an emoji reaction to the message that started this turn (Feishu emoji type, e.g. OK, THUMBSUP, DONE)
+      --decision <file>    Send a decision card (JSON: question, options[recommended first], note, no_default, deadline_minutes); the answer comes back as a message
       --image <path>       Send an image attachment (repeatable)
       --file <path>        Send a file attachment (repeatable)
       --audio <path>       Send an audio attachment (repeatable)

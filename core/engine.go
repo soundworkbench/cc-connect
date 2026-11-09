@@ -347,6 +347,10 @@ type RateLimitCfg struct {
 
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
+	decisions            *DecisionStore
+	decisionDefaultHours int
+	decisionWake         chan struct{}
+	decisionInflight     sync.Map
 	sessionAgentsMu       sync.Mutex
 	sessionAgents         map[sessionAgentKey]sessionAgent
 	name                  string
@@ -11554,6 +11558,10 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 
 	if prefix == "act" && cmd == "/model" {
 		return e.handleModelCardAction(args, sessionKey)
+	}
+
+	if prefix == "act" && cmd == "/decision" {
+		return e.handleDecisionTap(args)
 	}
 
 	if prefix == "act" {
