@@ -105,6 +105,10 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 			if v.stopped || (thinkingOnly && v.body != "" && !v.cfg.StepList) {
 				return
 			}
+			// The tick value can be seconds old when the previous frame was slow
+			// (each frame is several API calls), and the two tickers deliver their
+			// stale values in either order. Render with the clock at publish time.
+			now = time.Now()
 			if err := p.publishSegmented(ctx, h, now); err != nil {
 				slog.Warn("feishu: preview frame failed", "error", err)
 			}
@@ -241,18 +245,27 @@ func (v *segmentedPreview) closeRow(now time.Time) {
 	}
 }
 
+// secondsBetween never goes negative: a clock sample taken before a later
+// event (a queued ticker value, say) reads as zero, not as a negative duration.
+func secondsBetween(from, to time.Time) int {
+	if d := to.Sub(from); d > 0 {
+		return int(d / time.Second)
+	}
+	return 0
+}
+
 func rowSeconds(r stepRow, now time.Time) string {
 	end := r.end
 	if end.IsZero() {
 		end = now
 	}
-	return fmt.Sprintf("%ds", int(end.Sub(r.start)/time.Second))
+	return fmt.Sprintf("%ds", secondsBetween(r.start, end))
 }
 
 // stepList renders the steps, finished ones marked done and the open one running.
 func (v *segmentedPreview) stepList(now time.Time) string {
 	if len(v.rows) == 0 {
-		return "⏳ " + v.i18n.Tf(core.MsgPreviewElapsed, int(now.Sub(v.started)/time.Second))
+		return "⏳ " + v.i18n.Tf(core.MsgPreviewElapsed, secondsBetween(v.started, now))
 	}
 	rows := v.rows
 	var lines []string
@@ -274,7 +287,7 @@ func (v *segmentedPreview) stepList(now time.Time) string {
 }
 
 func (v *segmentedPreview) footer(now time.Time) string {
-	return v.i18n.Tf(core.MsgPreviewFooter, int(now.Sub(v.started)/time.Second), v.toolCalls)
+	return v.i18n.Tf(core.MsgPreviewFooter, secondsBetween(v.started, now), v.toolCalls)
 }
 
 func (v *segmentedPreview) footerElement(content string) map[string]any {
@@ -287,7 +300,7 @@ func (v *segmentedPreview) progress(now time.Time) string {
 	}
 	var lines []string
 	if v.body == "" {
-		lines = append(lines, v.i18n.Tf(core.MsgPreviewElapsed, int(now.Sub(v.started)/time.Second)))
+		lines = append(lines, v.i18n.Tf(core.MsgPreviewElapsed, secondsBetween(v.started, now)))
 	}
 	if v.steps > 0 {
 		lines = append(lines, v.i18n.Tf(core.MsgPreviewSteps, v.steps))

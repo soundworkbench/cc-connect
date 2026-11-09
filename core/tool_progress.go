@@ -66,6 +66,18 @@ func publicToolProgress(event Event) string {
 	return NewI18n(LangChinese).T(key)
 }
 
+// stepToolLabel is the row text for a tool call in the step-list card: the
+// agent's own description of what the call does (event.Metadata["step_label"])
+// when it supplied one, else the generic tool wording.
+func stepToolLabel(event Event, generic string) string {
+	if label, ok := event.Metadata["step_label"].(string); ok {
+		if label = strings.TrimSpace(label); label != "" {
+			return label
+		}
+	}
+	return generic
+}
+
 // replaceToolProgress coalesces bursts at the stream_preview interval. It only
 // edits an existing placeholder; final delivery cancels the owned timer.
 func (sp *streamPreview) replaceToolProgress(text string) {
@@ -184,7 +196,7 @@ func (sp *streamPreview) appendProgressEvent(event Event, text string) {
 	}
 	if sp.segmented != nil {
 		if event.Type == EventToolUse {
-			sp.addToolProgressLocked(text)
+			sp.addToolProgressLocked(stepToolLabel(event, text))
 		} else {
 			sp.replacePreviewLocked(text)
 		}

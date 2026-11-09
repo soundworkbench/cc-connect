@@ -96,3 +96,51 @@ func safeProgressLabel(value string) string {
 	}
 	return value
 }
+
+const stepLabelMaxRunes = 80
+
+// stepToolLabel describes a tool call for the step-list card in the user's own
+// terms: the model's description of a command or subagent, the base name of a
+// file, the host of a page, the search query or pattern. It returns "" when the
+// input offers nothing, and the caller falls back to the generic tool wording.
+// The label stays on one line and is clipped.
+func stepToolLabel(tool string, input any) string {
+	m, _ := input.(map[string]any)
+	zh := core.NewI18n(core.LangChinese)
+	with := func(key core.MsgKey, detail string) string {
+		if detail = oneLineLabel(detail); detail != "" {
+			return zh.T(key) + " " + detail
+		}
+		return ""
+	}
+	switch tool {
+	case "Bash", "Agent", "Task":
+		return oneLineLabel(strVal(m, "description"))
+	case "Read":
+		return with(core.MsgProgressRead, path.Base(strings.ReplaceAll(strVal(m, "file_path"), `\`, "/")))
+	case "Edit", "Write":
+		return with(core.MsgProgressEdit, path.Base(strings.ReplaceAll(strVal(m, "file_path"), `\`, "/")))
+	case "NotebookEdit":
+		return with(core.MsgProgressEdit, path.Base(strings.ReplaceAll(strVal(m, "notebook_path"), `\`, "/")))
+	case "Grep", "Glob":
+		return with(core.MsgProgressSearchFiles, strVal(m, "pattern"))
+	case "WebFetch":
+		if u, err := url.Parse(strVal(m, "url")); err == nil && (u.Scheme == "https" || u.Scheme == "http") {
+			return with(core.MsgProgressFetch, u.Hostname())
+		}
+	case "WebSearch":
+		return with(core.MsgProgressWebSearch, strVal(m, "query"))
+	}
+	return ""
+}
+
+func oneLineLabel(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if text == "." || text == "/" {
+		return ""
+	}
+	if r := []rune(text); len(r) > stepLabelMaxRunes {
+		return string(r[:stepLabelMaxRunes]) + "…"
+	}
+	return text
+}

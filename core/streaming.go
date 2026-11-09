@@ -1021,38 +1021,79 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 	if sp.segmented != nil && !sp.cfg.StepList {
 		keep = true // plain segmented cards always settle in place; step_list follows keep_preview_on_finish
 	}
-	if keep && sp.keepInPlace() {
-		chunks := SplitMessageCodeFenceAware(body, maxPlatformMessageLen)
-		rest := chunks[1:]
-		firstFooter := footer
-		if len(rest) > 0 {
-			firstFooter = ""
-		}
-		if sp.finish(chunks[0], firstFooter) {
-			// 卡片已经是最终回复：交出所有权，回合末尾的 discard 不能再把它当预览撤回。
-			sp.mu.Lock()
-			sp.previewMsgID = nil
-			sp.degraded = true
-			sp.mu.Unlock()
-			for i, chunk := range rest {
-				if i == len(rest)-1 && footer != "" {
-					chunk = appendReplyFooter(chunk, footer)
-				}
-				if err := sendFn(sp.platform, sp.replyCtx, chunk); err != nil {
-					slog.Warn("final response: retrying failed chunk", "error", err, "chunk", i+1)
-					if err := sendFn(sp.platform, sp.replyCtx, chunk); err != nil {
-						slog.Error("final response: chunk retry exhausted", "error", err, "chunk", i+1)
-					}
-				}
-			}
-			return true
-		}
+	if keep && sp.keepInPlace() && sp.settleInPlace(body, footer, sendFn) {
+		return true
 	}
 	order := FinalReplySendFirst
 	if pref, ok := sp.platform.(FinalReplyOrderPreference); ok {
 		order = pref.FinalReplyOrder()
 	}
+	if sp.segmented != nil && sp.cfg.StepList && !keep && order == FinalReplyRecallFirst {
+		// Recall the card ahead of delivery. If the platform cannot take it down
+		// the card becomes the reply, so the chat never shows the reply twice.
+		if sp.recallPreview() {
+			return sp.deliverFinalInOrder(body, footer, sendFn, failureText, order)
+		}
+		if sp.settleInPlace(body, footer, sendFn) {
+			return true
+		}
+	}
 	return sp.deliverFinalInOrder(body, footer, sendFn, failureText, order)
+}
+
+// settleInPlace turns the preview card into the final reply; the chunks that do
+// not fit the card follow as separate messages. It reports false when the card
+// could not take the reply, leaving the caller to deliver it another way.
+func (sp *streamPreview) settleInPlace(body, footer string, sendFn func(Platform, any, string) error) bool {
+	chunks := SplitMessageCodeFenceAware(body, maxPlatformMessageLen)
+	rest := chunks[1:]
+	firstFooter := footer
+	if len(rest) > 0 {
+		firstFooter = ""
+	}
+	if sp.finish(chunks[0], firstFooter) {
+		// 卡片已经是最终回复：交出所有权，回合末尾的 discard 不能再把它当预览撤回。
+		sp.mu.Lock()
+		sp.previewMsgID = nil
+		sp.degraded = true
+		sp.mu.Unlock()
+		for i, chunk := range rest {
+			if i == len(rest)-1 && footer != "" {
+				chunk = appendReplyFooter(chunk, footer)
+			}
+			if err := sendFn(sp.platform, sp.replyCtx, chunk); err != nil {
+				slog.Warn("final response: retrying failed chunk", "error", err, "chunk", i+1)
+				if err := sendFn(sp.platform, sp.replyCtx, chunk); err != nil {
+					slog.Error("final response: chunk retry exhausted", "error", err, "chunk", i+1)
+				}
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// recallPreview takes the preview card down and gives up ownership of it. It
+// reports false, keeping the card, when the platform refuses or cannot.
+func (sp *streamPreview) recallPreview() bool {
+	sp.mu.Lock()
+	handle := sp.previewMsgID
+	sp.mu.Unlock()
+	if handle == nil {
+		return true
+	}
+	cleaner, ok := sp.platform.(PreviewCleaner)
+	if !ok {
+		return false
+	}
+	if err := cleaner.DeletePreviewMessage(sp.ctx, handle); err != nil {
+		slog.Warn("final response: recall failed", "error", err)
+		return false
+	}
+	sp.mu.Lock()
+	sp.previewMsgID = nil
+	sp.mu.Unlock()
+	return true
 }
 
 func (sp *streamPreview) deliverFinalInOrder(body, footer string, sendFn func(Platform, any, string) error, failureText string, order FinalReplyOrder) bool {

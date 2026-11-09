@@ -762,7 +762,11 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 				continue
 			}
 			inputSummary := chineseToolProgress(toolName, item["input"], strVal(item, "title"))
-			evt := core.Event{Type: core.EventToolUse, ProgressID: strVal(item, "id"), ToolName: toolName, ToolInput: inputSummary, Metadata: map[string]any{"public_tool_progress": inputSummary}}
+			meta := map[string]any{"public_tool_progress": inputSummary}
+			if label := stepToolLabel(toolName, item["input"]); label != "" {
+				meta["step_label"] = label
+			}
+			evt := core.Event{Type: core.EventToolUse, ProgressID: strVal(item, "id"), ToolName: toolName, ToolInput: inputSummary, Metadata: meta}
 			select {
 			case cs.events <- evt:
 			case <-cs.ctx.Done():

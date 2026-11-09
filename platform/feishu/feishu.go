@@ -4974,6 +4974,11 @@ func (p *Platform) Stop() error {
 
 // DeletePreviewMessage removes a preview message so the caller can send a
 // separate final message without leaving a stale interactive card behind.
+//
+// A streaming (CardKit) card is taken out of streaming mode first and checked
+// afterwards: a delete that reports success while the card stays visible would
+// otherwise leave the reply twice in the chat, so that case is returned as an
+// error and the caller can settle the card in place instead.
 func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) error {
 	if !p.useInteractiveCard {
 		return core.ErrNotSupported
@@ -4984,13 +4989,17 @@ func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) 
 		return fmt.Errorf("%s: invalid preview handle type %T", p.tag(), previewHandle)
 	}
 
+	streamed := h.live != nil && h.cardID != ""
 	if h.live != nil {
 		h.live.stop()
+	}
+	if streamed {
+		p.closeSegmentedStream(ctx, h)
 	}
 	req := larkim.NewDeleteMessageReqBuilder().
 		MessageId(h.messageID).
 		Build()
-	return p.withTransientRetry(ctx, "delete preview message", func() error {
+	if err := p.withTransientRetry(ctx, "delete preview message", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "delete preview message", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			resp, err := client.Im.Message.Delete(ctx, req, options...)
 			if err != nil {
@@ -5001,7 +5010,21 @@ func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) 
 			}
 			return nil
 		})
-	})
+	}); err != nil {
+		return err
+	}
+	if !streamed {
+		return nil
+	}
+	gone, err := p.IsMessageRecalled(ctx, replyContext{messageID: h.messageID})
+	switch {
+	case err != nil:
+		slog.Warn(p.tag()+": cannot confirm preview recall", "message_id", h.messageID, "error", err)
+	case !gone:
+		return fmt.Errorf("%s: preview message %s still present after delete", p.tag(), h.messageID)
+	}
+	slog.Info(p.tag()+": preview card recalled", "message_id", h.messageID)
+	return nil
 }
 
 // SendAudio uploads audio bytes to Feishu and sends a voice message.

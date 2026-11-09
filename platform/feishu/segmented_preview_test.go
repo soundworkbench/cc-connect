@@ -27,6 +27,9 @@ type previewFixture struct {
 	calls                        []previewCall
 	latest                       string
 	rejectCreate, rejectProgress bool
+	delay                        time.Duration
+	deleted                      map[string]bool
+	ignoreDelete                 bool // report a delete as done while the message stays
 }
 
 func newPreviewFixture(t *testing.T) (*previewFixture, *Platform) {
@@ -47,6 +50,9 @@ func newPreviewFixture(t *testing.T) (*previewFixture, *Platform) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.calls = append(f.calls, c)
+		if f.delay > 0 {
+			time.Sleep(f.delay)
+		}
 		if f.rejectCreate && r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/cards") {
 			fmt.Fprint(w, `{"code":230006,"msg":"fixture create rejection"}`)
 			return
@@ -55,8 +61,15 @@ func newPreviewFixture(t *testing.T) (*previewFixture, *Platform) {
 			fmt.Fprint(w, `{"code":230006,"msg":"fixture progress rejection"}`)
 			return
 		}
+		if r.Method == http.MethodDelete && !f.ignoreDelete {
+			if f.deleted == nil {
+				f.deleted = map[string]bool{}
+			}
+			f.deleted[strings.TrimPrefix(r.URL.Path, "/open-apis/im/v1/messages/")] = true
+		}
 		if r.Method == http.MethodGet {
-			fmt.Fprintf(w, `{"code":0,"data":{"items":[{"message_id":%q}]}}`, f.latest)
+			id := strings.TrimPrefix(r.URL.Path, "/open-apis/im/v1/messages/")
+			fmt.Fprintf(w, `{"code":0,"data":{"items":[{"message_id":%q,"deleted":%t}]}}`, f.latest, f.deleted[id])
 			return
 		}
 		fmt.Fprint(w, `{"code":0,"data":{"card_id":"card_fixture","message_id":"om_preview"}}`)

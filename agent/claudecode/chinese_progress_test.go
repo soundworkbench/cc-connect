@@ -1,8 +1,10 @@
 package claudecode
 
 import (
-	"github.com/chenhg5/cc-connect/core"
+	"strings"
 	"testing"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestChineseProgressFallback(t *testing.T) {
@@ -76,5 +78,57 @@ func TestClaudeEnglishToolProgressRegression(t *testing.T) {
 	}
 	if events[0].Content != "正在检查。" || events[2].Content != "已完成。" || events[3].Content != "已完成。" {
 		t.Fatal("public/final text changed")
+	}
+}
+
+func TestStepToolLabel(t *testing.T) {
+	long := "Delete the twelve leftover test conversations from the previous session and confirm nothing else was touched afterwards"
+	tests := []struct {
+		name, tool string
+		input      any
+		want       string
+	}{
+		{"Bash description", "Bash", map[string]any{"description": "Delete test conversations", "command": "rm -rf /secret"}, "Delete test conversations"},
+		{"Bash Chinese", "Bash", map[string]any{"description": "删除测试对话"}, "删除测试对话"},
+		{"Bash multiline", "Bash", map[string]any{"description": "List files\n  in the dir"}, "List files in the dir"},
+		{"Bash clipped", "Bash", map[string]any{"description": long}, string([]rune(long)[:80]) + "…"},
+		{"Bash no description", "Bash", map[string]any{"command": "ls"}, ""},
+		{"Agent description", "Agent", map[string]any{"description": "查旧会话", "prompt": "long prompt"}, "查旧会话"},
+		{"Task description", "Task", map[string]any{"description": "Survey the repo"}, "Survey the repo"},
+		{"Read base name", "Read", map[string]any{"file_path": "/srv/x/notes/main.go"}, "读取文件 main.go"},
+		{"Edit base name", "Edit", map[string]any{"file_path": "/srv/x/notes/config.toml"}, "修改文件 config.toml"},
+		{"Write windows path", "Write", map[string]any{"file_path": `C:\a\b\out.txt`}, "修改文件 out.txt"},
+		{"Notebook", "NotebookEdit", map[string]any{"notebook_path": "/a/demo.ipynb"}, "修改文件 demo.ipynb"},
+		{"Grep pattern", "Grep", map[string]any{"pattern": "func main"}, "搜索文件 func main"},
+		{"Glob pattern", "Glob", map[string]any{"pattern": "**/*.go"}, "搜索文件 **/*.go"},
+		{"WebFetch host", "WebFetch", map[string]any{"url": "https://user:pw@example.com:8080/a?b=c"}, "读取网页 example.com"},
+		{"WebFetch bad url", "WebFetch", map[string]any{"url": "nope"}, ""},
+		{"WebSearch query", "WebSearch", map[string]any{"query": "feishu cardkit delete"}, "联网搜索 feishu cardkit delete"},
+		{"Read without path", "Read", map[string]any{}, ""},
+		{"Unknown tool", "FutureTool", map[string]any{"description": "x"}, ""},
+		{"Not a map", "Bash", "text", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stepToolLabel(tt.tool, tt.input); got != tt.want {
+				t.Fatalf("got %q want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The label rides on the tool event next to, not instead of, the public text.
+func TestClaudeToolEventCarriesStepLabel(t *testing.T) {
+	cs := progressSession()
+	assistantBlock(cs, map[string]any{"type": "tool_use", "id": "t1", "name": "Bash", "input": map[string]any{"command": "git status", "description": "Check status"}})
+	events := drainProgressEvents(cs)
+	if len(events) != 1 {
+		t.Fatalf("events: %v", events)
+	}
+	if events[0].Metadata["step_label"] != "Check status" || events[0].Metadata["public_tool_progress"] != "运行命令" {
+		t.Fatalf("metadata: %v", events[0].Metadata)
+	}
+	if strings.Contains(events[0].ToolInput, "git status") {
+		t.Fatal("command leaked into the tool input")
 	}
 }
