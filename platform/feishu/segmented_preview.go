@@ -632,12 +632,11 @@ func (v *segmentedPreview) stepCard(config map[string]any, final bool, text stri
 	var elements []map[string]any
 	cardBody := map[string]any{}
 	if final {
-		// Settled cards stay quiet: the reply alone, or a single grey "done" line in a compact card
+		// Settled cards stay quiet: the reply alone, or a single grey "done" line
 		// when the reply goes out as its own message.
 		v.closeRow(now)
 		if text == "" || text == v.i18n.T(core.MsgPreviewDoneBare) {
 			done := v.i18n.T(core.MsgPreviewDoneBare)
-			config["width_mode"] = "compact"
 			config["summary"] = map[string]any{"content": done}
 			body["content"] = "<font color='grey'>" + done + "</font>"
 			body["text_size"] = "notation"

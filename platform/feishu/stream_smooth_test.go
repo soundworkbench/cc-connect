@@ -223,7 +223,7 @@ func TestCollapsePreviewLeavesStepSummaryOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := lastCardData(t, f)
-	if !strings.Contains(data, "已完成") || strings.Contains(data, "共 2 步") || strings.Contains(data, "collapsible_panel") || !strings.Contains(data, `"width_mode":"compact"`) || strings.Contains(data, "答复写了一半") || strings.Contains(data, `"streaming_mode":true`) {
+	if !strings.Contains(data, "已完成") || strings.Contains(data, "共 2 步") || strings.Contains(data, "collapsible_panel") || strings.Contains(data, "答复写了一半") || strings.Contains(data, `"streaming_mode":true`) {
 		t.Fatalf("collapsed card: %s", data)
 	}
 	if f.deletes() != 0 {
