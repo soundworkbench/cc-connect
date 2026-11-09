@@ -948,6 +948,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			ChatName:   p.resolveChatName(chatID),
 			Content:    actionVal,
 			ReplyCtx:   rctx,
+			// An old card's answer must not be typed into the current turn.
+			IsPermissionResponse: true,
 		})
 
 		answerLabel, _ := event.Event.Action.Value["askq_label"].(string)

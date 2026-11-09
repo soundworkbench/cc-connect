@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"log/slog"
+	"strings"
 )
 
 // state.mu must be held, keeping admission/history ordered with the turn drain.
@@ -10,6 +11,10 @@ func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg 
 	e.platformLifecycleMu.Lock()
 	defer e.platformLifecycleMu.Unlock()
 	if e.queueBatch.Enabled && (state.hold != nil || messageSource(msg) != "human" || msg.individualReply) {
+		return false
+	}
+	// Commands and shell shortcuts are never typed into the running turn.
+	if msg.individualReply || msg.IsPermissionResponse || strings.HasPrefix(strings.TrimSpace(msg.Content), "/") || strings.HasPrefix(strings.TrimSpace(msg.Content), "!") {
 		return false
 	}
 	if e.stopping || e.ctx.Err() != nil || state.queueRetired || msg.scheduledPrompt || msg.ModeOverride != "" || session == nil || sessions == nil || state.stopped || state.pending != nil {
