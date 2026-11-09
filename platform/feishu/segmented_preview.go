@@ -38,6 +38,18 @@ type segmentedPreview struct {
 	// Step-list layout (cfg.StepList): the agent's step lines with done/running
 	// state, the live text under them, and a footer.
 	footerID, lastFooter string
+
+	// Paced reveal (cfg.RevealCps > 0): the agent text lands in pend (own lock, so the
+	// event loop never waits on a card API call); the push loop adopts it into target and
+	// releases it into body at a steady rate.
+	pendMu     sync.Mutex
+	pend       string
+	pendDirty  bool
+	target     string
+	shown      int
+	revealAcc  float64
+	lastReveal time.Time
+	draining   bool
 	rows                 []stepRow
 	toolCalls            int
 }
@@ -71,6 +83,12 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 	}
 	if cfg.TypingStep <= 0 {
 		cfg.TypingStep = 6
+	}
+	if cfg.RevealCatchupMs <= 0 {
+		cfg.RevealCatchupMs = 4000
+	}
+	if cfg.DrainMaxMs <= 0 {
+		cfg.DrainMaxMs = 8000
 	}
 	if cfg.PrintStrategy != "delay" {
 		cfg.PrintStrategy = "fast"
@@ -151,6 +169,19 @@ func (p *Platform) SetPreviewBody(_ context.Context, handle any, text string) er
 		return core.ErrNotSupported
 	}
 	v := h.live
+	if v.cfg.RevealCps > 0 {
+		chars := []rune(text)
+		if len(chars) > 4000 {
+			text = string(chars[:4000])
+		}
+		v.pendMu.Lock()
+		v.pend, v.pendDirty = text, true
+		v.pendMu.Unlock()
+		if core.StreamTraceOn() {
+			core.StreamTrace("body", map[string]any{"n": len(chars), "wait_ms": 0})
+		}
+		return nil
+	}
 	waitFrom := time.Now()
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -464,9 +495,82 @@ func (p *Platform) replaceSegmentedCard(ctx context.Context, h *feishuPreviewHan
 	return p.patchCardMessage(ctx, h.messageID, card)
 }
 
+// typingCps is the speed the client types at, in characters per second.
+func (v *segmentedPreview) typingCps() float64 {
+	return float64(v.cfg.TypingStep) * 1000 / float64(v.cfg.TypingIntervalMs)
+}
+
+// adoptPending moves text from the event loop into the paced target. Caller holds v.mu.
+func (v *segmentedPreview) adoptPending() error {
+	v.pendMu.Lock()
+	text, dirty := v.pend, v.pendDirty
+	v.pendDirty = false
+	v.pendMu.Unlock()
+	if !dirty {
+		return nil
+	}
+	if !strings.HasPrefix(text, v.target) {
+		id, err := previewElementID()
+		if err != nil {
+			return err
+		}
+		v.bodyID, v.shown, v.body, v.revealAcc = id, 0, "", 0
+	}
+	v.target = text
+	return nil
+}
+
+// reveal releases target text into body at a steady rate: the base speed, raised
+// so a backlog clears within RevealCatchupMs, never above the client typing speed.
+// Upstream text that arrives in a burst therefore reaches the card as a steady stream.
+// Caller holds v.mu.
+func (v *segmentedPreview) reveal(now time.Time) {
+	if v.cfg.RevealCps <= 0 {
+		return
+	}
+	total := len([]rune(v.target))
+	if v.shown >= total {
+		v.lastReveal = now
+		return
+	}
+	dt := now.Sub(v.lastReveal).Seconds()
+	if v.lastReveal.IsZero() || dt > 1 {
+		dt = float64(v.cfg.PushIntervalMs) / 1000
+	}
+	v.lastReveal = now
+	rate := float64(v.cfg.RevealCps)
+	if c := float64(total-v.shown) / (float64(v.cfg.RevealCatchupMs) / 1000); c > rate {
+		rate = c
+	}
+	if max := v.typingCps(); rate > max {
+		rate = max
+	}
+	v.revealAcc += rate * dt
+	n := int(v.revealAcc)
+	v.revealAcc -= float64(n)
+	if v.shown+n > total {
+		n = total - v.shown
+	}
+	if n <= 0 {
+		return
+	}
+	v.shown += n
+	v.body = string([]rune(v.target)[:v.shown])
+}
+
+func (v *segmentedPreview) fullyShown() bool {
+	return v.cfg.RevealCps <= 0 || v.shown >= len([]rune(v.target))
+}
+
 // Called under the turn lock, as are finalization and cancellation.
 func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle, now time.Time) error {
 	v := h.live
+	if v.cfg.RevealCps > 0 {
+		if err := v.adoptPending(); err != nil {
+			return err
+		}
+		v.reveal(now)
+	}
 	if v.fallback && !v.lastPublished.IsZero() && now.Sub(v.lastPublished) < 700*time.Millisecond {
 		return nil
 	}
@@ -503,16 +607,59 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 	return nil
 }
 
+// drain keeps the push loop running until the paced text has been released, for at
+// most DrainMaxMs. It applies when the final text continues what was streamed.
+func (v *segmentedPreview) drain(final string) {
+	v.mu.Lock()
+	if v.stopped || v.fallback || !strings.HasPrefix(final, v.body) || !strings.HasPrefix(final, v.target) {
+		v.mu.Unlock()
+		return
+	}
+	v.pendMu.Lock()
+	v.pend, v.pendDirty = final, true
+	v.pendMu.Unlock()
+	v.mu.Unlock()
+	deadline := time.Now().Add(time.Duration(v.cfg.DrainMaxMs) * time.Millisecond)
+	for time.Now().Before(deadline) {
+		v.mu.Lock()
+		done := v.stopped || (!v.pendDirtyNow() && v.fullyShown())
+		v.mu.Unlock()
+		if done {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (v *segmentedPreview) pendDirtyNow() bool {
+	v.pendMu.Lock()
+	defer v.pendMu.Unlock()
+	return v.pendDirty
+}
+
 func (p *Platform) FinishSegmentedPreview(ctx context.Context, handle any, body string) error {
 	h, ok := handle.(*feishuPreviewHandle)
 	if !ok || h.live == nil {
 		return core.ErrNotSupported
 	}
 	v := h.live
+	if v.cfg.RevealCps > 0 && body != "" {
+		v.drain(body)
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.stopLocked()
-	if body != "" {
+	if v.cfg.RevealCps > 0 {
+		if body != "" {
+			v.pendMu.Lock()
+			v.pend, v.pendDirty = body, true
+			v.pendMu.Unlock()
+		}
+		if err := v.adoptPending(); err != nil {
+			return err
+		}
+		v.shown, v.body = len([]rune(v.target)), v.target
+	} else if body != "" {
 		if err := v.setBody(body); err != nil {
 			return err
 		}

@@ -15,6 +15,9 @@ type StreamPreviewCfg struct {
 	PushIntervalMs    int      // segmented card push cadence; default 200
 	TypingIntervalMs  int      // client typing tick; default 40
 	TypingStep        int      // characters per client tick; default 6
+	RevealCps         int      // paced reveal: base characters per second released to the card (0 = release text as it arrives)
+	RevealCatchupMs   int      // paced reveal: speed up so a backlog clears within this time (capped at the client typing speed); default 4000
+	DrainMaxMs        int      // paced reveal: at the end of a turn, keep pacing the remaining text for at most this long; default 8000
 	PrintStrategy     string   // client typing strategy: "fast" (flush buffered text when new text arrives) or "delay" (finish typing the buffered text first); default fast
 	Enabled           bool     // global toggle
 	DisabledPlatforms []string // platforms where streaming preview is disabled (e.g. "feishu")

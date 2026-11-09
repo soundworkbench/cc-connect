@@ -278,6 +278,9 @@ type StreamPreviewConfig struct {
 	PushIntervalMs    int      `toml:"push_interval_ms"`             // default 200
 	TypingIntervalMs  int      `toml:"typing_interval_ms"`           // default 40
 	TypingStep        int      `toml:"typing_step"`                  // default 6
+	RevealCps         int      `toml:"reveal_cps"`                   // paced reveal base chars/s; 0 = off
+	RevealCatchupMs   int      `toml:"reveal_catchup_ms"`            // default 4000
+	DrainMaxMs        int      `toml:"drain_max_ms"`                 // default 8000
 	PrintStrategy     string   `toml:"print_strategy"`               // "fast" (default) or "delay"
 	Enabled           *bool    `toml:"enabled"`                      // default true
 	DisabledPlatforms []string `toml:"disabled_platforms,omitempty"` // platforms where preview is disabled (e.g. ["feishu"])

@@ -608,6 +608,9 @@ func main() {
 			if cfg.StreamPreview.TypingIntervalMs > 0 {
 				spcfg.TypingIntervalMs = cfg.StreamPreview.TypingIntervalMs
 			}
+			spcfg.RevealCps = cfg.StreamPreview.RevealCps
+			spcfg.RevealCatchupMs = cfg.StreamPreview.RevealCatchupMs
+			spcfg.DrainMaxMs = cfg.StreamPreview.DrainMaxMs
 			if s := cfg.StreamPreview.PrintStrategy; s == "fast" || s == "delay" {
 				spcfg.PrintStrategy = s
 			}
