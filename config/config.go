@@ -171,7 +171,7 @@ type ResolvedQueueBatch struct {
 }
 
 func (c QueueBatchConfig) Resolve() ResolvedQueueBatch {
-	r := ResolvedQueueBatch{Enabled: true, MaxMessages: 20, MaxChars: 20000, HoldSeconds: 60, DebounceMs: 1500, ImmediateSources: []string{"human"}}
+	r := ResolvedQueueBatch{Enabled: true, MaxMessages: 20, MaxChars: 20000, HoldSeconds: 60, DebounceMs: 0, ImmediateSources: []string{"human"}}
 	if c.Enabled != nil {
 		r.Enabled = *c.Enabled
 	}
