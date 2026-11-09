@@ -1,6 +1,7 @@
 package claudecode
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -929,5 +930,71 @@ func TestNew_WorkDirDoesNotExist(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("expected 'does not exist' in error, got: %v", err)
+	}
+}
+
+// A launcher script that exports CLAUDE_CONFIG_DIR only for the claude child
+// keeps transcripts outside $HOME/.claude. The agent's config_dirs option
+// points validation (and listing/history) at that dir, so the saved session is
+// kept; the same ID is still rejected when it lives under no candidate dir.
+func TestAgentValidateSessionID_ConfigDirs(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	workDir := filepath.Join(t.TempDir(), "work")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	accountDir := filepath.Join(t.TempDir(), "account-c", ".claude")
+	otherDir := filepath.Join(t.TempDir(), "account-a", ".claude")
+	projectDir := filepath.Join(accountDir, "projects", encodeClaudeProjectKey(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// the other account has the project dir but not this session
+	if err := os.MkdirAll(filepath.Join(otherDir, "projects", encodeClaudeProjectKey(workDir)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "11111111-2222-3333-4444-555555555555"
+	if err := os.WriteFile(filepath.Join(projectDir, sid+".jsonl"), []byte("{\"type\":\"user\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	plain := &Agent{workDir: workDir}
+	if plain.ValidateSessionID(ctx, sid) {
+		t.Fatal("without config_dirs the session under the account dir must not validate")
+	}
+
+	a := &Agent{workDir: workDir, configDirs: []string{otherDir, accountDir}}
+	if !a.ValidateSessionID(ctx, sid) {
+		t.Fatal("session under a config_dirs entry must validate")
+	}
+	if a.ValidateSessionID(ctx, "99999999-0000-0000-0000-000000000000") {
+		t.Fatal("unknown session ID must not validate")
+	}
+	list, err := a.ListSessions(ctx)
+	if err != nil || len(list) != 1 || list[0].ID != sid {
+		t.Fatalf("ListSessions = %v, %v; want the account-dir session", list, err)
+	}
+
+	viaEnv := &Agent{workDir: workDir, configEnv: []string{"CLAUDE_CONFIG_DIR=" + accountDir}}
+	if !viaEnv.ValidateSessionID(ctx, sid) {
+		t.Fatal("CLAUDE_CONFIG_DIR in the project env must validate")
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", accountDir)
+	if !plain.ValidateSessionID(ctx, sid) {
+		t.Fatal("CLAUDE_CONFIG_DIR in cc-connect's own env must validate")
+	}
+}
+
+func TestNew_ConfigDirsOption(t *testing.T) {
+	ag, err := New(map[string]any{"work_dir": t.TempDir(), "cmd": "sh", "config_dirs": []any{"/x/a", " /x/c ", 3}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ag.(*Agent).configDirs
+	if len(got) != 2 || got[0] != "/x/a" || got[1] != "/x/c" {
+		t.Fatalf("configDirs = %v", got)
 	}
 }
