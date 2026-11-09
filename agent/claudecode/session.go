@@ -932,10 +932,11 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	// Done=true would make the engine's processInteractiveEvents return
 	// early and drop the rest of the turn (issue #481).
 	isCompaction := isCompactionResult(raw)
-	if !isCompaction && raw["parent_tool_use_id"] == nil && cs.resultPrecedesInputs(raw) {
+	if !isCompaction && raw["parent_tool_use_id"] == nil && earlierTurnSilent(cs.pendingText, raw) && cs.resultPrecedesInputs(raw) {
 		// A turn that was already running (e.g. a background task notification)
 		// finished before the CLI replayed our user message. It is not the
-		// foreground reply; its text must not reach the foreground turn.
+		// foreground reply. A silent ending (NO_REPLY) is dropped here; a turn
+		// with something to say keeps the old path so its text is not lost.
 		slog.Info("claudeSession: result precedes replay of pending user input; not the foreground turn", "pending_text_parts", len(cs.pendingText))
 		cs.pendingText = nil
 		cs.pendingProgressIDs = nil
@@ -1500,4 +1501,15 @@ func filterEnv(env []string, key string) []string {
 		}
 	}
 	return out
+}
+
+// earlierTurnSilent reports whether the turn's final text ends in the
+// NO_REPLY marker the engine uses to suppress delivery.
+func earlierTurnSilent(pending []string, raw map[string]any) bool {
+	text := strings.Join(pending, "")
+	if r, _ := raw["result"].(string); r != "" {
+		text = r
+	}
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	return strings.EqualFold(strings.TrimSpace(lines[len(lines)-1]), "NO_REPLY")
 }
