@@ -537,3 +537,107 @@ func TestSegmentedPreview_AskUserQuestionStillUsesQuestionCard(t *testing.T) {
 		t.Fatalf("question broke preview ownership: %d card entities", creates)
 	}
 }
+
+func startStepFixturePreview(t *testing.T, p *Platform) *feishuPreviewHandle {
+	t.Helper()
+	cfg := core.DefaultStreamPreviewCfg()
+	cfg.Segmented, cfg.StepList = true, true
+	cfg.PushIntervalMs = 60000
+	handle, err := p.StartSegmentedPreview(context.Background(), replyContext{chatID: "oc"}, cfg, core.NewI18n(core.LangChinese))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := handle.(*feishuPreviewHandle)
+	t.Cleanup(h.live.stop)
+	return h
+}
+
+func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
+	f, p := newPreviewFixture(t)
+	h := startStepFixturePreview(t, p)
+	ctx := context.Background()
+	start := h.live.started
+
+	initial := previewElements(parsePreviewJSON(t, f.read()[0].body["data"]))
+	if len(initial) != 3 || initial[0].(map[string]any)["content"] != "⏳ 思考中 · 0s" || initial[2].(map[string]any)["content"] != "已用 0 秒 · 工具 0 次" {
+		t.Fatalf("initial layout: %v", initial)
+	}
+	progressID := initial[0].(map[string]any)["element_id"].(string)
+	bodyID := initial[1].(map[string]any)["element_id"].(string)
+	footerID := initial[2].(map[string]any)["element_id"].(string)
+
+	h.live.mu.Lock()
+	h.live.addRow(start.Add(1*time.Second), "先看第一个文件", false)
+	h.live.addRow(start.Add(2*time.Second), "Read a.go", true)
+	h.live.addRow(start.Add(5*time.Second), "再看第二个文件", false)
+	h.live.addRow(start.Add(6*time.Second), "Read b.go", true)
+	h.live.mu.Unlock()
+	if err := p.SetPreviewBody(ctx, h, "正在写第三段"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.read())
+	publishFixture(t, p, h, start.Add(8*time.Second))
+	want := "✔ 先看第一个文件 · 4s\n⏳ **再看第二个文件** · 3s\n　└ Read b.go"
+	var gotProgress, gotFooter, gotBody string
+	for _, c := range f.read()[before:] {
+		switch {
+		case strings.HasSuffix(c.path, "/elements/"+progressID):
+			gotProgress = parsePreviewJSON(t, c.body["element"])["content"].(string)
+		case strings.HasSuffix(c.path, "/elements/"+footerID):
+			gotFooter = parsePreviewJSON(t, c.body["element"])["content"].(string)
+		case strings.HasSuffix(c.path, "/elements/"+bodyID+"/content"):
+			gotBody = c.body["content"].(string)
+		}
+	}
+	if gotProgress != want || gotFooter != "已用 8 秒 · 工具 2 次" || gotBody != "正在写第三段" {
+		t.Fatalf("progress=%q footer=%q body=%q", gotProgress, gotFooter, gotBody)
+	}
+
+	// Elapsed time alone refreshes the list and footer, not the body.
+	before = len(f.read())
+	publishFixture(t, p, h, start.Add(9*time.Second))
+	for _, c := range f.read()[before:] {
+		if strings.HasSuffix(c.path, "/content") {
+			t.Fatalf("heartbeat rewrote body: %s", c.path)
+		}
+	}
+	if len(f.read()) != before+2 {
+		t.Fatalf("want list and footer updates, got %d", len(f.read())-before)
+	}
+
+	if err := p.FinishSegmentedPreview(ctx, h, "最终回复"); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.read()
+	final := previewElements(parsePreviewJSON(t, calls[len(calls)-1].body["card"].(map[string]any)["data"]))
+	if len(final) != 3 || final[0].(map[string]any)["tag"] != "collapsible_panel" || final[1].(map[string]any)["content"] != "最终回复" || final[2].(map[string]any)["element_id"] != footerID {
+		t.Fatalf("final layout: %v", final)
+	}
+	panel, _ := json.Marshal(final[0])
+	if strings.Contains(string(panel), "⏳") || !strings.Contains(string(panel), "✔ 再看第二个文件") {
+		t.Fatalf("open step not closed: %s", panel)
+	}
+}
+
+func TestSegmentedPreview_StepListToolOnlyRowsAndCap(t *testing.T) {
+	_, p := newPreviewFixture(t)
+	h := startStepFixturePreview(t, p)
+	v := h.live
+	now := v.started
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for i := 0; i < 12; i++ {
+		v.addRow(now.Add(time.Duration(i)*time.Second), fmt.Sprintf("读取 %d", i), true)
+	}
+	if v.toolCalls != 12 || len(v.rows) != 12 {
+		t.Fatalf("tool-only calls should each be a step: %d calls, %d rows", v.toolCalls, len(v.rows))
+	}
+	lines := strings.Split(v.stepList(now.Add(12*time.Second)), "\n")
+	if len(lines) != stepRowsShown+1 || lines[0] != "… +4" || !strings.HasPrefix(lines[len(lines)-1], "⏳ **读取 11**") {
+		t.Fatalf("capped list: %q", lines)
+	}
+	v.addRow(now, "多\n行\n文本", false)
+	if got := v.rows[len(v.rows)-1].text; got != "多 行 文本" {
+		t.Fatalf("row text not one line: %q", got)
+	}
+}

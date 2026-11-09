@@ -267,6 +267,7 @@ type DisplayConfig struct {
 // StreamPreviewConfig controls real-time streaming preview in IM.
 type StreamPreviewConfig struct {
 	Segmented         bool     `toml:"segmented"`                    // opt-in Feishu segmented streaming; default false
+	StepList          bool     `toml:"step_list"`                    // with segmented: Feishu step-list card (done/running steps, live text, footer); default false
 	PushIntervalMs    int      `toml:"push_interval_ms"`             // default 200
 	TypingIntervalMs  int      `toml:"typing_interval_ms"`           // default 40
 	TypingStep        int      `toml:"typing_step"`                  // default 6

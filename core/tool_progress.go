@@ -183,7 +183,11 @@ func (sp *streamPreview) appendProgressEvent(event Event, text string) {
 		sp.substantiveProgress = append(sp.substantiveProgress, text)
 	}
 	if sp.segmented != nil {
-		sp.replacePreviewLocked(text)
+		if event.Type == EventToolUse {
+			sp.addToolProgressLocked(text)
+		} else {
+			sp.replacePreviewLocked(text)
+		}
 		return
 	}
 	// Split unusually large entries before displaying them. Existing visible rows

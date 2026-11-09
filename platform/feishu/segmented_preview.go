@@ -18,6 +18,7 @@ import (
 )
 
 var _ core.SegmentedPreviewer = (*Platform)(nil)
+var _ core.PreviewToolRecorder = (*Platform)(nil)
 
 // One turn owns the ticker and all mutations, including finalization and recall.
 type segmentedPreview struct {
@@ -33,7 +34,22 @@ type segmentedPreview struct {
 	recent                         []string
 	fallback                       bool
 	lastPublished                  time.Time
+
+	// Step-list layout (cfg.StepList): the agent's step lines with done/running
+	// state, the live text under them, and a footer.
+	footerID, lastFooter string
+	rows                 []stepRow
+	toolCalls            int
 }
+
+type stepRow struct {
+	text       string
+	tool       string // latest tool call under this step
+	toolOnly   bool   // no step line from the agent; the row is the tool call itself
+	start, end time.Time
+}
+
+const stepRowsShown = 8
 
 func previewElementID() (string, error) {
 	var b [9]byte
@@ -64,8 +80,13 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 	if err != nil {
 		return nil, err
 	}
-	v := &segmentedPreview{stopCh: make(chan struct{}), cfg: cfg, i18n: i18n, started: time.Now(), bodyID: bodyID, sentBodyID: bodyID, progressID: progressID}
+	footerID, err := previewElementID()
+	if err != nil {
+		return nil, err
+	}
+	v := &segmentedPreview{stopCh: make(chan struct{}), cfg: cfg, i18n: i18n, started: time.Now(), bodyID: bodyID, sentBodyID: bodyID, progressID: progressID, footerID: footerID}
 	v.lastProgress = v.progress(v.started)
+	v.lastFooter = v.footer(v.started)
 	handle, err := p.SendPreviewStart(ctx, rc, v.card(false))
 	if err != nil {
 		return nil, err
@@ -81,7 +102,7 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 		publish := func(now time.Time, thinkingOnly bool) {
 			v.mu.Lock()
 			defer v.mu.Unlock()
-			if v.stopped || (thinkingOnly && v.body != "") {
+			if v.stopped || (thinkingOnly && v.body != "" && !v.cfg.StepList) {
 				return
 			}
 			if err := p.publishSegmented(ctx, h, now); err != nil {
@@ -159,6 +180,10 @@ func (p *Platform) AddPreviewProgress(_ context.Context, handle any, text string
 	if v.stopped || strings.TrimSpace(text) == "" {
 		return nil
 	}
+	if v.cfg.StepList {
+		v.addRow(time.Now(), text, false)
+		return nil
+	}
 	v.steps++
 	chars := []rune(text)
 	if len(chars) > 300 {
@@ -171,7 +196,95 @@ func (p *Platform) AddPreviewProgress(_ context.Context, handle any, text string
 	return nil
 }
 
+// AddPreviewTool records a tool call under the current step (StepList only).
+func (p *Platform) AddPreviewTool(_ context.Context, handle any, text string) error {
+	h, ok := handle.(*feishuPreviewHandle)
+	if !ok || h.live == nil {
+		return core.ErrNotSupported
+	}
+	v := h.live
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.stopped || strings.TrimSpace(text) == "" {
+		return nil
+	}
+	v.addRow(time.Now(), text, true)
+	return nil
+}
+
+func oneLine(text string, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if r := []rune(text); len(r) > limit {
+		return string(r[:limit]) + "…"
+	}
+	return text
+}
+
+// addRow opens a new step for an agent line, or attaches a tool call to the
+// open step. A tool call with no agent line before it becomes a step itself.
+func (v *segmentedPreview) addRow(now time.Time, text string, tool bool) {
+	text = oneLine(text, 120)
+	if tool {
+		v.toolCalls++
+		if n := len(v.rows); n > 0 && !v.rows[n-1].toolOnly {
+			v.rows[n-1].tool = text
+			return
+		}
+	}
+	v.closeRow(now)
+	v.rows = append(v.rows, stepRow{text: text, toolOnly: tool, start: now})
+}
+
+func (v *segmentedPreview) closeRow(now time.Time) {
+	if n := len(v.rows); n > 0 && v.rows[n-1].end.IsZero() {
+		v.rows[n-1].end = now
+	}
+}
+
+func rowSeconds(r stepRow, now time.Time) string {
+	end := r.end
+	if end.IsZero() {
+		end = now
+	}
+	return fmt.Sprintf("%ds", int(end.Sub(r.start)/time.Second))
+}
+
+// stepList renders the steps, finished ones marked done and the open one running.
+func (v *segmentedPreview) stepList(now time.Time) string {
+	if len(v.rows) == 0 {
+		return "⏳ " + v.i18n.Tf(core.MsgPreviewElapsed, int(now.Sub(v.started)/time.Second))
+	}
+	rows := v.rows
+	var lines []string
+	if len(rows) > stepRowsShown {
+		lines = append(lines, fmt.Sprintf("… +%d", len(rows)-stepRowsShown))
+		rows = rows[len(rows)-stepRowsShown:]
+	}
+	for _, r := range rows {
+		if r.end.IsZero() {
+			lines = append(lines, fmt.Sprintf("⏳ **%s** · %s", r.text, rowSeconds(r, now)))
+			if r.tool != "" {
+				lines = append(lines, "　└ "+r.tool)
+			}
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("✔ %s · %s", r.text, rowSeconds(r, now)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (v *segmentedPreview) footer(now time.Time) string {
+	return v.i18n.Tf(core.MsgPreviewFooter, int(now.Sub(v.started)/time.Second), v.toolCalls)
+}
+
+func (v *segmentedPreview) footerElement(content string) map[string]any {
+	return map[string]any{"tag": "markdown", "element_id": v.footerID, "content": content, "text_size": "notation"}
+}
+
 func (v *segmentedPreview) progress(now time.Time) string {
+	if v.cfg.StepList {
+		return v.stepList(now)
+	}
 	var lines []string
 	if v.body == "" {
 		lines = append(lines, v.i18n.Tf(core.MsgPreviewElapsed, int(now.Sub(v.started)/time.Second)))
@@ -197,6 +310,9 @@ func (v *segmentedPreview) card(final bool) string {
 	if v.body != "" {
 		config["summary"] = map[string]any{"content": string([]rune(v.body)[:min(len([]rune(v.body)), 120)])}
 	}
+	if v.cfg.StepList {
+		return v.stepCard(config, final)
+	}
 	elements := []map[string]any{{"tag": "markdown", "element_id": v.bodyID, "content": v.body}}
 	if !final {
 		elements = append(elements, v.progressElement(v.progress(time.Now())))
@@ -205,6 +321,31 @@ func (v *segmentedPreview) card(final bool) string {
 		panel["element_id"] = v.progressID
 		elements = append(elements, panel)
 	}
+	b, err := json.Marshal(map[string]any{"schema": "2.0", "config": config, "body": map[string]any{"elements": elements}})
+	if err != nil {
+		slog.Error("feishu: marshal segmented preview", "error", err)
+		return buildCardJSON(v.body)
+	}
+	return string(b)
+}
+
+// stepCard lays out the step list on top, the text being written under it and
+// the footer last. Once final, the list folds into a collapsed process panel.
+func (v *segmentedPreview) stepCard(config map[string]any, final bool) string {
+	now := time.Now()
+	body := map[string]any{"tag": "markdown", "element_id": v.bodyID, "content": v.body}
+	var elements []map[string]any
+	if final {
+		v.closeRow(now)
+		if len(v.rows) > 0 {
+			panel := buildRichPanel(v.i18n.Tf(core.MsgPreviewProcess, len(v.rows)), false, []map[string]any{{"tag": "markdown", "content": v.stepList(now)}})
+			panel["element_id"] = v.progressID
+			elements = append(elements, panel)
+		}
+	} else {
+		elements = append(elements, v.progressElement(v.stepList(now)))
+	}
+	elements = append(elements, body, v.footerElement(v.footer(now)))
 	b, err := json.Marshal(map[string]any{"schema": "2.0", "config": config, "body": map[string]any{"elements": elements}})
 	if err != nil {
 		slog.Error("feishu: marshal segmented preview", "error", err)
@@ -300,7 +441,11 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 		return nil
 	}
 	progress := v.progress(now)
-	if v.body == v.lastBody && progress == v.lastProgress && v.bodyID == v.sentBodyID {
+	footer := v.lastFooter
+	if v.cfg.StepList {
+		footer = v.footer(now)
+	}
+	if v.body == v.lastBody && progress == v.lastProgress && footer == v.lastFooter && v.bodyID == v.sentBodyID {
 		return nil
 	}
 	if !v.fallback {
@@ -308,8 +453,11 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 		if err == nil && progress != v.lastProgress {
 			err = p.replaceSegmentedElement(ctx, h, v.progressID, v.progressElement(progress))
 		}
+		if err == nil && footer != v.lastFooter {
+			err = p.replaceSegmentedElement(ctx, h, v.footerID, v.footerElement(footer))
+		}
 		if err == nil {
-			v.lastProgress = progress
+			v.lastProgress, v.lastFooter = progress, footer
 			v.lastPublished = now
 			return nil
 		}
@@ -320,7 +468,7 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 	if err := p.replaceSegmentedCard(ctx, h, false); err != nil {
 		return err
 	}
-	v.lastBody, v.lastProgress, v.sentBodyID = v.body, progress, v.bodyID
+	v.lastBody, v.lastProgress, v.lastFooter, v.sentBodyID = v.body, progress, footer, v.bodyID
 	v.lastPublished = now
 	return nil
 }

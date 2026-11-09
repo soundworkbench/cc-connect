@@ -3613,3 +3613,35 @@ func testPreviewLifecycleSegmentedThreeTurns(t *testing.T) {
 		}
 	}
 }
+
+// With step_list the card follows the platform's keep_preview_on_finish: without
+// it the card is recalled and the reply arrives as a new message.
+func TestStepListPreviewRecallsCardUnlessKept(t *testing.T) {
+	p := &cujSegmentedPlatform{stubPlatformEngine: stubPlatformEngine{n: "segmented"}}
+	s := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 1)}
+	e := NewEngine("segmented", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	cfg := DefaultStreamPreviewCfg()
+	cfg.Segmented, cfg.StepList = true, true
+	e.SetStreamPreviewCfg(cfg)
+	t.Cleanup(func() { _ = e.Stop() })
+	key := "segmented:user"
+	e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), MessageID: "1", UserID: "user", Content: "请求", ReplyCtx: "ctx"})
+	select {
+	case <-s.sent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("prompt missing")
+	}
+	s.events <- Event{Type: EventProgress, Content: "正在检查"}
+	s.events <- Event{Type: EventResult, Content: "answer", Done: true}
+	deadline := time.Now().Add(3 * time.Second)
+	for e.sessions.GetOrCreateActive(key).Busy() {
+		if time.Now().After(deadline) {
+			t.Fatal("turn hung")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	all := p.stubPlatformEngine.getSent()
+	if len(all) != 2 || all[0] != "" || all[1] != "answer" {
+		t.Fatalf("want recalled card plus a new reply, got %q", all)
+	}
+}

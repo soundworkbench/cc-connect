@@ -11,6 +11,7 @@ import (
 // StreamPreviewCfg controls the streaming preview behavior.
 type StreamPreviewCfg struct {
 	Segmented         bool     // opt-in segmented streaming cards
+	StepList          bool     // with Segmented: step list (done/running + elapsed), live text, footer; default off
 	PushIntervalMs    int      // segmented card push cadence; default 200
 	TypingIntervalMs  int      // client typing tick; default 40
 	TypingStep        int      // characters per client tick; default 6
@@ -198,6 +199,12 @@ type SegmentedPreviewer interface {
 	FinishSegmentedPreview(context.Context, any, string) error
 }
 
+// PreviewToolRecorder is implemented by segmented previews that show tool calls
+// apart from the agent's own step lines (StreamPreviewCfg.StepList).
+type PreviewToolRecorder interface {
+	AddPreviewTool(context.Context, any, string) error
+}
+
 // PreviewCleaner is an optional interface for platforms that need to clean up
 // the preview message after a separate final response is sent (e.g. Discord deletes
 // the preview and sends a fresh message).
@@ -274,6 +281,26 @@ func (sp *streamPreview) startSegmentedLocked() bool {
 	}
 	sp.previewMsgID = handle
 	return handle != nil
+}
+
+// addToolProgressLocked records a tool call. In step-list mode it is kept apart
+// from the agent's step lines; otherwise it is an ordinary progress row.
+func (sp *streamPreview) addToolProgressLocked(text string) bool {
+	rec, ok := sp.segmented.(PreviewToolRecorder)
+	if !ok || !sp.cfg.StepList {
+		return sp.replacePreviewLocked(text)
+	}
+	if !sp.startSegmentedLocked() {
+		return false
+	}
+	if sp.transform != nil {
+		text = sp.transform(text)
+	}
+	if err := rec.AddPreviewTool(sp.ctx, sp.previewMsgID, text); err != nil {
+		slog.Warn("segmented preview tool failed", "error", err)
+		return false
+	}
+	return true
 }
 
 func (sp *streamPreview) replacePreviewLocked(text string) bool {
@@ -990,7 +1017,11 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 		footer = ""
 	}
 	pref, hasPref := sp.platform.(PreviewFinishPreference)
-	if (sp.segmented != nil || (hasPref && pref.KeepPreviewOnFinish())) && sp.keepInPlace() {
+	keep := hasPref && pref.KeepPreviewOnFinish()
+	if sp.segmented != nil && !sp.cfg.StepList {
+		keep = true // plain segmented cards always settle in place; step_list follows keep_preview_on_finish
+	}
+	if keep && sp.keepInPlace() {
 		chunks := SplitMessageCodeFenceAware(body, maxPlatformMessageLen)
 		rest := chunks[1:]
 		firstFooter := footer

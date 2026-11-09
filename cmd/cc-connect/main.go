@@ -601,6 +601,7 @@ func main() {
 		{
 			spcfg := core.DefaultStreamPreviewCfg()
 			spcfg.Segmented = cfg.StreamPreview.Segmented
+			spcfg.StepList = cfg.StreamPreview.StepList
 			if cfg.StreamPreview.PushIntervalMs > 0 {
 				spcfg.PushIntervalMs = cfg.StreamPreview.PushIntervalMs
 			}

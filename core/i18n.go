@@ -180,6 +180,7 @@ const (
 	MsgPreviewElapsed            MsgKey = "preview_elapsed"
 	MsgPreviewSteps              MsgKey = "preview_steps"
 	MsgPreviewProcess            MsgKey = "preview_process"
+	MsgPreviewFooter             MsgKey = "preview_footer"
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
 	MsgTool                      MsgKey = "tool"
@@ -713,6 +714,7 @@ var messages = map[MsgKey]map[Language]string{
 	MsgPreviewThinking: {LangEnglish: "Thinking…", LangChinese: "思考中…", LangTraditionalChinese: "思考中…", LangJapanese: "考え中…", LangSpanish: "Pensando…"},
 	MsgPreviewElapsed:  {LangEnglish: "Thinking · %ds", LangChinese: "思考中 · %ds", LangTraditionalChinese: "思考中 · %ds", LangJapanese: "考え中 · %d秒", LangSpanish: "Pensando · %ds"},
 	MsgPreviewSteps:    {LangEnglish: "%d steps executed", LangChinese: "已执行 %d 步", LangTraditionalChinese: "已執行 %d 步", LangJapanese: "%dステップ実行済み", LangSpanish: "%d pasos ejecutados"},
+	MsgPreviewFooter:   {LangEnglish: "%ds · %d tool calls", LangChinese: "已用 %d 秒 · 工具 %d 次", LangTraditionalChinese: "已用 %d 秒 · 工具 %d 次", LangJapanese: "%d秒 · ツール%d回", LangSpanish: "%ds · %d herramientas"},
 	MsgPreviewProcess:  {LangEnglish: "Process (%d steps)", LangChinese: "过程（%d 步）", LangTraditionalChinese: "過程（%d 步）", LangJapanese: "プロセス（%dステップ）", LangSpanish: "Proceso (%d pasos)"},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
