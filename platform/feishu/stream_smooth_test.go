@@ -61,9 +61,9 @@ func TestDotsStandStillWhileTextFlows(t *testing.T) {
 	progressPath := "/elements/" + h.live.progressID
 	base := f.countSuffix(progressPath)
 
-	_ = p.SetPreviewBody(ctx, h, "第一段文字")
+	_ = p.SetPreviewBody(ctx, h, replyBody("第一段文字"))
 	for i := 1; i <= 3; i++ { // glyph would change on each of these seconds
-		_ = p.SetPreviewBody(ctx, h, strings.Repeat("字", 5+i*5))
+		_ = p.SetPreviewBody(ctx, h, replyBody(strings.Repeat("字", 5+i*5)))
 		publishAt(t, p, h, time.Now().Add(time.Duration(i)*500*time.Millisecond))
 	}
 	if got := f.countSuffix(progressPath) - base; got != 0 {
@@ -75,7 +75,7 @@ func TestDotsStandStillWhileTextFlows(t *testing.T) {
 
 	// A new step is shown at once even while text flows.
 	_ = p.AddPreviewTool(ctx, h, "再跑一步")
-	_ = p.SetPreviewBody(ctx, h, strings.Repeat("字", 40))
+	_ = p.SetPreviewBody(ctx, h, replyBody(strings.Repeat("字", 40)))
 	publishAt(t, p, h, time.Now().Add(4*time.Second))
 	if got := f.countSuffix(progressPath) - base; got != 0 {
 		t.Fatalf("step change sent %d element updates, want its one structure update instead", got)
@@ -95,7 +95,7 @@ func TestBodyUpdatesCoalesce(t *testing.T) {
 	ctx := context.Background()
 	_ = p.AddPreviewTool(ctx, h, "读文件")
 	for i := 1; i <= 50; i++ { // many small upstream deltas
-		_ = p.SetPreviewBody(ctx, h, strings.Repeat("字", i*4))
+		_ = p.SetPreviewBody(ctx, h, replyBody(strings.Repeat("字", i*4)))
 	}
 	now := time.Now()
 	for i := 0; i < 3; i++ { // three frames, each 700 ms apart like slow card calls
@@ -127,9 +127,9 @@ func lastContent(f *previewFixture) string {
 func TestCatchUpSendsRestAndWaitsForTyping(t *testing.T) {
 	f, p, h := newSmoothPreview(t, nil)
 	ctx := context.Background()
-	_ = p.SetPreviewBody(ctx, h, strings.Repeat("字", 10))
+	_ = p.SetPreviewBody(ctx, h, replyBody(strings.Repeat("字", 10)))
 	publishAt(t, p, h, time.Now())
-	final := strings.Repeat("字", 40) // 30 more characters: 300 ms of typing at 100 chars/s
+	final := replyBody(strings.Repeat("字", 40)) // 30 more characters: 300 ms of typing at 100 chars/s
 	before := f.countSuffix("/content")
 	start := time.Now()
 	p.CatchUpPreview(ctx, h, final)
@@ -151,10 +151,10 @@ func TestCatchUpSendsRestAndWaitsForTyping(t *testing.T) {
 func TestCatchUpWaitIsCapped(t *testing.T) {
 	_, p, h := newSmoothPreview(t, func(c *core.StreamPreviewCfg) { c.FinishCatchupMs = 120 })
 	ctx := context.Background()
-	_ = p.SetPreviewBody(ctx, h, "短")
+	_ = p.SetPreviewBody(ctx, h, replyBody("短"))
 	publishAt(t, p, h, time.Now())
 	start := time.Now()
-	p.CatchUpPreview(ctx, h, strings.Repeat("字", 2000)) // 20 s of typing
+	p.CatchUpPreview(ctx, h, replyBody(strings.Repeat("字", 2000))) // 20 s of typing
 	if el := time.Since(start); el > time.Second {
 		t.Fatalf("waited %v despite a 120 ms cap", el)
 	}
@@ -164,12 +164,12 @@ func TestCatchUpWaitIsCapped(t *testing.T) {
 func TestCatchUpNoChangeWhenComplete(t *testing.T) {
 	f, p, h := newSmoothPreview(t, nil)
 	ctx := context.Background()
-	_ = p.SetPreviewBody(ctx, h, "完整答复")
+	_ = p.SetPreviewBody(ctx, h, replyBody("完整答复"))
 	publishAt(t, p, h, time.Now())
 	time.Sleep(100 * time.Millisecond) // four characters take 40 ms to type
 	before := len(f.read())
 	start := time.Now()
-	p.CatchUpPreview(ctx, h, "完整答复")
+	p.CatchUpPreview(ctx, h, replyBody("完整答复"))
 	if el := time.Since(start); el > 50*time.Millisecond || len(f.read()) != before {
 		t.Fatalf("complete card changed: waited %v, %d new calls", el, len(f.read())-before)
 	}
@@ -179,10 +179,10 @@ func TestCatchUpNoChangeWhenComplete(t *testing.T) {
 func TestCatchUpSkipsDivergentReply(t *testing.T) {
 	f, p, h := newSmoothPreview(t, nil)
 	ctx := context.Background()
-	_ = p.SetPreviewBody(ctx, h, "草稿")
+	_ = p.SetPreviewBody(ctx, h, replyBody("草稿"))
 	publishAt(t, p, h, time.Now())
 	before := len(f.read())
-	p.CatchUpPreview(ctx, h, "另一份答复")
+	p.CatchUpPreview(ctx, h, replyBody("另一份答复"))
 	if len(f.read()) != before {
 		t.Fatal("divergent reply sent to the card")
 	}
@@ -217,7 +217,7 @@ func TestCollapsePreviewLeavesStepSummaryOnly(t *testing.T) {
 	for _, s := range []string{"第一步", "第二步"} {
 		_ = p.AddPreviewTool(ctx, h, s)
 	}
-	_ = p.SetPreviewBody(ctx, h, "答复写了一半")
+	_ = p.SetPreviewBody(ctx, h, replyBody("答复写了一半"))
 	publishAt(t, p, h, time.Now())
 	if err := p.CollapsePreview(ctx, h); err != nil {
 		t.Fatal(err)
@@ -236,18 +236,22 @@ func TestSettleShortTurnReplyInsideCard(t *testing.T) {
 	f, p, h := newSmoothPreview(t, nil)
 	ctx := context.Background()
 	_ = p.AddPreviewTool(ctx, h, "第一步")
-	_ = p.SetPreviewBody(ctx, h, strings.Repeat("字", 10))
+	_ = p.SetPreviewBody(ctx, h, replyBody(strings.Repeat("字", 10)))
 	publishAt(t, p, h, time.Now())
-	final := strings.Repeat("字", 30)
+	final := replyBody(strings.Repeat("字", 30))
 	p.CatchUpPreview(ctx, h, final)
 	if err := p.FinishSegmentedPreview(ctx, h, final); err != nil {
 		t.Fatal(err)
 	}
 	data := lastCardData(t, f)
-	if !strings.Contains(data, final) || strings.Contains(data, "共 1 步") || strings.Contains(data, "collapsible_panel") || strings.Contains(data, "⏳") {
+	if !strings.Contains(data, strings.Repeat("字", 30)) || strings.Contains(data, "共 1 步") || strings.Contains(data, "collapsible_panel") || strings.Contains(data, "⏳") {
 		t.Fatalf("final card: %s", data)
 	}
 	if f.deletes() != 0 {
 		t.Fatal("card was recalled")
 	}
 }
+
+// replyBody makes test text read as the reply: a progress sentence (one short line) shows in
+// the running row, so reply text needs a line break to reach the body.
+func replyBody(s string) string { return "答：\n" + s }

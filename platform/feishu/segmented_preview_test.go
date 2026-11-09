@@ -601,7 +601,7 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 	h.live.addRow(start.Add(5*time.Second), "再看第二个文件", false)
 	h.live.addRow(start.Add(6*time.Second), "Read b.go", true)
 	h.live.mu.Unlock()
-	if err := p.SetPreviewBody(ctx, h, "正在写第三段"); err != nil {
+	if err := p.SetPreviewBody(ctx, h, "正在写第三段\n- 要点"); err != nil {
 		t.Fatal(err)
 	}
 	before := len(f.read())
@@ -625,7 +625,7 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 	if got(0)["element_id"] != h.live.rows[0].id || got(0)["content"] != wantDone || got(1)["content"] != want || got(2)["element_id"] != bodyID || got(2)["content"] != "" {
 		t.Fatalf("structure update elements: %v", els)
 	}
-	if !strings.HasSuffix(calls[1].path, "/elements/"+bodyID+"/content") || calls[1].body["content"] != "正在写第三段" {
+	if !strings.HasSuffix(calls[1].path, "/elements/"+bodyID+"/content") || calls[1].body["content"] != "正在写第三段\n- 要点" {
 		t.Fatalf("body stream: %v", calls[1])
 	}
 
@@ -674,5 +674,153 @@ func TestSegmentedPreview_StepListToolOnlyRowsAndCap(t *testing.T) {
 	v.addRow(now, "多\n行\n文本", false)
 	if got := v.rows[len(v.rows)-1].text; got != "多 行 文本" {
 		t.Fatalf("row text not one line: %q", got)
+	}
+}
+
+// stepCardBodyTexts lists the reply-body contents the card carried in a call: element
+// contents other than the live row and the finished rows, and every body content stream.
+func stepCardBodyTexts(t *testing.T, h *feishuPreviewHandle, c previewCall) []string {
+	t.Helper()
+	v := h.live
+	skip := map[string]bool{v.progressID: true, v.doneID: true}
+	for _, r := range v.rows {
+		skip[r.id] = true
+	}
+	var out []string
+	if strings.HasSuffix(c.path, "/content") {
+		return append(out, fmt.Sprint(c.body["content"]))
+	}
+	if card, ok := c.body["card"].(map[string]any); ok {
+		for _, e := range previewElements(parsePreviewJSON(t, card["data"])) {
+			el := e.(map[string]any)
+			if !skip[fmt.Sprint(el["element_id"])] {
+				out = append(out, fmt.Sprint(el["content"]))
+			}
+		}
+	}
+	return out
+}
+
+func TestSegmentedPreview_ProgressSentencesStayInRows(t *testing.T) {
+	f, p := newPreviewFixture(t)
+	h := startStepFixturePreview(t, p)
+	v := h.live
+	ctx := context.Background()
+	now := v.started
+	tick := func() { now = now.Add(time.Second); publishFixture(t, p, h, now) }
+	progressNow := func() string { v.mu.Lock(); defer v.mu.Unlock(); return v.liveLine() }
+
+	for _, sentence := range []string{"先查日志。", "再看配置。"} {
+		for _, part := range []string{string([]rune(sentence)[:2]), sentence} {
+			if err := p.SetPreviewBody(ctx, h, part); err != nil {
+				t.Fatal(err)
+			}
+			tick()
+		}
+		if got := progressNow(); !strings.HasSuffix(got, " "+sentence) || strings.Contains(got, "\n") {
+			t.Fatalf("sentence should show in the running row: %q", got)
+		}
+		if err := p.AddPreviewProgress(ctx, h, sentence); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.AddPreviewTool(ctx, h, "Read x"); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.SetPreviewBody(ctx, h, ""); err != nil {
+			t.Fatal(err)
+		}
+		tick()
+	}
+	if got := progressNow(); !strings.HasSuffix(got, " 再看配置。\n<font color='grey'>└ Read x</font>") {
+		t.Fatalf("running row after the second tool: %q", got)
+	}
+	reply := "结论如下：\n- 日志正常\n- 配置正常"
+	if err := p.SetPreviewBody(ctx, h, reply); err != nil {
+		t.Fatal(err)
+	}
+	tick()
+	if got := progressNow(); !strings.Contains(got, " 再看配置。") {
+		t.Fatalf("running row should keep its label once the reply starts: %q", got)
+	}
+	if err := p.FinishSegmentedPreview(ctx, h, reply); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := f.read()
+	t.Logf("API calls for the turn: %d", len(calls))
+	for _, c := range calls {
+		for _, txt := range stepCardBodyTexts(t, h, c) {
+			if strings.Contains(txt, "先查日志") || strings.Contains(txt, "再看配置") {
+				t.Errorf("progress sentence reached the body element: %s %q", c.path, txt)
+			}
+		}
+	}
+	rowsSeen := 0
+	for _, c := range calls {
+		if card, ok := c.body["card"].(map[string]any); ok {
+			if strings.Contains(fmt.Sprint(card["data"]), "先查日志") {
+				rowsSeen++
+			}
+		}
+	}
+	if rowsSeen == 0 {
+		t.Fatal("finished rows should carry the sentences")
+	}
+	last := calls[len(calls)-1]
+	final := previewElements(parsePreviewJSON(t, last.body["card"].(map[string]any)["data"]))
+	if len(final) != 1 || final[0].(map[string]any)["content"] != reply {
+		t.Fatalf("reply should end in the body: %v", final)
+	}
+	var sawReply bool
+	for _, c := range calls[:len(calls)-1] {
+		for _, txt := range stepCardBodyTexts(t, h, c) {
+			sawReply = sawReply || txt == reply
+		}
+	}
+	if !sawReply {
+		t.Fatal("reply should stream into the body")
+	}
+}
+
+func TestSegmentedPreview_ShortReplyWithoutToolsEndsInBody(t *testing.T) {
+	f, p := newPreviewFixture(t)
+	h := startStepFixturePreview(t, p)
+	ctx := context.Background()
+	if err := p.SetPreviewBody(ctx, h, "好的，已完成。"); err != nil {
+		t.Fatal(err)
+	}
+	publishFixture(t, p, h, h.live.started.Add(time.Second))
+	if err := p.FinishSegmentedPreview(ctx, h, "好的，已完成。"); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.read()
+	final := previewElements(parsePreviewJSON(t, calls[len(calls)-1].body["card"].(map[string]any)["data"]))
+	if len(final) != 1 || final[0].(map[string]any)["content"] != "好的，已完成。" {
+		t.Fatalf("final card: %v", final)
+	}
+}
+
+func TestSegmentedPreview_StepCardSpacing(t *testing.T) {
+	_, p := newPreviewFixture(t)
+	h := startStepFixturePreview(t, p)
+	v := h.live
+	v.mu.Lock()
+	v.addRow(v.started, "先看文件", false)
+	v.addRow(v.started.Add(time.Second), "再看配置", false)
+	v.body = "回复"
+	live := parsePreviewJSON(t, v.card(false))
+	final := parsePreviewJSON(t, v.card(true))
+	v.mu.Unlock()
+	liveBody := live["body"].(map[string]any)
+	if liveBody["vertical_spacing"] != "4px" {
+		t.Fatalf("live body spacing: %v", liveBody)
+	}
+	els := liveBody["elements"].([]any)
+	if last := els[len(els)-1].(map[string]any); last["margin"] != "6px 0px 0px 0px" {
+		t.Fatalf("reply margin: %v", last)
+	}
+	finalBody := final["body"].(map[string]any)
+	if _, ok := finalBody["vertical_spacing"]; ok || strings.Contains(fmt.Sprint(finalBody["elements"]), "margin") {
+		t.Fatalf("settled card should stay unchanged: %v", finalBody)
 	}
 }

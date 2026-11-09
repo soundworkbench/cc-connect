@@ -37,7 +37,15 @@ type stepIconKeys struct{ spinner, check, blank string }
 var spinnerGlyphs = []string{"◐", "◓", "◑", "◒"}
 
 const (
-	doneRowsShown       = 5
+	doneRowsShown = 5
+	// draftMaxRunes is the longest single-line text that still counts as a progress sentence.
+	// Anything longer, or with a line break, is the reply and goes to the body.
+	draftMaxRunes = 60
+	// stepRowSpacing is the card body's gap between elements while the step list is live
+	// (body.vertical_spacing); replyTopMargin adds the rest of the gap above the reply
+	// (markdown margin: top right bottom left), about 10px in all.
+	stepRowSpacing      = "4px"
+	replyTopMargin      = "6px 0px 0px 0px"
 	spinnerRetryBackoff = 5 * time.Minute
 )
 
@@ -74,9 +82,14 @@ type segmentedPreview struct {
 	// Paced reveal (cfg.RevealCps > 0): the agent text lands in pend (own lock, so the
 	// event loop never waits on a card API call); the push loop adopts it into target and
 	// releases it into body at a steady rate.
-	pendMu     sync.Mutex
-	pend       string
-	pendDirty  bool
+	pendMu    sync.Mutex
+	pend      string
+	pendDirty bool
+	// pendDraft is the short single-line text being written (StepList only). It shows in the
+	// running row, never in the body. graduated latches once the text has become the reply,
+	// until the text is reset to empty. Both are guarded by pendMu.
+	pendDraft  string
+	graduated  bool
 	target     string
 	shown      int
 	revealAcc  float64
@@ -92,6 +105,8 @@ type segmentedPreview struct {
 	clientAt      time.Time
 	rows          []stepRow
 	toolCalls     int
+	// draft is the adopted pendDraft: the running row's text while it is non-empty.
+	draft string
 
 	// sent is which optional elements the card on the server holds. Empty elements
 	// are left out of the card, since each one adds a blank line.
@@ -248,7 +263,8 @@ func (p *Platform) SetPreviewBody(_ context.Context, handle any, text string) er
 			text = string(chars[:4000])
 		}
 		v.pendMu.Lock()
-		v.pend, v.pendDirty = text, true
+		v.pend, v.pendDraft = v.routeText(text)
+		v.pendDirty = true
 		v.pendMu.Unlock()
 		if core.StreamTraceOn() {
 			core.StreamTrace("body", map[string]any{"n": len(chars), "wait_ms": 0})
@@ -269,7 +285,46 @@ func (p *Platform) SetPreviewBody(_ context.Context, handle any, text string) er
 	if len(chars) > 4000 {
 		text = string(chars[:4000])
 	}
-	return v.setBody(text)
+	v.pendMu.Lock()
+	body, draft := v.routeText(text)
+	v.pendMu.Unlock()
+	v.setDraft(draft, time.Now())
+	return v.setBody(body)
+}
+
+// routeText decides where streamed text shows. In step-list mode a short single line is a
+// progress sentence: it belongs in the running row, not the body, because a tool call usually
+// follows and turns it into a step row. Longer or multi-line text is the reply and goes to the
+// body from then on. Caller holds pendMu.
+func (v *segmentedPreview) routeText(text string) (body, draft string) {
+	if !v.cfg.StepList {
+		return text, ""
+	}
+	t := strings.TrimSpace(text)
+	if t == "" {
+		v.graduated = false
+		return text, ""
+	}
+	if !v.graduated && !strings.ContainsAny(t, "\r\n") && len([]rune(t)) <= draftMaxRunes {
+		return "", t
+	}
+	v.graduated = true
+	return text, ""
+}
+
+// setDraft shows draft in the running row. The step before it is done once the agent starts
+// writing the next sentence, so it closes into a finished row. Caller holds v.mu.
+func (v *segmentedPreview) setDraft(draft string, now time.Time) {
+	if draft == v.draft {
+		return
+	}
+	if v.draft == "" {
+		v.closeRow(now)
+	}
+	v.draft = draft
+	if draft != "" {
+		v.lastText = now
+	}
 }
 
 func (v *segmentedPreview) setBody(text string) error {
@@ -477,6 +532,9 @@ func (v *segmentedPreview) liveLine() string {
 	if n := len(v.rows); n > 0 && v.rows[n-1].end.IsZero() {
 		text, tool = v.rows[n-1].text, v.rows[n-1].tool
 	}
+	if v.draft != "" {
+		text, tool = oneLine(v.draft, 120), ""
+	}
 	if v.spinnerKey == "" {
 		text = spinnerGlyphs[v.frame%len(spinnerGlyphs)] + " " + text
 	}
@@ -572,6 +630,7 @@ func (v *segmentedPreview) stepCard(config map[string]any, final bool, text stri
 	now := time.Now()
 	body := map[string]any{"tag": "markdown", "element_id": v.bodyID, "content": text}
 	var elements []map[string]any
+	cardBody := map[string]any{}
 	if final {
 		// Settled cards stay quiet: the reply alone, or a single grey "done" line in a compact card
 		// when the reply goes out as its own message.
@@ -586,11 +645,15 @@ func (v *segmentedPreview) stepCard(config map[string]any, final bool, text stri
 	} else {
 		elements = append(elements, v.doneElements()...)
 		elements = append(elements, v.progressElement(v.liveLine()))
+		// Rows sit close like a list; the reply keeps a normal gap above it.
+		cardBody["vertical_spacing"] = stepRowSpacing
+		body["margin"] = replyTopMargin
 	}
 	if final || lay.body {
 		elements = append(elements, body)
 	}
-	b, err := json.Marshal(map[string]any{"schema": "2.0", "config": config, "body": map[string]any{"elements": elements}})
+	cardBody["elements"] = elements
+	b, err := json.Marshal(map[string]any{"schema": "2.0", "config": config, "body": cardBody})
 	if err != nil {
 		slog.Error("feishu: marshal segmented preview", "error", err)
 		return buildCardJSON(text)
@@ -729,12 +792,13 @@ func (v *segmentedPreview) typingCps() float64 {
 // adoptPending moves text from the event loop into the paced target. Caller holds v.mu.
 func (v *segmentedPreview) adoptPending() error {
 	v.pendMu.Lock()
-	text, dirty := v.pend, v.pendDirty
+	text, draft, dirty := v.pend, v.pendDraft, v.pendDirty
 	v.pendDirty = false
 	v.pendMu.Unlock()
 	if !dirty {
 		return nil
 	}
+	v.setDraft(draft, time.Now())
 	if !strings.HasPrefix(text, v.target) {
 		id, err := previewElementID()
 		if err != nil {
@@ -853,6 +917,7 @@ func (v *segmentedPreview) drain(final string) {
 	}
 	v.pendMu.Lock()
 	v.pend, v.pendDirty = final, true
+	v.pendDraft, v.draft = "", ""
 	v.pendMu.Unlock()
 	v.mu.Unlock()
 	deadline := time.Now().Add(time.Duration(v.cfg.DrainMaxMs) * time.Millisecond)
@@ -865,6 +930,13 @@ func (v *segmentedPreview) drain(final string) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// draftPending reports whether progress-line text has been streamed and not yet turned into the reply.
+func (v *segmentedPreview) draftPending() bool {
+	v.pendMu.Lock()
+	defer v.pendMu.Unlock()
+	return v.draft != "" || v.pendDraft != ""
 }
 
 func (v *segmentedPreview) pendDirtyNow() bool {
@@ -894,10 +966,17 @@ func (p *Platform) CatchUpPreview(ctx context.Context, handle any, final string)
 		v.mu.Unlock()
 		return
 	}
+	// A reply that is still just a progress line sits in the running row; the card is about
+	// to settle, so it is not typed into the body first.
+	if v.cfg.StepList && v.body == "" && v.draftPending() {
+		v.mu.Unlock()
+		return
+	}
 	v.stopLocked()
 	if final != v.body {
 		v.pendMu.Lock()
 		v.pend, v.pendDirty = "", false
+		v.pendDraft, v.draft = "", ""
 		v.pendMu.Unlock()
 		v.target, v.body, v.shown = final, final, len([]rune(final))
 		if err := p.streamSegmentedBody(ctx, h); err != nil {
@@ -937,6 +1016,7 @@ func (p *Platform) CollapsePreview(ctx context.Context, handle any) error {
 	v.stopLocked()
 	v.pendMu.Lock()
 	v.pend, v.pendDirty = "", false
+	v.pendDraft, v.draft = "", ""
 	v.pendMu.Unlock()
 	v.target, v.shown, v.body = "", 0, ""
 	if len(v.rows) == 0 {
@@ -964,6 +1044,7 @@ func (p *Platform) FinishSegmentedPreview(ctx context.Context, handle any, body 
 		if body != "" {
 			v.pendMu.Lock()
 			v.pend, v.pendDirty = body, true
+			v.pendDraft, v.draft = "", ""
 			v.pendMu.Unlock()
 		}
 		if err := v.adoptPending(); err != nil {

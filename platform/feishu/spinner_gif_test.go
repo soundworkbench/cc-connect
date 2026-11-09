@@ -83,7 +83,7 @@ func TestSpinnerHeartbeatSendsNoStepAreaUpdate(t *testing.T) {
 		t.Fatalf("%d calls from the heartbeat, want 0", got)
 	}
 	// Reply text still goes out.
-	_ = p.SetPreviewBody(context.Background(), h, "正文")
+	_ = p.SetPreviewBody(context.Background(), h, replyBody("正文"))
 	publishAt(t, p, h, t0.Add(7*time.Second))
 	if f.countSuffix("/content") == 0 {
 		t.Fatal("reply text was not sent")
