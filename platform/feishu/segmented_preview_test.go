@@ -620,12 +620,8 @@ func TestSegmentedPreview_StepListLayoutAndLifecycle(t *testing.T) {
 	}
 	calls := f.read()
 	final := previewElements(parsePreviewJSON(t, calls[len(calls)-1].body["card"].(map[string]any)["data"]))
-	if len(final) != 2 || final[0].(map[string]any)["tag"] != "collapsible_panel" || final[1].(map[string]any)["content"] != "最终回复" || strings.Contains(fmt.Sprint(final), "已用") {
-		t.Fatalf("final layout: %v", final)
-	}
-	panel, _ := json.Marshal(final[0])
-	if strings.Contains(string(panel), "⏳") || !strings.Contains(string(panel), "✔ 再看第二个文件") {
-		t.Fatalf("open step not closed: %s", panel)
+	if len(final) != 1 || final[0].(map[string]any)["content"] != "最终回复" || strings.Contains(fmt.Sprint(final), "已用") || strings.Contains(fmt.Sprint(final), "⏳") {
+		t.Fatalf("final card should hold only the reply: %v", final)
 	}
 }
 

@@ -60,8 +60,8 @@ func TestStepListShowsNoTimers(t *testing.T) {
 	}
 }
 
-// The final card shows every step done, the last one included.
-func TestStepListFinalCardMarksLastStepDone(t *testing.T) {
+// The final card drops the steps and keeps only the reply.
+func TestStepListFinalCardKeepsOnlyReply(t *testing.T) {
 	f, p, h := newStepListPreview(t)
 	ctx := context.Background()
 	for _, label := range []string{"第一步", "第二步"} {
@@ -75,8 +75,8 @@ func TestStepListFinalCardMarksLastStepDone(t *testing.T) {
 	calls := f.read()
 	last := calls[len(calls)-1]
 	data := last.body["card"].(map[string]any)["data"].(string)
-	if strings.Contains(data, "⏳") || !strings.Contains(data, "✔ 第二步") {
-		t.Fatalf("last step not marked done: %s", data)
+	if !strings.Contains(data, "答复") || strings.Contains(data, "第二步") || strings.Contains(data, "已完成") {
+		t.Fatalf("final card should hold only the reply: %s", data)
 	}
 }
 

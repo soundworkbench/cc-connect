@@ -407,14 +407,15 @@ func (v *segmentedPreview) stepCard(config map[string]any, final bool) string {
 	body := map[string]any{"tag": "markdown", "element_id": v.bodyID, "content": v.body}
 	var elements []map[string]any
 	if final {
+		// Settled cards stay quiet: the reply alone, or a single grey "done" line in a compact card
+		// when the reply goes out as its own message.
 		v.closeRow(now)
-		if len(v.rows) > 0 {
-			if v.body == "" {
-				config["summary"] = map[string]any{"content": v.i18n.Tf(core.MsgPreviewDone, len(v.rows))}
-			}
-			panel := buildRichPanel(v.i18n.Tf(core.MsgPreviewDone, len(v.rows)), false, []map[string]any{{"tag": "markdown", "content": v.stepList(now)}})
-			panel["element_id"] = v.progressID
-			elements = append(elements, panel)
+		if v.body == "" || v.body == v.i18n.T(core.MsgPreviewDoneBare) {
+			done := v.i18n.T(core.MsgPreviewDoneBare)
+			config["width_mode"] = "compact"
+			config["summary"] = map[string]any{"content": done}
+			body["content"] = "<font color='grey'>" + done + "</font>"
+			body["text_size"] = "notation"
 		}
 	} else {
 		elements = append(elements, v.progressElement(v.stepList(now)))
