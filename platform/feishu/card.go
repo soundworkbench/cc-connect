@@ -130,7 +130,7 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 	result := map[string]any{
 		"config": map[string]any{
-			"wide_screen_mode": true,
+			"width_mode": "default",
 		},
 	}
 	if card == nil {
@@ -497,7 +497,7 @@ func renderCard(card *core.Card, sessionKey string) string {
 	b, err := json.Marshal(renderCardMap(card, sessionKey))
 	if err != nil {
 		slog.Error("feishu: renderCard marshal failed", "error", err)
-		return `{"config":{"wide_screen_mode":true},"elements":[]}`
+		return `{"config":{"width_mode":"default"},"elements":[]}`
 	}
 	return string(b)
 }

@@ -443,7 +443,7 @@ func (v *segmentedPreview) doneElement(content string) map[string]any {
 }
 
 func (v *segmentedPreview) card(final bool) string {
-	config := map[string]any{"width_mode": "fill", "summary": map[string]any{"content": v.i18n.T(core.MsgPreviewThinking)}}
+	config := map[string]any{"width_mode": "default", "summary": map[string]any{"content": v.i18n.T(core.MsgPreviewThinking)}}
 	if !final && !v.fallback {
 		platformValues := func(n int) map[string]int { return map[string]int{"default": n, "android": n, "ios": n, "pc": n} }
 		config["streaming_mode"] = true

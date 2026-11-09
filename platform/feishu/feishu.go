@@ -4081,7 +4081,7 @@ func buildCardJSON(content string) string {
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
-			"wide_screen_mode": true,
+			"width_mode": "default",
 		},
 		"body": map[string]any{
 			"elements": []map[string]any{
@@ -4123,7 +4123,7 @@ func buildCardJSONWithStatusFooter(content, footer string) string {
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
-			"wide_screen_mode": true,
+			"width_mode": "default",
 		},
 		"body": map[string]any{
 			"elements": elements,
@@ -4574,7 +4574,7 @@ func buildProgressCardJSONFromPayload(payload *core.ProgressCardPayload) string 
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{
-			"wide_screen_mode": true,
+			"width_mode": "default",
 		},
 		"header": map[string]any{
 			"title": map[string]any{
