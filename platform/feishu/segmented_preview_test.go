@@ -710,15 +710,15 @@ func TestSegmentedPreview_ProgressSentencesStayInRows(t *testing.T) {
 	tick := func() { now = now.Add(time.Second); publishFixture(t, p, h, now) }
 	progressNow := func() string { v.mu.Lock(); defer v.mu.Unlock(); return v.liveLine() }
 
-	for _, sentence := range []string{"先查日志。", "再看配置。"} {
+	for i, sentence := range []string{"先查日志。", "再看配置。"} {
 		for _, part := range []string{string([]rune(sentence)[:2]), sentence} {
 			if err := p.SetPreviewBody(ctx, h, part); err != nil {
 				t.Fatal(err)
 			}
 			tick()
 		}
-		if got := progressNow(); !strings.HasSuffix(got, " "+sentence) || strings.Contains(got, "\n") {
-			t.Fatalf("sentence should show in the running row: %q", got)
+		if got := progressNow(); strings.Contains(got, sentence) || (i == 0 && !strings.HasSuffix(got, " 思考中")) {
+			t.Fatalf("a sentence being written must not reach the running row: %q", got)
 		}
 		if err := p.AddPreviewProgress(ctx, h, sentence); err != nil {
 			t.Fatal(err)
@@ -822,5 +822,91 @@ func TestSegmentedPreview_StepCardSpacing(t *testing.T) {
 	finalBody := final["body"].(map[string]any)
 	if _, ok := finalBody["vertical_spacing"]; ok || strings.Contains(fmt.Sprint(finalBody["elements"]), "margin") {
 		t.Fatalf("settled card should stay unchanged: %v", finalBody)
+	}
+}
+
+func callsContain(f *previewFixture, text string) bool {
+	for _, c := range f.read() {
+		if b, _ := json.Marshal(c.body); strings.Contains(string(b), text) {
+			return true
+		}
+	}
+	return false
+}
+
+// A short reply with no tools never shows in the running row: the row stays "思考中" while the
+// first characters arrive, and the reply lands in the body.
+func TestSegmentedPreview_ShortReplyNeverFlashesInRunningRow(t *testing.T) {
+	f, p := newPreviewFixture(t)
+	h := startStepFixturePreview(t, p)
+	v := h.live
+	ctx := context.Background()
+	now := v.started
+	for _, part := range []string{"好", "好的，", "好的，已经", "好的，已经处理完了。"} {
+		if err := p.SetPreviewBody(ctx, h, part); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(400 * time.Millisecond)
+		publishFixture(t, p, h, now)
+		v.mu.Lock()
+		row := v.liveLine()
+		v.mu.Unlock()
+		if !strings.HasSuffix(row, " 思考中") {
+			t.Fatalf("running row after %q: %q", part, row)
+		}
+	}
+	if callsContain(f, "好") {
+		t.Fatal("reply text reached the card while it was still undecided")
+	}
+	// The text grows past one line: it goes to the body, the row still says 思考中.
+	long := "好的，已经处理完了。\n结果如下：\n- 一\n- 二"
+	if err := p.SetPreviewBody(ctx, h, long); err != nil {
+		t.Fatal(err)
+	}
+	publishFixture(t, p, h, now.Add(time.Second))
+	v.mu.Lock()
+	row, body := v.liveLine(), v.body
+	v.mu.Unlock()
+	if !strings.HasSuffix(row, " 思考中") || body != long {
+		t.Fatalf("row %q, body %q", row, body)
+	}
+	if err := p.FinishSegmentedPreview(ctx, h, long); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A progress sentence written before a tool call is shown nowhere while it is written; it appears
+// as the step's row when the tool starts.
+func TestSegmentedPreview_ProgressSentenceAppearsOnlyAsRowWithTool(t *testing.T) {
+	f, p := newPreviewFixture(t)
+	h := startStepFixturePreview(t, p)
+	v := h.live
+	ctx := context.Background()
+	now := v.started
+	sentence := "先查一下日志。"
+	for _, part := range []string{"先查", "先查一下", sentence} {
+		_ = p.SetPreviewBody(ctx, h, part)
+		now = now.Add(400 * time.Millisecond)
+		publishFixture(t, p, h, now)
+	}
+	if callsContain(f, "先查") {
+		t.Fatal("sentence reached the card before its tool call")
+	}
+	_ = p.AddPreviewProgress(ctx, h, sentence)
+	_ = p.AddPreviewTool(ctx, h, "Read log")
+	_ = p.SetPreviewBody(ctx, h, "")
+	publishFixture(t, p, h, now.Add(time.Second))
+	v.mu.Lock()
+	row := v.liveLine()
+	v.mu.Unlock()
+	if !strings.HasSuffix(row, " "+sentence+"\n<font color='grey'>└ Read log</font>") {
+		t.Fatalf("row with the tool: %q", row)
+	}
+	for _, c := range f.read() {
+		for _, txt := range stepCardBodyTexts(t, h, c) {
+			if strings.Contains(txt, "先查") {
+				t.Fatalf("sentence reached the body element: %s", txt)
+			}
+		}
 	}
 }

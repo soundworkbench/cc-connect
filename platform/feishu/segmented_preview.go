@@ -12,6 +12,7 @@ import (
 	"net/http/httptrace"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -85,9 +86,10 @@ type segmentedPreview struct {
 	pendMu    sync.Mutex
 	pend      string
 	pendDirty bool
-	// pendDraft is the short single-line text being written (StepList only). It shows in the
-	// running row, never in the body. graduated latches once the text has become the reply,
-	// until the text is reset to empty. Both are guarded by pendMu.
+	// pendDraft is the short single-line text being written (StepList only). It is shown
+	// nowhere: not in the body, not in the running row. It becomes a finished row when a tool
+	// call arrives, or the reply when the text grows or the turn ends. graduated latches once
+	// the text has become the reply, until the text is reset to empty. Both are guarded by pendMu.
 	pendDraft  string
 	graduated  bool
 	target     string
@@ -98,15 +100,16 @@ type segmentedPreview struct {
 
 	// lastText is when the visible text last grew. While text is flowing the step
 	// list keeps its dots still, so the card API calls go to the text.
-	lastText time.Time
-	// Model of the client typing queue (characters not yet typed at clientAt), fed by
-	// each text update; the end-of-turn catch-up waits for it to run out.
-	clientBacklog float64
-	clientAt      time.Time
-	rows          []stepRow
-	toolCalls     int
-	// draft is the adopted pendDraft: the running row's text while it is non-empty.
+	lastText  time.Time
+	rows      []stepRow
+	toolCalls int
+	// draft is the adopted pendDraft; it only marks that the text so far is undecided.
 	draft string
+	// finishChunk is how many runes each push releases during the end-of-turn reveal
+	// (CatchUpPreview); zero outside it.
+	finishChunk int
+	// callNs is how long the latest card API call took, in nanoseconds.
+	callNs atomic.Int64
 
 	// sent is which optional elements the card on the server holds. Empty elements
 	// are left out of the card, since each one adds a blank line.
@@ -167,7 +170,7 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 		cfg.DotsPauseMs = 2000
 	}
 	if cfg.FinishCatchupMs == 0 {
-		cfg.FinishCatchupMs = 3000
+		cfg.FinishCatchupMs = finishRevealMs
 	}
 	if cfg.PrintStrategy != "delay" {
 		cfg.PrintStrategy = "fast"
@@ -288,14 +291,14 @@ func (p *Platform) SetPreviewBody(_ context.Context, handle any, text string) er
 	v.pendMu.Lock()
 	body, draft := v.routeText(text)
 	v.pendMu.Unlock()
-	v.setDraft(draft, time.Now())
+	v.setDraft(draft)
 	return v.setBody(body)
 }
 
-// routeText decides where streamed text shows. In step-list mode a short single line is a
-// progress sentence: it belongs in the running row, not the body, because a tool call usually
-// follows and turns it into a step row. Longer or multi-line text is the reply and goes to the
-// body from then on. Caller holds pendMu.
+// routeText decides where streamed text shows. In step-list mode a short single line is
+// undecided: it may be a progress sentence (a tool call usually follows and turns it into a
+// step row) or a short reply. It is held back, shown nowhere, so the running row never flashes
+// it. Longer or multi-line text is the reply and goes to the body from then on. Caller holds pendMu.
 func (v *segmentedPreview) routeText(text string) (body, draft string) {
 	if !v.cfg.StepList {
 		return text, ""
@@ -312,19 +315,9 @@ func (v *segmentedPreview) routeText(text string) (body, draft string) {
 	return text, ""
 }
 
-// setDraft shows draft in the running row. The step before it is done once the agent starts
-// writing the next sentence, so it closes into a finished row. Caller holds v.mu.
-func (v *segmentedPreview) setDraft(draft string, now time.Time) {
-	if draft == v.draft {
-		return
-	}
-	if v.draft == "" {
-		v.closeRow(now)
-	}
+// setDraft records the undecided text. Caller holds v.mu.
+func (v *segmentedPreview) setDraft(draft string) {
 	v.draft = draft
-	if draft != "" {
-		v.lastText = now
-	}
 }
 
 func (v *segmentedPreview) setBody(text string) error {
@@ -532,9 +525,6 @@ func (v *segmentedPreview) liveLine() string {
 	if n := len(v.rows); n > 0 && v.rows[n-1].end.IsZero() {
 		text, tool = v.rows[n-1].text, v.rows[n-1].tool
 	}
-	if v.draft != "" {
-		text, tool = oneLine(v.draft, 120), ""
-	}
 	if v.spinnerKey == "" {
 		text = spinnerGlyphs[v.frame%len(spinnerGlyphs)] + " " + text
 	}
@@ -677,6 +667,10 @@ func (p *Platform) cardKitMutation(ctx context.Context, h *feishuPreviewHandle, 
 			core.StreamTrace("api", map[string]any{"m": method, "p": suffix, "ms": float64(time.Since(from).Microseconds()) / 1000, "n": len([]rune(fmt.Sprint(body["content"]))), "reused": reused})
 		}()
 	}
+	callFrom := time.Now()
+	if h.live != nil {
+		defer func() { h.live.callNs.Store(int64(time.Since(callFrom))) }()
+	}
 	err := p.withFreshTenantAccessTokenRetry(ctx, "preview element", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 		var err error
 		if method == http.MethodPatch {
@@ -747,11 +741,9 @@ func (p *Platform) streamSegmentedBody(ctx context.Context, h *feishuPreviewHand
 	if v.body == v.lastBody {
 		return nil
 	}
-	added := len([]rune(v.body)) - len([]rune(v.lastBody))
 	if err := p.cardKitMutation(ctx, h, http.MethodPut, "/elements/"+v.bodyID+"/content", map[string]any{"content": v.body}); err != nil {
 		return err
 	}
-	v.noteClientText(added, time.Now())
 	v.lastBody = v.body
 	return nil
 }
@@ -770,19 +762,6 @@ func (p *Platform) replaceSegmentedCard(ctx context.Context, h *feishuPreviewHan
 	return p.patchCardMessage(ctx, h.messageID, card)
 }
 
-// noteClientText updates the model of the client typing queue after a text
-// update of n new characters landed. With print_strategy "fast" the client shows
-// the older buffered text at once, so only the new characters are left to type.
-func (v *segmentedPreview) noteClientText(n int, now time.Time) {
-	if v.cfg.PrintStrategy == "fast" {
-		v.clientBacklog = 0
-	} else if !v.clientAt.IsZero() {
-		v.clientBacklog = max(0, v.clientBacklog-v.typingCps()*now.Sub(v.clientAt).Seconds())
-	}
-	v.clientBacklog += float64(max(n, 0))
-	v.clientAt = now
-}
-
 // typingCps is the speed the client types at, in characters per second.
 func (v *segmentedPreview) typingCps() float64 {
 	return float64(v.cfg.TypingStep) * 1000 / float64(v.cfg.TypingIntervalMs)
@@ -797,7 +776,7 @@ func (v *segmentedPreview) adoptPending() error {
 	if !dirty {
 		return nil
 	}
-	v.setDraft(draft, time.Now())
+	v.setDraft(draft)
 	if !strings.HasPrefix(text, v.target) {
 		id, err := previewElementID()
 		if err != nil {
@@ -820,6 +799,13 @@ func (v *segmentedPreview) reveal(now time.Time) {
 	total := len([]rune(v.target))
 	if v.shown >= total {
 		v.lastReveal = now
+		return
+	}
+	if v.finishChunk > 0 {
+		v.lastReveal = now
+		v.shown += min(v.finishChunk, total-v.shown)
+		v.body = string([]rune(v.target)[:v.shown])
+		v.lastText = now
 		return
 	}
 	dt := now.Sub(v.lastReveal).Seconds()
@@ -944,10 +930,14 @@ func (v *segmentedPreview) pendDirtyNow() bool {
 	return v.pendDirty
 }
 
-// CatchUpPreview brings the card up to the final reply before it is recalled:
-// the rest of the text goes out in one update, then the client gets time to type it,
-// up to FinishCatchupMs. It does nothing when the reply does not continue the text
-// on the card, or when the card is already complete and typed.
+// finishRevealMs is the longest the end-of-turn reveal takes.
+const finishRevealMs = 1000
+
+// CatchUpPreview brings the card up to the final reply before it settles or is recalled:
+// the unrevealed rest goes out in steady steps that end within FinishCatchupMs (at most
+// finishRevealMs) of the call, instead of one jump, and without waiting for the client to
+// type it. It does nothing when the reply does not continue the text on the card, or when
+// the card already shows it all.
 func (p *Platform) CatchUpPreview(ctx context.Context, handle any, final string) {
 	h, ok := handle.(*feishuPreviewHandle)
 	if !ok || h.live == nil || h.cardID == "" {
@@ -965,40 +955,58 @@ func (p *Platform) CatchUpPreview(ctx context.Context, handle any, final string)
 		v.mu.Unlock()
 		return
 	}
-	// A reply that is still just a progress line sits in the running row; the card is about
-	// to settle, so it is not typed into the body first.
+	// A reply that is still just a progress line is held back, not in the body; the card is
+	// about to settle, so it is not typed into the body first.
 	if v.cfg.StepList && v.body == "" && v.draftPending() {
 		v.mu.Unlock()
 		return
 	}
 	v.stopLocked()
-	if final != v.body {
-		v.pendMu.Lock()
-		v.pend, v.pendDirty = "", false
-		v.pendDraft, v.draft = "", ""
-		v.pendMu.Unlock()
+	v.pendMu.Lock()
+	v.pend, v.pendDirty = "", false
+	v.pendDraft, v.draft = "", ""
+	v.pendMu.Unlock()
+	start := time.Now()
+	budget := min(time.Duration(v.cfg.FinishCatchupMs), finishRevealMs) * time.Millisecond
+	steps := 0
+	if final != v.body && v.cfg.RevealCps <= 0 {
 		v.target, v.body, v.shown = final, final, len([]rune(final))
 		if err := p.streamSegmentedBody(ctx, h); err != nil {
 			slog.Warn("feishu: catch-up update failed", "error", err)
-			v.mu.Unlock()
-			return
 		}
-	}
-	remaining := v.clientBacklog - v.typingCps()*time.Since(v.clientAt).Seconds()
-	wait := time.Duration(remaining / v.typingCps() * float64(time.Second))
-	if limit := time.Duration(v.cfg.FinishCatchupMs) * time.Millisecond; wait > limit {
-		wait = limit
+	} else if final != v.body {
+		v.target = final
+		total := len([]rune(final))
+		step := time.Duration(min(v.cfg.PushIntervalMs, 150)) * time.Millisecond
+		for v.shown < total && ctx.Err() == nil {
+			// Even steps that fit the time left, given how long one card call takes.
+			per := max(step, time.Duration(v.callNs.Load()))
+			n := max(1, int((budget-time.Since(start)+per/2)/per))
+			v.finishChunk = (total - v.shown + n - 1) / n
+			tick := time.Now()
+			if err := p.publishSegmented(ctx, h, tick); err != nil {
+				slog.Warn("feishu: catch-up update failed", "error", err)
+				break
+			}
+			steps++
+			if v.shown >= total {
+				break
+			}
+			v.mu.Unlock()
+			time.Sleep(step - time.Since(tick)) // a card call that outlasted the step needs no pause
+			v.mu.Lock()
+		}
+		v.finishChunk = 0
+		if v.shown < total || v.body != v.lastBody {
+			v.shown, v.body = total, final
+			if err := p.streamSegmentedBody(ctx, h); err != nil {
+				slog.Warn("feishu: catch-up flush failed", "error", err)
+			}
+		}
 	}
 	v.mu.Unlock()
 	if core.StreamTraceOn() {
-		core.StreamTrace("catchup", map[string]any{"wait_ms": wait.Milliseconds()})
-	}
-	if wait < 50*time.Millisecond {
-		return
-	}
-	select {
-	case <-time.After(wait):
-	case <-ctx.Done():
+		core.StreamTrace("catchup", map[string]any{"wait_ms": time.Since(start).Milliseconds(), "steps": steps})
 	}
 }
 

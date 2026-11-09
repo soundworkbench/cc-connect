@@ -21,7 +21,7 @@ type StreamPreviewCfg struct {
 	EndMode           string   // end of turn with a step list: "settle" (never recall: short turns finish in the card, long ones collapse it and send the reply as a new message) or "recall" (default)
 	NotifyAfterMs     int      // settle mode: turns at least this long send the reply as a new message so the phone notifies; default 60000
 	DotsPauseMs       int      // step list: while text grew within this long, the running dots stand still; default 2000
-	FinishCatchupMs   int      // recall flow: before the card is recalled, wait at most this long for the client to type the rest of the reply (0 = 3000, negative = off)
+	FinishCatchupMs   int      // end of turn: finish revealing the rest of the reply in steps within this long (capped at 1000; 0 = 1000, negative = off)
 	PrintStrategy     string   // client typing strategy: "fast" (flush buffered text when new text arrives) or "delay" (finish typing the buffered text first); default fast
 	Enabled           bool     // global toggle
 	DisabledPlatforms []string // platforms where streaming preview is disabled (e.g. "feishu")

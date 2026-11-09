@@ -122,23 +122,21 @@ func lastContent(f *previewFixture) string {
 	return ""
 }
 
-// Before the card is recalled it gets the whole reply in one update and the client
-// time to type it; the wait is the typing time, capped.
-func TestCatchUpSendsRestAndWaitsForTyping(t *testing.T) {
+// Without paced reveal the card has no reveal to finish: the rest goes out in one update, at once.
+func TestCatchUpWithoutPacingSendsRestAtOnce(t *testing.T) {
 	f, p, h := newSmoothPreview(t, nil)
 	ctx := context.Background()
 	_ = p.SetPreviewBody(ctx, h, replyBody(strings.Repeat("字", 10)))
 	publishAt(t, p, h, time.Now())
-	final := replyBody(strings.Repeat("字", 40)) // 30 more characters: 300 ms of typing at 100 chars/s
+	final := replyBody(strings.Repeat("字", 40))
 	before := f.countSuffix("/content")
 	start := time.Now()
 	p.CatchUpPreview(ctx, h, final)
-	el := time.Since(start)
 	if f.countSuffix("/content")-before != 1 || lastContent(f) != final {
 		t.Fatalf("want the rest in one update, got %d (last %d chars)", f.countSuffix("/content")-before, len([]rune(lastContent(f))))
 	}
-	if el < 200*time.Millisecond || el > time.Second {
-		t.Fatalf("waited %v, want about the typing time of 300 ms", el)
+	if el := time.Since(start); el > 200*time.Millisecond {
+		t.Fatalf("waited %v", el)
 	}
 	h.live.mu.Lock()
 	stopped := h.live.stopped
@@ -149,12 +147,12 @@ func TestCatchUpSendsRestAndWaitsForTyping(t *testing.T) {
 }
 
 func TestCatchUpWaitIsCapped(t *testing.T) {
-	_, p, h := newSmoothPreview(t, func(c *core.StreamPreviewCfg) { c.FinishCatchupMs = 120 })
+	_, p, h := newSmoothPreview(t, func(c *core.StreamPreviewCfg) { c.FinishCatchupMs, c.RevealCps, c.PushIntervalMs = 120, 80, 150 })
 	ctx := context.Background()
 	_ = p.SetPreviewBody(ctx, h, replyBody("短"))
 	publishAt(t, p, h, time.Now())
 	start := time.Now()
-	p.CatchUpPreview(ctx, h, replyBody(strings.Repeat("字", 2000))) // 20 s of typing
+	p.CatchUpPreview(ctx, h, replyBody(strings.Repeat("字", 2000))) // 25 s at the paced rate
 	if el := time.Since(start); el > time.Second {
 		t.Fatalf("waited %v despite a 120 ms cap", el)
 	}
