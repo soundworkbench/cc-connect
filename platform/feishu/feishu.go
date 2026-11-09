@@ -6936,10 +6936,11 @@ func (p *Platform) StartSteerReaction(ctx context.Context, rctx any) func(bool) 
 	var once sync.Once
 	return func(consumed bool) {
 		once.Do(func() {
-			p.removeReaction(rc.messageID, id)
+			// Add the new reaction before removing the old one so the message never shows none.
 			if consumed {
 				p.addReactionWithEmoji(rc.messageID, "DONE")
 			}
+			p.removeReaction(rc.messageID, id)
 		})
 	}
 }
