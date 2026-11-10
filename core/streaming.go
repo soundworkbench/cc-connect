@@ -17,6 +17,8 @@ type StreamPreviewCfg struct {
 	TypingStep        int      // characters per client tick; default 6
 	RevealCps         int      // paced reveal: base characters per second released to the card (0 = release text as it arrives)
 	RevealCatchupMs   int      // paced reveal: speed up so a backlog clears within this time (capped at the client typing speed); default 4000
+	RevealLeadMs      int      // paced reveal: keep the client's typing buffer filled to this many ms of typing, so a late card call does not starve the printer (0 = off)
+	BodyInflight      int      // segmented card: body text updates allowed in flight at once, sent every PushIntervalMs without waiting for the reply (0 or 1 = one at a time)
 	DrainMaxMs        int      // paced reveal: at the end of a turn, keep pacing the remaining text for at most this long; default 8000
 	EndMode           string   // end of turn with a step list: "settle" (never recall: short turns finish in the card, long ones collapse it and send the reply as a new message) or "recall" (default)
 	NotifyAfterMs     int      // settle mode: turns at least this long send the reply as a new message so the phone notifies; default 60000
@@ -65,6 +67,8 @@ func ProductStreamPreviewCfg() StreamPreviewCfg {
 	cfg.TypingStep = 4
 	cfg.RevealCps = 90
 	cfg.RevealCatchupMs = 4000
+	cfg.RevealLeadMs = 250
+	cfg.BodyInflight = 6
 	cfg.DrainMaxMs = 8000
 	cfg.EndMode = "settle"
 	cfg.NotifyAfterMs = 60000

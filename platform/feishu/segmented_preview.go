@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -116,6 +117,17 @@ type segmentedPreview struct {
 	// callNs is how long the latest card API call took, in nanoseconds.
 	callNs atomic.Int64
 
+	// Pipelined body updates (cfg.BodyInflight > 1): bodySem holds one token per body
+	// update in flight; pipeErr is the first failure that is not a stale-sequence
+	// rejection, taken by the next frame.
+	bodySem chan struct{}
+	pipeMu  sync.Mutex
+	pipeErr error
+
+	// clientBuf estimates how many characters the client still has to type out of what
+	// the card has received (paced reveal with cfg.RevealLeadMs).
+	clientBuf float64
+
 	// sent is which optional elements the card on the server holds. Empty elements
 	// are left out of the card, since each one adds a blank line.
 	sent previewLayout
@@ -196,10 +208,19 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 	if err != nil {
 		return nil, err
 	}
+	if cfg.BodyInflight < 1 {
+		cfg.BodyInflight = 1
+	}
+	if cfg.RevealLeadMs < 0 {
+		cfg.RevealLeadMs = 0
+	}
 	v := &segmentedPreview{stopCh: make(chan struct{}), cfg: cfg, i18n: i18n, started: time.Now(), bodyID: bodyID, sentBodyID: bodyID, progressID: progressID, footerID: footerID, doneID: doneID}
 	if cfg.StepList {
 		icons := p.stepIconKeys(ctx)
 		v.spinnerKey, v.checkKey, v.blankKey = icons.spinner, icons.check, icons.blank
+	}
+	if cfg.BodyInflight > 1 {
+		v.bodySem = make(chan struct{}, cfg.BodyInflight)
 	}
 	v.sent = v.layoutFor(v.body)
 	v.lastProgress = v.progress(v.started)
@@ -702,21 +723,86 @@ func (v *segmentedPreview) stepCard(config map[string]any, final bool, text stri
 	return string(b)
 }
 
-// cardKitMutation shares the sequence with the existing rich-card path, holding
-// the handle lock through the HTTP request so operations cannot overtake it.
+// cardKitMutation shares the sequence with the existing rich-card path. It holds the
+// gate exclusive through the HTTP request, so it starts after every body update in
+// flight has finished and nothing overtakes it.
 func (p *Platform) cardKitMutation(ctx context.Context, h *feishuPreviewHandle, method, suffix string, body map[string]any) error {
+	h.gate.Lock()
+	defer h.gate.Unlock()
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.sequence++
 	body["sequence"] = h.sequence
+	h.mu.Unlock()
+	return p.cardKitSend(ctx, h, method, suffix, body)
+}
+
+// cardKitStaleSequence is the code for a sequence that is not larger than the one the
+// card saw last: the update was overtaken by a newer one.
+const cardKitStaleSequence = 300317
+
+// startBodyPut sends the full current body text without waiting for the reply and
+// without the exclusive gate. The caller holds a bodySem token. A body update carries
+// the whole text, so one that arrives late and is rejected as stale (a newer one is
+// already on the card) is dropped without a retry; the next frame sends newer text.
+func (p *Platform) startBodyPut(ctx context.Context, h *feishuPreviewHandle, elementID, text string) {
+	v := h.live
+	h.gate.RLock()
+	h.mu.Lock()
+	h.sequence++
+	seq := h.sequence
+	h.mu.Unlock()
+	go func() {
+		defer func() { <-v.bodySem }()
+		defer h.gate.RUnlock()
+		err := p.cardKitSend(ctx, h, http.MethodPut, "/elements/"+elementID+"/content", map[string]any{"content": text, "sequence": seq})
+		if err == nil {
+			return
+		}
+		var ce *feishuCardAPIError
+		if errors.As(err, &ce) && ce.Code == cardKitStaleSequence {
+			slog.Debug("feishu: stale body update dropped", "sequence", seq)
+			return
+		}
+		slog.Debug("feishu: body update failed", "sequence", seq, "error", err)
+		v.pipeMu.Lock()
+		if v.pipeErr == nil {
+			v.pipeErr = err
+		}
+		v.pipeMu.Unlock()
+	}()
+}
+
+// takePipeErr returns and clears the failure of a pipelined body update.
+func (v *segmentedPreview) takePipeErr() error {
+	v.pipeMu.Lock()
+	defer v.pipeMu.Unlock()
+	err := v.pipeErr
+	v.pipeErr = nil
+	return err
+}
+
+func (v *segmentedPreview) hasPipeErr() bool {
+	v.pipeMu.Lock()
+	defer v.pipeMu.Unlock()
+	return v.pipeErr != nil
+}
+
+func (v *segmentedPreview) pipelined() bool { return v.bodySem != nil }
+
+// cardKitSend performs one CardKit request whose body already carries its sequence.
+func (p *Platform) cardKitSend(ctx context.Context, h *feishuPreviewHandle, method, suffix string, body map[string]any) error {
 	path := "/open-apis/cardkit/v1/cards/" + h.cardID + suffix
 	var resp *larkcore.ApiResp
 	if core.StreamTraceOn() {
 		from := time.Now()
 		reused := false
+		inflight := 0
+		if h.live != nil {
+			inflight = len(h.live.bodySem)
+		}
 		ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(i httptrace.GotConnInfo) { reused = i.Reused }})
 		defer func() {
-			core.StreamTrace("api", map[string]any{"m": method, "p": suffix, "ms": float64(time.Since(from).Microseconds()) / 1000, "n": len([]rune(fmt.Sprint(body["content"]))), "reused": reused})
+			core.StreamTrace("api", map[string]any{"m": method, "p": suffix, "ms": float64(time.Since(from).Microseconds()) / 1000, "n": len([]rune(fmt.Sprint(body["content"]))), "reused": reused, "inflight": inflight})
 		}()
 	}
 	callFrom := time.Now()
@@ -738,18 +824,20 @@ func (p *Platform) cardKitMutation(ctx context.Context, h *feishuPreviewHandle, 
 	if resp == nil {
 		return fmt.Errorf("feishu: preview mutation: empty response")
 	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("feishu: preview mutation: HTTP %d", resp.StatusCode)
-	}
+	// CardKit answers its errors with HTTP 400 and the code in the body.
 	var result struct {
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 	}
-	if err := json.Unmarshal(resp.RawBody, &result); err != nil {
-		return fmt.Errorf("feishu: preview response: %w", err)
-	}
-	if result.Code != 0 {
+	parseErr := json.Unmarshal(resp.RawBody, &result)
+	if parseErr == nil && result.Code != 0 {
 		return classifyFeishuCardAPIError("preview mutation", result.Code, result.Msg)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("feishu: preview mutation: HTTP %d", resp.StatusCode)
+	}
+	if parseErr != nil {
+		return fmt.Errorf("feishu: preview response: %w", parseErr)
 	}
 	return nil
 }
@@ -779,7 +867,12 @@ func (p *Platform) ensureLayout(ctx context.Context, h *feishuPreviewHandle) err
 	return nil
 }
 
-func (p *Platform) streamSegmentedBody(ctx context.Context, h *feishuPreviewHandle) error {
+// streamSegmentedBody brings the body element up to v.body. When body updates are
+// pipelined and wait is false it only starts the request (or skips this frame when the
+// in-flight limit is reached; the next frame sends the newer text). Layout changes and
+// element replacements are structural: they wait for the updates in flight and finish
+// before the call returns.
+func (p *Platform) streamSegmentedBody(ctx context.Context, h *feishuPreviewHandle, wait bool) error {
 	v := h.live
 	if err := p.ensureLayout(ctx, h); err != nil {
 		return err
@@ -791,6 +884,15 @@ func (p *Platform) streamSegmentedBody(ctx context.Context, h *feishuPreviewHand
 		v.sentBodyID, v.lastBody = v.bodyID, ""
 	}
 	if v.body == v.lastBody {
+		return nil
+	}
+	if v.pipelined() && !wait {
+		select {
+		case v.bodySem <- struct{}{}:
+			p.startBodyPut(ctx, h, v.bodyID, v.body)
+			v.lastBody = v.body
+		default:
+		}
 		return nil
 	}
 	if err := p.cardKitMutation(ctx, h, http.MethodPut, "/elements/"+v.bodyID+"/content", map[string]any{"content": v.body}); err != nil {
@@ -834,7 +936,7 @@ func (v *segmentedPreview) adoptPending() error {
 		if err != nil {
 			return err
 		}
-		v.bodyID, v.shown, v.body, v.revealAcc = id, 0, "", 0
+		v.bodyID, v.shown, v.body, v.revealAcc, v.clientBuf = id, 0, "", 0, 0
 	}
 	v.target = text
 	return nil
@@ -848,23 +950,23 @@ func (v *segmentedPreview) reveal(now time.Time) {
 	if v.cfg.RevealCps <= 0 {
 		return
 	}
-	total := len([]rune(v.target))
-	if v.shown >= total {
-		v.lastReveal = now
-		return
-	}
-	if v.finishChunk > 0 {
-		v.lastReveal = now
-		v.shown += min(v.finishChunk, total-v.shown)
-		v.body = string([]rune(v.target)[:v.shown])
-		v.lastText = now
-		return
-	}
 	dt := now.Sub(v.lastReveal).Seconds()
 	if v.lastReveal.IsZero() || dt > 1 {
 		dt = float64(v.cfg.PushIntervalMs) / 1000
 	}
 	v.lastReveal = now
+	// The client types what it holds at the typing speed; track how much is left.
+	v.clientBuf = max(0, v.clientBuf-v.typingCps()*dt)
+	total := len([]rune(v.target))
+	if v.shown >= total {
+		return
+	}
+	if v.finishChunk > 0 {
+		v.shown += min(v.finishChunk, total-v.shown)
+		v.body = string([]rune(v.target)[:v.shown])
+		v.lastText = now
+		return
+	}
 	rate := float64(v.cfg.RevealCps)
 	if c := float64(total-v.shown) / (float64(v.cfg.RevealCatchupMs) / 1000); c > rate {
 		rate = c
@@ -872,7 +974,13 @@ func (v *segmentedPreview) reveal(now time.Time) {
 	if max := v.typingCps(); rate > max {
 		rate = max
 	}
-	v.revealAcc += rate * dt
+	want := rate * dt
+	// With text waiting, keep the client's typing buffer at the lead: a card call that
+	// lands late then finds text left to type, instead of an idle printer.
+	if lead := float64(v.cfg.RevealLeadMs) / 1000 * v.typingCps(); lead > 0 && v.clientBuf+want < lead {
+		want = lead - v.clientBuf
+	}
+	v.revealAcc += want
 	n := int(v.revealAcc)
 	v.revealAcc -= float64(n)
 	if v.shown+n > total {
@@ -882,6 +990,7 @@ func (v *segmentedPreview) reveal(now time.Time) {
 		return
 	}
 	v.shown += n
+	v.clientBuf += float64(n)
 	v.body = string([]rune(v.target)[:v.shown])
 	v.lastText = now
 }
@@ -916,11 +1025,14 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 	if v.cfg.StepList {
 		footer = v.footer(now)
 	}
-	if v.body == v.lastBody && progress == v.lastProgress && footer == v.lastFooter && v.bodyID == v.sentBodyID && v.layoutFor(v.body) == v.sent {
+	if v.body == v.lastBody && progress == v.lastProgress && footer == v.lastFooter && v.bodyID == v.sentBodyID && v.layoutFor(v.body) == v.sent && !v.hasPipeErr() {
 		return nil
 	}
 	if !v.fallback {
-		err := p.streamSegmentedBody(ctx, h)
+		err := v.takePipeErr()
+		if err == nil {
+			err = p.streamSegmentedBody(ctx, h, false)
+		}
 		if err == nil && progress != v.lastProgress {
 			err = p.replaceSegmentedElement(ctx, h, v.progressID, v.progressElement(progress))
 		}
@@ -1024,7 +1136,7 @@ func (p *Platform) CatchUpPreview(ctx context.Context, handle any, final string)
 	steps := 0
 	if final != v.body && v.cfg.RevealCps <= 0 {
 		v.target, v.body, v.shown = final, final, len([]rune(final))
-		if err := p.streamSegmentedBody(ctx, h); err != nil {
+		if err := p.streamSegmentedBody(ctx, h, true); err != nil {
 			slog.Warn("feishu: catch-up update failed", "error", err)
 		}
 	} else if final != v.body {
@@ -1033,7 +1145,10 @@ func (p *Platform) CatchUpPreview(ctx context.Context, handle any, final string)
 		step := time.Duration(min(v.cfg.PushIntervalMs, 150)) * time.Millisecond
 		for v.shown < total && ctx.Err() == nil {
 			// Even steps that fit the time left, given how long one card call takes.
-			per := max(step, time.Duration(v.callNs.Load()))
+			per := step
+			if !v.pipelined() { // pipelined updates do not wait for the previous reply
+				per = max(step, time.Duration(v.callNs.Load()))
+			}
 			n := max(1, int((budget-time.Since(start)+per/2)/per))
 			v.finishChunk = (total - v.shown + n - 1) / n
 			tick := time.Now()
@@ -1052,7 +1167,7 @@ func (p *Platform) CatchUpPreview(ctx context.Context, handle any, final string)
 		v.finishChunk = 0
 		if v.shown < total || v.body != v.lastBody {
 			v.shown, v.body = total, final
-			if err := p.streamSegmentedBody(ctx, h); err != nil {
+			if err := p.streamSegmentedBody(ctx, h, true); err != nil {
 				slog.Warn("feishu: catch-up flush failed", "error", err)
 			}
 		}
@@ -1117,7 +1232,7 @@ func (p *Platform) FinishSegmentedPreview(ctx context.Context, handle any, body 
 		}
 	}
 	if !v.fallback {
-		if err := p.streamSegmentedBody(ctx, h); err != nil {
+		if err := p.streamSegmentedBody(ctx, h, true); err != nil {
 			slog.Warn("feishu: final preview stream failed; attempting replacement", "error", err)
 		}
 		p.closeSegmentedStream(ctx, h)

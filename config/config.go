@@ -289,6 +289,8 @@ type StreamPreviewConfig struct {
 	TypingStep        *int     `toml:"typing_step"`                  // default 4
 	RevealCps         *int     `toml:"reveal_cps"`                   // paced reveal base chars/s; default 90, 0 = off
 	RevealCatchupMs   *int     `toml:"reveal_catchup_ms"`            // default 4000
+	RevealLeadMs      *int     `toml:"reveal_lead_ms"`               // typing buffer the client is kept filled to, in ms of typing; default 250, 0 = off
+	BodyInflight      *int     `toml:"body_inflight"`                // body text updates in flight at once, sent every push_interval_ms; default 6, 0 or 1 = one at a time
 	DrainMaxMs        *int     `toml:"drain_max_ms"`                 // default 8000
 	EndMode           string   `toml:"end_mode"`                     // "settle" (default; never recall, see notify_after_ms) or "recall"
 	NotifyAfterMs     *int     `toml:"notify_after_ms"`              // settle mode: turns this long or longer send the reply as a new message; default 60000

@@ -22,7 +22,7 @@ func TestStreamPreviewDefaultsOn(t *testing.T) {
 	want := core.StreamPreviewCfg{
 		Enabled: true, Segmented: true, StepList: true,
 		PushIntervalMs: 150, TypingIntervalMs: 40, TypingStep: 4,
-		RevealCps: 90, RevealCatchupMs: 4000, DrainMaxMs: 8000,
+		RevealCps: 90, RevealCatchupMs: 4000, RevealLeadMs: 250, BodyInflight: 6, DrainMaxMs: 8000,
 		EndMode: "settle", NotifyAfterMs: 60000, DotsPauseMs: 2000,
 		FinishCatchupMs: 3000, PrintStrategy: "delay",
 		IntervalMs: 1500, MinDeltaChars: 30, MaxChars: 2000,
@@ -46,7 +46,12 @@ end_mode = "recall"
 print_strategy = "fast"
 interval_ms = 2000
 typing_marker = ""
+reveal_lead_ms = 0
+body_inflight = 1
 `)
+	if got.RevealLeadMs != 0 || got.BodyInflight != 1 {
+		t.Fatalf("explicit pipeline values ignored: %+v", got)
+	}
 	if got.Segmented || got.StepList {
 		t.Fatalf("explicit false ignored: %+v", got)
 	}

@@ -4880,8 +4880,12 @@ func (p *Platform) ChannelKeyFromSessionKey(sessionKey string) (string, bool) {
 // Entity failed → fallback), in which case streamRichCardText must NOT be
 // called and the engine falls back to full-card Patch via UpdateMessage.
 type feishuPreviewHandle struct {
-	live        *segmentedPreview
-	mu          sync.Mutex
+	live *segmentedPreview
+	mu   sync.Mutex
+	// gate orders the card's OpenAPI calls: body text updates hold it shared while in
+	// flight (they replace the whole text, so their order does not matter), every other
+	// call holds it exclusive, so it starts only after the in-flight updates finish.
+	gate        sync.RWMutex
 	messageID   string
 	chatID      string
 	cardID      string // cardkit-v1 entity id (empty = no streaming text path)
@@ -5735,6 +5739,8 @@ func (p *Platform) patchCardMessage(ctx context.Context, messageID, cardJSON str
 // Reuses h.sequence as the monotonic ordering counter (shared with
 // streamRichCardText so any sequence on any element/card is monotonic).
 func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle, cardJSON string) error {
+	h.gate.Lock()
+	defer h.gate.Unlock()
 	h.mu.Lock()
 	if h.cardID == "" {
 		h.mu.Unlock()

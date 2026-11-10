@@ -2196,6 +2196,8 @@ func buildStreamPreviewCfg(c config.StreamPreviewConfig) core.StreamPreviewCfg {
 	setPos(&spcfg.TypingStep, c.TypingStep)
 	setInt(&spcfg.RevealCps, c.RevealCps)
 	setInt(&spcfg.RevealCatchupMs, c.RevealCatchupMs)
+	setInt(&spcfg.RevealLeadMs, c.RevealLeadMs)
+	setInt(&spcfg.BodyInflight, c.BodyInflight)
 	setInt(&spcfg.DrainMaxMs, c.DrainMaxMs)
 	setInt(&spcfg.NotifyAfterMs, c.NotifyAfterMs)
 	setInt(&spcfg.DotsPauseMs, c.DotsPauseMs)
