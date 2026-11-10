@@ -157,7 +157,7 @@ type QueueBatchConfig struct {
 	MaxMessages      *int     `toml:"max_messages"`
 	MaxChars         *int     `toml:"max_chars"`
 	HoldSeconds      *int     `toml:"hold_seconds"`
-	DebounceMs       *int     `toml:"debounce_ms"` // idle wait for a person's follow-up messages; 0 disables
+	DebounceMs       *int     `toml:"debounce_ms"` // idle wait for a person's follow-up messages; 0 disables; default 1500
 	ImmediateSources []string `toml:"immediate_sources"`
 }
 
@@ -171,7 +171,7 @@ type ResolvedQueueBatch struct {
 }
 
 func (c QueueBatchConfig) Resolve() ResolvedQueueBatch {
-	r := ResolvedQueueBatch{Enabled: true, MaxMessages: 20, MaxChars: 20000, HoldSeconds: 60, DebounceMs: 0, ImmediateSources: []string{"human"}}
+	r := ResolvedQueueBatch{Enabled: true, MaxMessages: 20, MaxChars: 20000, HoldSeconds: 60, DebounceMs: 1500, ImmediateSources: []string{"human"}}
 	if c.Enabled != nil {
 		r.Enabled = *c.Enabled
 	}
