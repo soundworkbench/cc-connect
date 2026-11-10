@@ -4149,6 +4149,42 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				// adapter call, so we run it in a detached goroutine to keep
 				// reader iterations fast (stopUnsolicitedReader relies on a
 				// bounded wait for the reader to exit).
+				// AskUserQuestion needs a person, not a permission decision:
+				// render the same ask card as a foreground turn and wait for
+				// the answer (handlePendingPermission sends it back).
+				if (event.ToolName == "AskUserQuestion" || event.ToolName == "extension_select") && len(event.Questions) > 0 {
+					pending := &pendingPermission{
+						RequestID:    event.RequestID,
+						ToolName:     event.ToolName,
+						ToolInput:    event.ToolInputRaw,
+						InputPreview: event.ToolInput,
+						Questions:    event.Questions,
+						Resolved:     make(chan struct{}),
+					}
+					state.mu.Lock()
+					state.pending = pending
+					state.mu.Unlock()
+					e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
+
+					select {
+					case <-pending.Resolved:
+					case <-ctx.Done():
+						// Reader stopped while the question is open: drop the
+						// pending state and release the waiting CLI.
+						state.mu.Lock()
+						if state.pending == pending {
+							state.pending = nil
+						}
+						state.mu.Unlock()
+						pending.resolve()
+						_ = agentSession.RespondPermission(event.RequestID, PermissionResult{
+							Behavior: "deny", Message: "denied: question not answered",
+						})
+						return
+					}
+					continue
+				}
+
 				state.mu.Lock()
 				autoApprove := state.approveAll
 				state.mu.Unlock()

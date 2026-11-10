@@ -14278,6 +14278,130 @@ func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
 	e.stopUnsolicitedReader(state)
 }
 
+func startUnsolicitedAskFixture(t *testing.T, key string) (*Engine, *stubCardPlatform, *permRecordingSession, *interactiveState) {
+	t.Helper()
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	rec := &permRecordingSession{controllableAgentSession: *newControllableSession("unsol-ask")}
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: rec, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+	rec.events <- Event{
+		Type:         EventPermissionRequest,
+		RequestID:    "req-ask",
+		ToolName:     "AskUserQuestion",
+		ToolInput:    `{"questions":[{"question":"Which database?"}]}`,
+		ToolInputRaw: map[string]any{"questions": []any{map[string]any{"question": "Which database?"}}},
+		Questions:    testQuestions(),
+	}
+	return e, p, rec, state
+}
+
+// TestUnsolicitedReader_AskUserQuestion_RendersCardAndAnswers verifies that an
+// AskUserQuestion raised outside a user turn shows the ask card (no auto-deny
+// notice) and that the user's answer is sent back as an allow with answers.
+func TestUnsolicitedReader_AskUserQuestion_RendersCardAndAnswers(t *testing.T) {
+	key := "test:ask:u1"
+	e, p, rec, state := startUnsolicitedAskFixture(t, key)
+
+	card := waitForSentCard(t, p)
+	if countCardActionValues(card, "askq:") != 3 {
+		t.Fatalf("askq button count = %d, want 3", countCardActionValues(card, "askq:"))
+	}
+	for _, m := range p.getSent() {
+		if strings.Contains(m, "AskUserQuestion") {
+			t.Fatalf("unexpected auto-deny notice: %q", m)
+		}
+	}
+	rec.mu.Lock()
+	calls := rec.permCalls
+	rec.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("permission answered before the user replied (%d calls)", calls)
+	}
+
+	if !e.handlePendingPermission(p, &Message{SessionKey: key, UserID: "u1", Content: "askq:0:2", ReplyCtx: "ctx"}, "askq:0:2", key) {
+		t.Fatal("expected answer to resolve the pending unsolicited ask")
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		rec.mu.Lock()
+		calls = rec.permCalls
+		res := rec.lastPermResult
+		rec.mu.Unlock()
+		if calls > 0 {
+			if res.Behavior != "allow" {
+				t.Fatalf("behavior = %q, want allow", res.Behavior)
+			}
+			answers, _ := res.UpdatedInput["answers"].(map[string]any)
+			if answers["Which database?"] != "SQLite" {
+				t.Fatalf("answers = %#v, want SQLite", res.UpdatedInput["answers"])
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for RespondPermission")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// The reader keeps relaying the agent's follow-up output.
+	rec.events <- Event{Type: EventResult, Content: "chosen", Done: true}
+	deadline = time.After(3 * time.Second)
+	for {
+		found := false
+		for _, m := range p.getSent() {
+			if m == "chosen" {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("follow-up result was not relayed")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	e.stopUnsolicitedReader(state)
+}
+
+// TestUnsolicitedReader_AskUserQuestion_StopCleansPending verifies that
+// stopping the reader while a question is open clears the pending state and
+// releases the waiting CLI.
+func TestUnsolicitedReader_AskUserQuestion_StopCleansPending(t *testing.T) {
+	key := "test:ask:u2"
+	e, p, rec, state := startUnsolicitedAskFixture(t, key)
+	waitForSentCard(t, p)
+
+	doneCh := state.unsolicitedDone
+	e.stopUnsolicitedReader(state)
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("reader did not exit while ask was pending")
+	}
+
+	state.mu.Lock()
+	pending := state.pending
+	state.mu.Unlock()
+	if pending != nil {
+		t.Fatal("pending ask not cleaned up")
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.permCalls != 1 || rec.lastPermResult.Behavior != "deny" {
+		t.Fatalf("permCalls=%d behavior=%q, want one deny", rec.permCalls, rec.lastPermResult.Behavior)
+	}
+}
+
 // permRecordingSession wraps controllableAgentSession and records permission responses.
 type permRecordingSession struct {
 	controllableAgentSession
