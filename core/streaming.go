@@ -39,6 +39,8 @@ type StreamPreviewCfg struct {
 	SegMaxChars      int
 	SegTypingMarker  string
 
+	SpinnerGIF []byte // replacement bytes for the Feishu running-row spinner image; empty = built-in
+
 	QuickLine QuickLineCfg // one-sentence acknowledgement from a fast model, written into the card
 }
 

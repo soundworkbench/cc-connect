@@ -303,6 +303,7 @@ type StreamPreviewConfig struct {
 	MinDeltaChars     *int     `toml:"min_delta_chars"`              // min new chars before update; default 12 on Feishu, 30 elsewhere
 	MaxChars          *int     `toml:"max_chars"`                    // max preview length; default 4000 on Feishu, 2000 elsewhere
 	TypingMarker      *string  `toml:"typing_marker"`                // shown under a running preview; default "..." on Feishu, off elsewhere
+	SpinnerImage      string   `toml:"spinner_image"`                // path to a GIF that replaces the running-row spinner (Feishu step list); default the built-in one
 	TraceFile         string   `toml:"trace_file"`                   // append per-event streaming timings (JSON lines) to this file; default off
 
 	QuickLine QuickLineConfig `toml:"quick_line"` // [stream_preview.quick_line]: fast-model acknowledgement line in the card

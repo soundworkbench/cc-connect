@@ -199,3 +199,28 @@ func TestStepRowsShareIconSlot(t *testing.T) {
 		t.Fatalf("summary: %v", card[0])
 	}
 }
+
+// A configured spinner replaces only the spinner bytes; an empty one keeps the embedded GIF.
+func TestConfiguredSpinnerImageIsUploaded(t *testing.T) {
+	custom := []byte("GIF89a-custom")
+	for name, tc := range map[string]struct{ cfg, want []byte }{"configured": {custom, custom}, "fallback": {nil, spinnerGIF}} {
+		f, p := newPreviewFixture(t)
+		_ = f
+		var got [][]byte
+		p.spinnerUpload = func(_ context.Context, data []byte) (string, error) {
+			got = append(got, data)
+			return fmt.Sprintf("img_%d", len(got)), nil
+		}
+		cfg := core.DefaultStreamPreviewCfg()
+		cfg.Segmented, cfg.StepList, cfg.SpinnerGIF = true, true, tc.cfg
+		cfg.PushIntervalMs = 60000
+		handle, err := p.StartSegmentedPreview(context.Background(), replyContext{chatID: "oc"}, cfg, core.NewI18n(core.LangChinese))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(handle.(*feishuPreviewHandle).live.stop)
+		if len(got) != 3 || string(got[0]) != string(tc.want) || string(got[1]) != string(checkGIF) || string(got[2]) != string(blankGIF) {
+			t.Fatalf("%s: uploads %d, spinner %q", name, len(got), got[0])
+		}
+	}
+}

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -91,5 +93,26 @@ func TestBuildAgentOptionsStreamPartialTextDefault(t *testing.T) {
 	}
 	if _, set := buildAgentOptions("/d", codex)["stream_partial_text"]; set {
 		t.Fatal("only claudecode is affected")
+	}
+}
+
+func TestStreamPreviewSpinnerImage(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.gif")
+	gifBytes := []byte("GIF89a-test")
+	if err := os.WriteFile(good, gifBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(dir, "bad.gif")
+	if err := os.WriteFile(bad, []byte("not a gif"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeStreamPreview(t, "[stream_preview]\nspinner_image = '"+good+"'\n").SpinnerGIF; string(got) != string(gifBytes) {
+		t.Fatalf("configured file: %q", got)
+	}
+	for name, path := range map[string]string{"unset": "", "missing": filepath.Join(dir, "none.gif"), "not a gif": bad} {
+		if got := decodeStreamPreview(t, "[stream_preview]\nspinner_image = '"+path+"'\n").SpinnerGIF; got != nil {
+			t.Fatalf("%s: want built-in spinner, got %q", name, got)
+		}
 	}
 }

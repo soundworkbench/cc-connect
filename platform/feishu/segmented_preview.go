@@ -216,7 +216,7 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 	}
 	v := &segmentedPreview{stopCh: make(chan struct{}), cfg: cfg, i18n: i18n, started: time.Now(), bodyID: bodyID, sentBodyID: bodyID, progressID: progressID, footerID: footerID, doneID: doneID}
 	if cfg.StepList {
-		icons := p.stepIconKeys(ctx)
+		icons := p.stepIconKeys(ctx, cfg.SpinnerGIF)
 		v.spinnerKey, v.checkKey, v.blankKey = icons.spinner, icons.check, icons.blank
 	}
 	if cfg.BodyInflight > 1 {
@@ -483,7 +483,7 @@ func secondsBetween(from, to time.Time) int {
 
 // stepIconKeys uploads the step-row images once per platform and caches their keys. After a
 // failed upload it returns empty keys (glyph spinner, text check) and tries again only after a back-off.
-func (p *Platform) stepIconKeys(ctx context.Context) stepIconKeys {
+func (p *Platform) stepIconKeys(ctx context.Context, spinnerOverride []byte) stepIconKeys {
 	p.spinnerMu.Lock()
 	defer p.spinnerMu.Unlock()
 	if p.stepIcons.spinner != "" {
@@ -498,12 +498,16 @@ func (p *Platform) stepIconKeys(ctx context.Context) stepIconKeys {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	spinner := spinnerGIF
+	if len(spinnerOverride) > 0 {
+		spinner = spinnerOverride
+	}
 	var keys stepIconKeys
 	var err error
 	for _, img := range []struct {
 		data []byte
 		key  *string
-	}{{spinnerGIF, &keys.spinner}, {checkGIF, &keys.check}, {blankGIF, &keys.blank}} {
+	}{{spinner, &keys.spinner}, {checkGIF, &keys.check}, {blankGIF, &keys.blank}} {
 		if *img.key, err = upload(ctx, img.data); err != nil || *img.key == "" {
 			slog.Warn("feishu: step icon upload failed; using glyphs", "error", err)
 			p.spinnerFailed = time.Now()

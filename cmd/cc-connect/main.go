@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -2167,6 +2168,24 @@ func derefInt(v *int) int {
 	return *v
 }
 
+// loadSpinnerImage reads the GIF configured as stream_preview.spinner_image. An empty
+// path, an unreadable file or a non-GIF file yields nil, which keeps the built-in spinner.
+func loadSpinnerImage(path string) []byte {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		slog.Warn("stream_preview.spinner_image unreadable; using the built-in spinner", "path", path, "error", err)
+		return nil
+	}
+	if !bytes.HasPrefix(data, []byte("GIF8")) {
+		slog.Warn("stream_preview.spinner_image is not a GIF; using the built-in spinner", "path", path)
+		return nil
+	}
+	return data
+}
+
 // buildStreamPreviewCfg merges [stream_preview] over the defaults. Unset keys
 // keep the defaults; explicit values (including false and 0) are honoured.
 // interval_ms, min_delta_chars, max_chars and typing_marker, when written,
@@ -2209,6 +2228,7 @@ func buildStreamPreviewCfg(c config.StreamPreviewConfig) core.StreamPreviewCfg {
 		spcfg.PrintStrategy = s
 	}
 	setBool(&spcfg.Enabled, c.Enabled)
+	spcfg.SpinnerGIF = loadSpinnerImage(c.SpinnerImage)
 	if c.IntervalMs != nil {
 		spcfg.IntervalMs, spcfg.SegIntervalMs = *c.IntervalMs, 0
 	}
