@@ -232,15 +232,15 @@ func (s *APIServer) handleAssistantInject(w http.ResponseWriter, r *http.Request
 		return
 	}
 	msg := &Message{SessionKey: req.SessionKey, Platform: p.Name(), UserID: "assistant", UserName: "assistant", Content: req.Message, Source: req.Source, Urgent: req.Urgent, ReplyCtx: ctx, scheduledPrompt: true, scheduledInputID: "assistant:" + req.RequestID, admissionDeadline: time.Now().Add(250 * time.Millisecond)}
-	queued, err := e.admitScheduledPrompt(p, msg, session, sessions, agent, iKey, workspace)
+	queued, lockGen, err := e.admitScheduledPrompt(p, msg, session, sessions, agent, iKey, workspace)
 	if err != nil {
 		http.Error(w, "admission failed", 503)
 		return
 	}
 	if !queued && !e.launchAcceptedWork(func() {
-		e.processInteractiveMessageWith(p, msg, session, agent, sessions, iKey, workspace, req.SessionKey)
+		e.processInteractiveMessageWith(p, msg, session, agent, sessions, iKey, workspace, req.SessionKey, lockGen)
 	}) {
-		session.Unlock()
+		session.Unlock(lockGen)
 		http.Error(w, "engine stopping", 503)
 		return
 	}
@@ -334,11 +334,16 @@ func (s *APIServer) handleAssistantRotate(w http.ResponseWriter, r *http.Request
 		return
 	}
 	old := sessions.FindByID(sessions.ActiveSessionID(req.SessionKey))
-	if old == nil || old.ID != req.ExpectedSessionID || e.assistantBusy(iKey, old) || !old.TryLock() {
+	if old == nil || old.ID != req.ExpectedSessionID || e.assistantBusy(iKey, old) {
 		http.Error(w, "session changed or busy", 409)
 		return
 	}
-	defer old.UnlockWithoutUpdate()
+	oldGen, locked := old.TryLock()
+	if !locked {
+		http.Error(w, "session changed or busy", 409)
+		return
+	}
+	defer old.UnlockWithoutUpdate(oldGen)
 	history := old.GetHistory(0)
 	if len(history) != req.ExpectedHistoryCount || len(history) == 0 || history[len(history)-1].Role != "assistant" || strings.TrimSpace(history[len(history)-1].Content) != strings.TrimSpace(req.Summary) {
 		http.Error(w, "handoff no longer matches completed assistant history", 409)
@@ -382,7 +387,7 @@ func (s *APIServer) handleAssistantRotate(w http.ResponseWriter, r *http.Request
 	if id := candidateAS.CurrentSessionID(); id != "" {
 		provisional.SetAgentSessionID(id, agent.Name())
 	}
-	fresh, err := sessions.rotateAssistant(req.SessionKey, old, req.Summary, provisional)
+	fresh, freshGen, err := sessions.rotateAssistant(req.SessionKey, old, req.Summary, provisional)
 	if err != nil {
 		failCandidate()
 		http.Error(w, "persist rotation failed; original session retained", 503)
@@ -402,7 +407,7 @@ func (s *APIServer) handleAssistantRotate(w http.ResponseWriter, r *http.Request
 	msg := &Message{SessionKey: req.SessionKey, Platform: p.Name(), UserID: "assistant", UserName: "assistant", Content: req.Summary, ReplyCtx: ctx, scheduledPrompt: true, scheduledInputID: "rotation:" + req.RequestID, historyPreseeded: true, preflightSent: true, executionState: candidate}
 	go func() {
 		defer done()
-		e.processInteractiveMessageWith(p, msg, fresh, agent, sessions, iKey, workspace, req.SessionKey)
+		e.processInteractiveMessageWith(p, msg, fresh, agent, sessions, iKey, workspace, req.SessionKey, freshGen)
 	}()
 	result := map[string]any{"ok": true, "session_id": fresh.ID, "previous_session_id": old.ID, "request_id": req.RequestID}
 	s.assistantRemember(receiptKey, digest, result)
@@ -411,11 +416,11 @@ func (s *APIServer) handleAssistantRotate(w http.ResponseWriter, r *http.Request
 
 // Persist summary and activation together; rollback all routing changes if the
 // atomic snapshot write fails. The old session remains registered and resumable.
-func (sm *SessionManager) rotateAssistant(key string, old *Session, summary string, provisional *Session) (*Session, error) {
+func (sm *SessionManager) rotateAssistant(key string, old *Session, summary string, provisional *Session) (*Session, uint64, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if sm.activeSession[key] != old.ID {
-		return nil, fmt.Errorf("active session changed")
+		return nil, 0, fmt.Errorf("active session changed")
 	}
 	counter := sm.counter
 	ids := append([]string(nil), sm.userSessions[key]...)
@@ -423,7 +428,12 @@ func (sm *SessionManager) rotateAssistant(key string, old *Session, summary stri
 	fresh.ActiveProvider = old.GetActiveProvider()
 	fresh.AgentSessionID = provisional.GetAgentSessionID()
 	fresh.AgentType = provisional.AgentType
+	// fresh is not reachable by other goroutines until this returns, so the
+	// busy lock is taken directly; its generation is returned to the caller.
 	fresh.busy = true
+	fresh.busySince = time.Now()
+	fresh.lockGen++
+	gen := fresh.lockGen
 	fresh.History = []HistoryEntry{{Role: "user", Content: summary, Timestamp: time.Now()}}
 	oldAgentID := old.GetAgentSessionID()
 	if err := sm.saveLocked(); err != nil {
@@ -434,7 +444,7 @@ func (sm *SessionManager) rotateAssistant(key string, old *Session, summary stri
 		sm.activeSession[key] = old.ID
 		sm.userSessions[key] = ids
 		sm.counter = counter
-		return nil, err
+		return nil, 0, err
 	}
-	return fresh, nil
+	return fresh, gen, nil
 }

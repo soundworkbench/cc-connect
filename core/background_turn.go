@@ -14,7 +14,11 @@ func (e *Engine) installBackgroundTurnGate(state *interactiveState, session *Ses
 		return
 	}
 	gated.SetBackgroundTurnGate(func() bool {
-		if e.ctx.Err() != nil || !session.TryLock() {
+		if e.ctx.Err() != nil {
+			return false
+		}
+		gen, locked := session.TryLock()
+		if !locked {
 			return false
 		}
 		e.interactiveMu.Lock()
@@ -24,10 +28,11 @@ func (e *Engine) installBackgroundTurnGate(state *interactiveState, session *Ses
 		valid := current == state && !state.stopped && !state.eventsNeedResync && state.agentSession == as && as.Alive() && len(state.pendingMessages) == 0
 		if valid {
 			state.backgroundTurnLease = true
+			state.backgroundTurnLeaseGen = gen
 		}
 		state.mu.Unlock()
 		if !valid {
-			session.UnlockWithoutUpdate()
+			session.UnlockWithoutUpdate(gen)
 			return false
 		}
 		e.cancelAgentSessionIdleClose(state)
@@ -42,18 +47,22 @@ func (e *Engine) releaseBackgroundTurnLease(state *interactiveState, session *Se
 		return
 	}
 	state.backgroundTurnLease = false
+	gen := state.backgroundTurnLeaseGen
 	stopped := state.stopped
 	pending := len(state.pendingMessages) > 0
 	agent := state.agent
 	state.mu.Unlock()
-	session.UnlockWithoutUpdate()
+	session.UnlockWithoutUpdate(gen)
 	if agent == nil {
 		agent = e.agent
 	}
 	// Never run the drain inline inside the unsolicited reader: it hands off that
 	// reader's event channel, and must be able to wait for this goroutine to exit.
-	if !stopped && pending && session.TryLock() {
-		go e.drainOrphanedQueue(session, sessions, key, agent, workspaceDir)
+	if stopped || !pending {
+		return
+	}
+	if next, ok := session.TryLock(); ok {
+		go e.drainOrphanedQueue(session, sessions, key, agent, workspaceDir, next)
 	}
 }
 
@@ -61,9 +70,10 @@ func (e *Engine) releaseBackgroundTurnLease(state *interactiveState, session *Se
 func (e *Engine) abandonBackgroundTurnLease(state *interactiveState, session *Session) {
 	state.mu.Lock()
 	owned := state.backgroundTurnLease
+	gen := state.backgroundTurnLeaseGen
 	state.backgroundTurnLease = false
 	state.mu.Unlock()
 	if owned {
-		session.UnlockWithoutUpdate()
+		session.UnlockWithoutUpdate(gen)
 	}
 }

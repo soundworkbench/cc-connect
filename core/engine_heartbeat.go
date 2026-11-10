@@ -67,11 +67,12 @@ func (e *Engine) ExecuteHeartbeat(sessionKey, prompt string, silent bool) error 
 	}
 
 	session := e.sessions.GetOrCreateActive(sessionKey)
-	if !session.TryLock() {
+	lockGen, locked := session.TryLock()
+	if !locked {
 		return fmt.Errorf("session %q is busy", sessionKey)
 	}
 
-	e.processInteractiveMessage(targetPlatform, msg, session)
+	e.processInteractiveMessage(targetPlatform, msg, session, lockGen)
 	return nil
 }
 

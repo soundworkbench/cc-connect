@@ -6,23 +6,23 @@ import (
 	"time"
 )
 
-// Returns false with the session lock owned by the caller, or true once the
-// prompt belongs to the shared FIFO. Scheduler success means accepted for
+// Returns false with the session lock owned by the caller (lockGen is that
+// lock's generation), or true once the prompt belongs to the shared FIFO. Scheduler success means accepted for
 // processing, not a separately collected model result.
-func (e *Engine) admitScheduledPrompt(p Platform, msg *Message, session *Session, sessions *SessionManager, agent Agent, key, workspace string) (bool, error) {
+func (e *Engine) admitScheduledPrompt(p Platform, msg *Message, session *Session, sessions *SessionManager, agent Agent, key, workspace string) (queued bool, lockGen uint64, err error) {
 	e.ensureInteractiveStateForQueueing(key, p, msg.ReplyCtx, session)
 	e.setQueuedWorkspace(key, workspace)
 	for {
 		if !msg.admissionDeadline.IsZero() && time.Now().After(msg.admissionDeadline) {
-			return false, fmt.Errorf("local assistant admission timed out")
+			return false, 0, fmt.Errorf("local assistant admission timed out")
 		}
 		if e.isShuttingDown() {
-			return false, fmt.Errorf("engine is shutting down")
+			return false, 0, fmt.Errorf("engine is shutting down")
 		}
 		if e.ctx.Err() != nil {
-			return false, e.ctx.Err()
+			return false, 0, e.ctx.Err()
 		}
-		if session.TryLock() {
+		if gen, locked := session.TryLock(); locked {
 			e.interactiveMu.Lock()
 			state := e.interactiveStates[key]
 			if state == nil {
@@ -35,31 +35,34 @@ func (e *Engine) admitScheduledPrompt(p Platform, msg *Message, session *Session
 				e.interactiveMu.Unlock()
 				handled, err := e.admitBusyMessage(p, msg, key, session, sessions)
 				if err != nil || !handled {
-					session.Unlock()
+					session.Unlock(gen)
 					if err != nil {
-						return true, err
+						return true, 0, err
 					}
-					return true, fmt.Errorf("queue admission failed")
+					return true, 0, fmt.Errorf("queue admission failed")
 				}
-				if !e.launchAcceptedWork(func() { e.drainOrphanedQueue(session, sessions, key, agent, workspace) }) {
-					session.Unlock()
+				if !e.launchAcceptedWork(func() { e.drainOrphanedQueue(session, sessions, key, agent, workspace, gen) }) {
+					session.Unlock(gen)
 				}
-				return true, nil
+				return true, 0, nil
 			}
 			if state.steerMessageIDs[msg.scheduledInputID] {
 				state.mu.Unlock()
 				e.interactiveMu.Unlock()
-				session.Unlock()
-				return true, nil
+				session.Unlock(gen)
+				return true, 0, nil
 			}
 			if e.shouldHold(msg) {
 				state.mu.Unlock()
 				e.interactiveMu.Unlock()
-				held, err := e.holdIdleMessage(p, msg, session, sessions, agent, key, workspace)
+				held, err := e.holdIdleMessage(p, msg, session, sessions, agent, key, workspace, gen)
 				if err != nil {
-					session.Unlock()
+					session.Unlock(gen)
 				}
-				return held, err
+				if held {
+					return true, 0, err
+				}
+				return false, gen, err
 			}
 			msg.executionState = state
 			if state.steerMessageIDs == nil {
@@ -68,28 +71,28 @@ func (e *Engine) admitScheduledPrompt(p Platform, msg *Message, session *Session
 			state.steerMessageIDs[msg.scheduledInputID] = true
 			state.mu.Unlock()
 			e.interactiveMu.Unlock()
-			return false, nil
+			return false, gen, nil
 		}
 		handled, err := e.admitBusyMessage(p, msg, key, session, sessions)
 		if err != nil {
-			return false, err
+			return false, 0, err
 		}
 		if handled {
 			slog.Info("scheduled prompt accepted into session queue", "session", msg.SessionKey, "input_id", msg.scheduledInputID)
 			// The preceding owner can release the session between TryLock and enqueue.
-			if session.TryLock() {
-				if !e.launchAcceptedWork(func() { e.drainOrphanedQueue(session, sessions, key, agent, workspace) }) {
-					session.Unlock()
-					return true, fmt.Errorf("engine is shutting down")
+			if gen, ok := session.TryLock(); ok {
+				if !e.launchAcceptedWork(func() { e.drainOrphanedQueue(session, sessions, key, agent, workspace, gen) }) {
+					session.Unlock(gen)
+					return true, 0, fmt.Errorf("engine is shutting down")
 				}
 			}
-			return true, nil
+			return true, 0, nil
 		}
 		// A dead state can coexist briefly with its still-locked processor. Wait for
 		// that owner to unlock, then start/resume through the normal foreground path.
 		select {
 		case <-e.ctx.Done():
-			return false, e.ctx.Err()
+			return false, 0, e.ctx.Err()
 		case <-time.After(10 * time.Millisecond):
 		}
 	}

@@ -9,6 +9,38 @@
 
 See [durable message queues](docs/queued-messages.md) for storage and recovery behavior.
 
+## v1.5.1-beta.1 (2026-08-28)
+
+Beta since v1.5.0 stable — 16 merged PRs focused on Feishu/Weixin reliability, Claude Code /compact, Codex reasoning, and Cursor image attachments. See `changelogs/v1.5.1-beta.1.md` for the full contributor list.
+
+### New Features
+- **i18n**: Localize agent system prompts (cron/timer/send/relay) based on language config (#1721, #1655)
+- **Cursor**: Deliver image attachments via on-disk paths (#1709)
+
+### Fixed
+- **Feishu**: Chunked HTTP Range download for large resources (#1746); fail-closed on bot open_id discovery (#1725)
+- **Weixin**: Split send budget by reply vs push path (#1743); configurable inbound dedup (#1733)
+- **Claude Code**: Restore /compact and slash commands (#1737); bounded session teardown (#1714)
+- **Codex**: Propagate failed turns (#1730); max reasoning effort (#1727); /list session names (#1639)
+- **Pi**: Attachment @path refs (#1724); Windows build fix (#1738)
+- **Session**: /switch target idle reset exemption (#1734)
+- **Daemon/Skills**: Non-Linux build (#1710); plugin skill roots (#1713)
+
+## Unreleased
+
+### Fixed
+- **Pi**: Merge custom providers with the built-in model catalog, resolve ambiguous aliases using the default provider, and filter duplicate or empty model entries. Reasoning levels follow the selected model, and switching models clears unsupported thinking overrides. Context windows now use catalog values for catalog-only models, with custom definitions taking precedence (#1872).
+
+### Added
+- **`agent_session_idle_timeout_mins`**: new per-project config option that closes an idle live agent process after a clean turn while preserving the cc-connect session and saved agent session ID. The next message starts a new agent process and resumes the same conversation. Set to `0` or leave unset to disable (#1338).
+- **Reasonix agent**: new agent adapter for Reasonix multi-model coding agent, bridging via HTTP serve API (POST /submit, SSE /events, POST /approve). Supports default/yolo/plan permission modes, SSE auto-reconnect with backoff, and thinking accumulator. (#1281)
+- **cloud_web platform**: 新增 self-hosted IM Gateway 作为 first-class platform 接入 (CWIP v1 协议,支持 websocket / long_poll / gateway 3 种 transport,完整 inbound/outbound + capability negotiation + graceful degradation)。 详见 docs/cloud-web.md + #1282。
+
+### Fixed
+- **Feishu**: a hung display-name lookup no longer holds an inbound message (in one case for 16 minutes, after which a stale `/new` ran): user/chat name lookups time out after 5s and fall back to the ID, the no-name answer for p2p chats is cached, card actions (`perm:`/`askq:`/`cmd:`) resolve names outside the callback, and failed lookup requests log at Warn (#2017, #2018).
+
+## Unreleased
+
 ## v1.5.0 (2026-08-16)
 
 First stable release of the v1.5.0 series since v1.4.1. Stabilizes beta.1 → beta.5 (~93 commits) including production P1 fixes (#1693 / #1686).

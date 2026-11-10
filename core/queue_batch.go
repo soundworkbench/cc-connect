@@ -166,7 +166,7 @@ func (e *Engine) shouldHold(msg *Message) bool {
 }
 
 // The caller owns the session lock. Admission persists before the timer starts.
-func (e *Engine) holdIdleMessage(p Platform, msg *Message, session *Session, sessions *SessionManager, agent Agent, key, workspace string) (bool, error) {
+func (e *Engine) holdIdleMessage(p Platform, msg *Message, session *Session, sessions *SessionManager, agent Agent, key, workspace string, lockGen uint64) (bool, error) {
 	debounce := e.shouldDebounce(msg)
 	if !debounce && !e.shouldHold(msg) {
 		return false, nil
@@ -213,10 +213,10 @@ func (e *Engine) holdIdleMessage(p Platform, msg *Message, session *Session, ses
 	}
 	if !e.launchAcceptedWork(func() {
 		defer releaseHeldTyping(state, held)
-		e.drainOrphanedQueue(session, sessions, key, agent, workspace)
+		e.drainOrphanedQueue(session, sessions, key, agent, workspace, lockGen)
 	}) {
 		releaseHeldTyping(state, held)
-		session.Unlock()
+		session.Unlock(lockGen)
 	}
 	return true, nil
 }

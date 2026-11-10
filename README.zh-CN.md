@@ -30,7 +30,7 @@
 </p>
 
 <p align="center">
-  <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a>
+  <a href="./README.md">English</a> | <a href="./README.zh-CN.md">中文</a> | <a href="./README.ru.md">Русский</a>
 </p>
 
 <p align="center">
@@ -53,7 +53,7 @@
 
 通过 cc-connect，你可以将本地运行的 Kimi CLI 连接到飞书、钉钉、Telegram、Slack、Discord、企业微信等即时通讯工具，随时让 Kimi 阅读和修改代码、排查问题、执行命令与处理自动化任务。
 
-**cc-connect 已支持 Kimi CLI。立即体验 **[Kimi Code 订阅](https://www.kimi.com/code/?aff=cc-connect)**，或前往 Kimi 开放平台（[中文站](https://platform.kimi.com?track_id=track-78c5d46574a54286a4ff42f7331272ba&aff=cc-connect)｜[Global](https://platform.kimi.ai?track_id=track-dd37b0bea7a64b99b3fe2217b398e20b&aff=cc-connect)）使用 API。
+cc-connect 已支持 Kimi CLI。立即体验 **Kimi Code 订阅**（[中文站](https://www.kimi.com/code?aff=cc-connect)｜[Global](https://www.kimi.ai/code?aff=cc-connect)），或前往 Kimi 开放平台（[中文站](https://platform.kimi.com?track_id=track-78c5d46574a54286a4ff42f7331272ba&aff=cc-connect)｜[Global](https://platform.kimi.ai?track_id=track-dd37b0bea7a64b99b3fe2217b398e20b&aff=cc-connect)）使用 API。
 
 ---
 
@@ -76,6 +76,11 @@
 <tr>
 <td width="150"><a href="https://aigocode.com/invite/CYY3C85C"><img src="assets/sponsors/aigocode.png" alt="AIGoCode" width="120"></a></td>
 <td>感谢 AIGoCode 对本项目的赞助！AIGoCode 是集 Claude Code、Codex、最新 Gemini 模型于一体的一站式平台，提供稳定高效、高性价比的 AI 编码服务。灵活订阅方案、零封号风险、无需 VPN 直连、响应速度极快。通过 <a href="https://aigocode.com/invite/CYY3C85C">此链接</a> 注册，首充额外获得 10% 赠送额度！</td>
+</tr>
+
+<tr>
+<td width="150"><a href="https://go.apimart.ai/gh-cc-connect"><img src="assets/sponsors/apimart.png" alt="APIMart" width="120"></a></td>
+<td>感谢 APIMart 赞助本项目！APIMart 是专注 AI 图片/视频生成的低价 API 平台，GPT-Image-2 低至 $0.006/张，1 美元可出图 160+ 张。图片、视频一套异步 API 通吃，提交任务拿 ID、回调取结果，跑批万张不超时、换模型不改代码。按量付费、无月费，通过 <a href="https://go.apimart.ai/gh-cc-connect">此注册链接</a> 注册即可开用。</td>
 </tr>
 
 <tr>
@@ -187,20 +192,19 @@
 </p>
 
 
-## 🆕 v1.5.0 更新了什么
+## 🆕 v1.5.1-beta.1 更新了什么
 
-v1.5.0 正式版 —— 自 v1.4.1 起稳定化 beta.1 → beta.5（约 93 个 commit），**五个新平台**、**Reasonix agent**、飞书/Kimi/Pi 强化及生产 P1 稳定性修复。
+自 v1.5.0 正式版以来的 beta —— 16 个已合并 PR。亮点：
 
-- **新增平台** — **腾讯元宝** (#1445)；**cloud_web** 自托管 IM Gateway (#1282)；**Google Chat** (#1424)；**WPS Agentspace** (#1439)；**Tuitui** (#849)。
-- **新增 Agent** — **Reasonix** HTTP serve API，支持 default/yolo/plan 权限模式 (#1281)。
-- **飞书** — 话题 workspace 隔离 (#1551)；引用文件按需下载 (#1588)；首次进话题 bootstrap (#1627)；跨类型图片 batch flush (#1693)。
-- **Kimi & Pi** — Kimi Code CLI 原生方言 (#1564)；Pi v0.84.0 toolcall_end + willRetry (#1674, #1597)；Pi RPC 模式 (#1440)。
-- **核心稳定性** — `/restart` panic 恢复；idle close 竞态修复；codex gpt-5.x `/model` (#1546)；Claude Code 会话标题 (#1549)；微信 send budget (#1643)。
-- **`agent_session_idle_timeout_mins`** — 空闲 agent 进程自动关闭，保留 session 供 resume (#1338)。
+- **i18n** — 按 language 配置本地化 agent system prompt（cron/timer/send/relay）(#1721)。
+- **Cursor** — 图片附件通过 on-disk path 传给 Cursor CLI (#1709)。
+- **飞书** — 大文件 HTTP Range 分块下载，绕过 code=234037 (#1746)；bot open_id 发现失败 fail-closed (#1725)。
+- **微信** — 回复/推送分路径 send budget (#1743)；入站 dedup 可配置 (#1733)。
+- **Claude Code** — 移除 `--replay-user-messages`，恢复 `/compact` 等 slash 命令 (#1737)；session teardown 竞态修复 (#1714)。
+- **Codex** — 传播 app-server turn 失败 (#1730)；支持 max reasoning effort (#1727)；`/list` 正确读 session 名 (#1639)。
+- **Pi** — 附件 @path 引用而非 inline bytes (#1724)；Windows 编译修复 (#1738)。
 
-⚠️ **升级提示**：无 breaking change。所有新配置项均为可选且有安全默认值。v1.4.1 配置可直接升级。
-
-完整汇总见 `changelogs/v1.5.0.md`。
+无任何破坏性变更。完整 changelog 见 `changelogs/v1.5.1-beta.1.md`。
 
 
 ## 🧩 平台能力一览

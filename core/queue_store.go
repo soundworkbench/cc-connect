@@ -322,8 +322,8 @@ func (e *Engine) resumeQueue(key string) {
 		}
 		session := sessions.GetOrCreateActive(q.msgSessionKey)
 		for !e.isShuttingDown() {
-			if session.TryLock() {
-				e.drainOrphanedQueue(session, sessions, key, agent, workspace)
+			if gen, ok := session.TryLock(); ok {
+				e.drainOrphanedQueue(session, sessions, key, agent, workspace, gen)
 				return
 			}
 			select {
@@ -345,6 +345,7 @@ func (e *Engine) stopInteractiveSessionPreservingQueue(key string) bool {
 	e.stopUnsolicitedReader(state)
 	state.mu.Lock()
 	as, pending, preview := state.agentSession, state.pending, state.activePreview
+	closePlatform, closeReplyCtx := state.platform, state.replyCtx
 	if as == nil && state.queueReady != nil {
 		state.mu.Unlock()
 		e.interactiveMu.Unlock()
@@ -372,7 +373,7 @@ func (e *Engine) stopInteractiveSessionPreservingQueue(key string) bool {
 		pending.resolve()
 	}
 	go func() {
-		e.closeAgentSessionWithTimeout(key, as)
+		e.closeAgentSessionWithTimeout(key, as, closePlatform, closeReplyCtx)
 		close(ready)
 		e.resumeQueue(key)
 	}()

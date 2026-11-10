@@ -98,6 +98,9 @@ func (a *Agent) runClaudeUsageProbe(ctx context.Context) (string, error) {
 	}()
 
 	terminal := newClaudeUsageTerminal()
+	// readDone carries the reader's single result and may be consumed by the
+	// loop below; readerFinished is closed when the reader returns, so cleanup can
+	// wait on it no matter who received from readDone.
 	readDone := make(chan error, 1)
 	readerFinished := make(chan struct{})
 	go func() {

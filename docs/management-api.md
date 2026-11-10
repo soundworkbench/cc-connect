@@ -1,7 +1,9 @@
 # cc-connect Management API Specification
 
-> **Version:** 1.1-draft\
-> **Status:** Draft — subject to change before implementation\
+[English](management-api.md) | [中文](management-api.zh-CN.md) | [Русский](management-api.ru.md)
+
+> **Version:** 1.1-draft  
+> **Status:** Draft — subject to change before implementation  
 > **Last Updated:** 2026-03-24
 
 ---

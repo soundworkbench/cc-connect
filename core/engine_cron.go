@@ -121,16 +121,6 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	}
 
 	content := job.Prompt
-	if strings.HasPrefix(content, "/") {
-		parts := strings.Fields(content)
-		if len(parts) > 0 {
-			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
-			if skill := e.skills.Resolve(cmd); skill != nil {
-				content = BuildSkillInvocationPrompt(skill, parts[1:])
-			}
-		}
-	}
-
 	msg := &Message{
 		individualReply:  strings.HasPrefix(strings.TrimSpace(job.Prompt), "/"),
 		scheduledPrompt:  true,
@@ -179,6 +169,17 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 		}
 	}
 
+	if strings.HasPrefix(content, "/") {
+		parts := strings.Fields(content)
+		if len(parts) > 0 {
+			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
+			if skill := e.skillsForAgent(agent).Resolve(cmd); skill != nil {
+				content = BuildSkillInvocationPrompt(skill, parts[1:])
+			}
+		}
+	}
+	msg.Content = content
+
 	useNewSession := false
 	if e.cronScheduler != nil {
 		useNewSession = e.cronScheduler.UsesNewSession(job)
@@ -189,7 +190,8 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	if useNewSession {
 		msg.SessionKey = runSessionKey
 		session := sessions.NewSideSession(runSessionKey, "cron-"+job.ID)
-		if !session.TryLock() {
+		lockGen, locked := session.TryLock()
+		if !locked {
 			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
 		iKey := fmt.Sprintf("%s#cron:%s", runSessionKey, session.ID)
@@ -197,7 +199,7 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 			iKey = workspaceDir + ":" + iKey
 		}
 		prevHistLen := session.HistoryLen()
-		e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
+		e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey, lockGen)
 		e.cleanupInteractiveState(iKey)
 		// Empty-response detection via session history delta: processInteractiveMessageWith
 		// always adds a "user" entry (prevHistLen+1), then an "assistant" entry on success
@@ -216,13 +218,13 @@ func (e *Engine) ExecuteCronJob(job *CronJob) error {
 	if workspaceDir != "" {
 		iKey = workspaceDir + ":" + sessionKey
 	}
-	queued, admissionErr := e.admitScheduledPrompt(targetPlatform, msg, session, sessions, agent, iKey, workspaceDir)
+	queued, lockGen, admissionErr := e.admitScheduledPrompt(targetPlatform, msg, session, sessions, agent, iKey, workspaceDir)
 	e.assistantAdmissionMu.Unlock()
 	if queued || admissionErr != nil {
 		return admissionErr
 	}
 	prevHistLen := session.HistoryLen()
-	e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
+	e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey, lockGen)
 	// Same empty-response detection as the useNewSession path above.
 	if !job.Mute && session.HistoryLen() < prevHistLen+2 {
 		return fmt.Errorf("cron job %q produced an empty response", job.ID)
@@ -283,20 +285,22 @@ func (e *Engine) renderCronCard(sessionKey string, userID string) *Card {
 			desc += " [mute]"
 		}
 
-		human := CronExprToHuman(j.CronExpr, lang)
+		human := cronDisplaySchedule(j.CronExpr, lang)
+		loc := cronDisplayLocation(j.CronExpr)
 
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("%s %s\n", status, desc))
 		sb.WriteString(e.i18n.Tf(MsgCronIDLabel, j.ID))
 		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
-		nextRun := e.cronScheduler.NextRun(j.ID)
+		nextRun := e.cronScheduler.NextRun(j.ID).In(loc)
 		if !nextRun.IsZero() {
-			fmtStr := cronTimeFormat(nextRun, now)
+			fmtStr := cronTimeFormat(nextRun, now.In(loc))
 			sb.WriteString(e.i18n.Tf(MsgCronNextRunLabel, nextRun.Format(fmtStr)))
 		}
 		if !j.LastRun.IsZero() {
-			fmtStr := cronTimeFormat(j.LastRun, now)
-			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, j.LastRun.Format(fmtStr)))
+			lastRun := j.LastRun.In(loc)
+			fmtStr := cronTimeFormat(lastRun, now.In(loc))
+			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, lastRun.Format(fmtStr)))
 			if j.LastError != "" {
 				sb.WriteString(e.i18n.Tf(MsgCronFailedSuffix, truncateStr(j.LastError, 40)))
 			}
@@ -472,18 +476,20 @@ func (e *Engine) cmdCronList(p Platform, msg *Message) {
 
 		sb.WriteString(fmt.Sprintf("ID: %s\n", j.ID))
 
-		human := CronExprToHuman(j.CronExpr, lang)
+		human := cronDisplaySchedule(j.CronExpr, lang)
+		loc := cronDisplayLocation(j.CronExpr)
 		sb.WriteString(e.i18n.Tf(MsgCronScheduleLabel, human, j.CronExpr))
 
-		nextRun := e.cronScheduler.NextRun(j.ID)
+		nextRun := e.cronScheduler.NextRun(j.ID).In(loc)
 		if !nextRun.IsZero() {
-			fmtStr := cronTimeFormat(nextRun, now)
+			fmtStr := cronTimeFormat(nextRun, now.In(loc))
 			sb.WriteString(e.i18n.Tf(MsgCronNextRunLabel, nextRun.Format(fmtStr)))
 		}
 
 		if !j.LastRun.IsZero() {
-			fmtStr := cronTimeFormat(j.LastRun, now)
-			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, j.LastRun.Format(fmtStr)))
+			lastRun := j.LastRun.In(loc)
+			fmtStr := cronTimeFormat(lastRun, now.In(loc))
+			sb.WriteString(e.i18n.Tf(MsgCronLastRunLabel, lastRun.Format(fmtStr)))
 			if j.LastError != "" {
 				sb.WriteString(fmt.Sprintf(" (failed: %s)", truncateStr(j.LastError, 40)))
 			}

@@ -119,16 +119,6 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	}
 
 	content := job.Prompt
-	if strings.HasPrefix(content, "/") {
-		parts := strings.Fields(content)
-		if len(parts) > 0 {
-			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
-			if skill := e.skills.Resolve(cmd); skill != nil {
-				content = BuildSkillInvocationPrompt(skill, parts[1:])
-			}
-		}
-	}
-
 	msg := &Message{
 		individualReply:  strings.HasPrefix(strings.TrimSpace(job.Prompt), "/"),
 		scheduledPrompt:  true,
@@ -175,6 +165,17 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		}
 	}
 
+	if strings.HasPrefix(content, "/") {
+		parts := strings.Fields(content)
+		if len(parts) > 0 {
+			cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
+			if skill := e.skillsForAgent(agent).Resolve(cmd); skill != nil {
+				content = BuildSkillInvocationPrompt(skill, parts[1:])
+			}
+		}
+	}
+	msg.Content = content
+
 	useNewSession := false
 	if e.timerScheduler != nil {
 		useNewSession = e.timerScheduler.UsesNewSession(job)
@@ -185,14 +186,15 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	if useNewSession {
 		msg.SessionKey = runSessionKey
 		session := sessions.NewSideSession(runSessionKey, "timer-"+job.ID)
-		if !session.TryLock() {
+		lockGen, locked := session.TryLock()
+		if !locked {
 			return fmt.Errorf("session %q is busy", runSessionKey)
 		}
 		iKey := fmt.Sprintf("%s#timer:%s", runSessionKey, session.ID)
 		if workspaceDir != "" {
 			iKey = workspaceDir + ":" + iKey
 		}
-		e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey)
+		e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey, lockGen)
 		e.cleanupInteractiveState(iKey)
 		return nil
 	}
@@ -203,12 +205,12 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 	if workspaceDir != "" {
 		iKey = workspaceDir + ":" + sessionKey
 	}
-	queued, admissionErr := e.admitScheduledPrompt(targetPlatform, msg, session, sessions, agent, iKey, workspaceDir)
+	queued, lockGen, admissionErr := e.admitScheduledPrompt(targetPlatform, msg, session, sessions, agent, iKey, workspaceDir)
 	e.assistantAdmissionMu.Unlock()
 	if queued || admissionErr != nil {
 		return admissionErr
 	}
-	e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey)
+	e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, sessionKey, lockGen)
 	return nil
 }
 
