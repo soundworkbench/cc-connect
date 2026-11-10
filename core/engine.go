@@ -537,11 +537,13 @@ type queuedMessage struct {
 	msgSessionKey     string // session key for extracting chat ID
 	channelKey        string // platform-provided channel identifier (preferred over sessionKey extraction)
 	userMessageTimeMs int64  // Feishu create_time ms (optional); see Message.UserMessageTimeMs
+	acked             bool   // received reaction already shown while the debounce window was open
 }
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
 	hold                     *queueHold
+	heldTyping               *heldTyping // reaction shown on the first message while the debounce window is open
 	queueReady               <-chan struct{}
 	queueKey                 string
 	queueSessionID           string
@@ -2536,6 +2538,14 @@ func (e *Engine) admitBusyMessage(p Platform, msg *Message, interactiveKey strin
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
+	if state.hold != nil && state.hold.debounce && isHumanTurn(msg) {
+		// Follow-up inside the window: same "received" reaction as a steered
+		// message, shown now instead of when the merged turn starts.
+		if _, ok := p.(SteerReaction); ok {
+			state.pendingMessages[len(state.pendingMessages)-1].acked = true
+			e.steerReaction(p, msg.ReplyCtx, nil)
+		}
+	}
 	if msg.scheduledPrompt || (state.hold != nil && state.hold.debounce) {
 		return true, nil
 	}
@@ -3086,7 +3096,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	// stopping/restarting it across queued message turns.
 	var stopTyping func()
 	if ti, ok := p.(TypingIndicator); ok {
-		stopTyping = ti.StartTyping(e.ctx, msg.ReplyCtx)
+		stopTyping = e.takeTurnTyping(msg.executionState, p, ti, msg.ReplyCtx)
 	}
 	defer func() {
 		// Stop typing if ownership was NOT transferred to processInteractiveEvents
@@ -6057,7 +6067,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 
 		var stopTyping func()
 		if ti, ok := queued.platform.(TypingIndicator); ok {
-			stopTyping = ti.StartTyping(e.ctx, queued.replyCtx)
+			stopTyping = e.takeTurnTyping(state, queued.platform, ti, queued.replyCtx)
 		}
 
 		slog.Info("processing queued message", "session", sessionKey)

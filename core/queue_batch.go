@@ -33,6 +33,50 @@ func (e *Engine) SetQueueBatchConfig(cfg QueueBatchConfig) {
 	e.queueBatch = cfg
 }
 
+// heldTyping is the typing reaction put on a person's first message the moment
+// its debounce window opens.
+type heldTyping struct {
+	platform Platform
+	replyCtx any
+	stop     func()
+}
+
+// takeTurnTyping returns the typing indicator for a turn starting on replyCtx.
+// A reaction already shown for that same message is reused; anything else held
+// is stopped and a fresh one is started.
+func (e *Engine) takeTurnTyping(state *interactiveState, p Platform, ti TypingIndicator, replyCtx any) func() {
+	if state != nil {
+		state.mu.Lock()
+		held := state.heldTyping
+		state.heldTyping = nil
+		state.mu.Unlock()
+		if held != nil {
+			if held.platform.Name() == p.Name() && reflect.DeepEqual(held.replyCtx, replyCtx) {
+				return held.stop
+			}
+			held.stop()
+		}
+	}
+	return ti.StartTyping(e.ctx, replyCtx)
+}
+
+// releaseHeldTyping stops a window reaction no turn picked up (cancel, reset,
+// error, or every message in the window withdrawn).
+func releaseHeldTyping(state *interactiveState, held *heldTyping) {
+	if held == nil {
+		return
+	}
+	state.mu.Lock()
+	mine := state.heldTyping == held
+	if mine {
+		state.heldTyping = nil
+	}
+	state.mu.Unlock()
+	if mine {
+		held.stop()
+	}
+}
+
 type queueHold struct {
 	until    time.Time
 	wake     chan struct{}
@@ -131,10 +175,22 @@ func (e *Engine) holdIdleMessage(p Platform, msg *Message, session *Session, ses
 	if debounce {
 		wait = e.queueBatch.Debounce
 	}
+	var held *heldTyping
+	if debounce {
+		if ti, ok := p.(TypingIndicator); ok {
+			held = &heldTyping{platform: p, replyCtx: msg.ReplyCtx, stop: ti.StartTyping(e.ctx, msg.ReplyCtx)}
+		}
+	}
 	e.interactiveMu.Lock()
 	state := e.ensureInteractiveStateForQueueingLocked(key, p, msg.ReplyCtx, session)
 	state.mu.Lock()
 	state.workspaceDir = workspace
+	if held != nil {
+		if state.heldTyping != nil {
+			state.heldTyping.stop()
+		}
+		state.heldTyping = held
+	}
 	hold := &queueHold{until: time.Now().Add(wait), wake: make(chan struct{}, 1), debounce: debounce}
 	state.hold = hold
 	if state.stopCh == nil {
@@ -149,12 +205,17 @@ func (e *Engine) holdIdleMessage(p Platform, msg *Message, session *Session, ses
 			state.hold = nil
 		}
 		state.mu.Unlock()
+		releaseHeldTyping(state, held)
 		if err == nil {
 			err = fmt.Errorf("queue admission failed")
 		}
 		return true, err
 	}
-	if !e.launchAcceptedWork(func() { e.drainOrphanedQueue(session, sessions, key, agent, workspace) }) {
+	if !e.launchAcceptedWork(func() {
+		defer releaseHeldTyping(state, held)
+		e.drainOrphanedQueue(session, sessions, key, agent, workspace)
+	}) {
+		releaseHeldTyping(state, held)
 		session.Unlock()
 	}
 	return true, nil
@@ -282,6 +343,9 @@ func (e *Engine) mergeQueuedMessages(messages []queuedMessage) queuedMessage {
 
 func (e *Engine) acknowledgeQueuedBatch(q queuedMessage) {
 	for _, m := range q.mergedFrom[:max(0, len(q.mergedFrom)-1)] {
+		if m.acked {
+			continue
+		}
 		if m.platform.Name() == q.platform.Name() && reflect.DeepEqual(m.replyCtx, q.replyCtx) {
 			continue
 		}
