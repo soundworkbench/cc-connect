@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-func TestSteerReactionReceivedThenDone(t *testing.T) {
+func TestSteerReactionStaysOnceTaken(t *testing.T) {
 	for _, consumed := range []bool{true, false} {
 		t.Run(map[bool]string{true: "ack", false: "exit"}[consumed], func(t *testing.T) {
 			var mu sync.Mutex
@@ -48,7 +48,7 @@ func TestSteerReactionReceivedThenDone(t *testing.T) {
 			done(consumed)
 			want := []string{"OnIt", "remove"}
 			if consumed {
-				want = []string{"OnIt", "DONE", "remove"}
+				want = []string{"OnIt"}
 			}
 			mu.Lock()
 			defer mu.Unlock()
@@ -57,4 +57,19 @@ func TestSteerReactionReceivedThenDone(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSteerReactionDefersToReceiptWithSameEmoji(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "tenant_access_token") {
+			t.Errorf("unexpected reaction call %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"code":0,"expire":7200,"tenant_access_token":"fixture"}`))
+	}))
+	defer srv.Close()
+	p := &Platform{client: lark.NewClient("steer-reaction-test", "fixture", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client())), reactionEmoji: "Get"}
+	done := p.StartSteerReaction(context.Background(), replyContext{messageID: "om_x", receiptMessageID: "om_x", receiptEmoji: "Get"})
+	done(true)
+	done(false)
 }

@@ -7784,8 +7784,9 @@ func (p *Platform) SetPreviewStatus(previewHandle any, status core.CardStatus) {
 	}
 }
 
-// StartSteerReaction reuses the existing Feishu reaction API, but consumption
-// confirmation is independent of the quiet-mode task completion preference.
+// StartSteerReaction marks a message sent while the agent is busy with one
+// reaction that stays once the agent takes the message. It is removed only when
+// the message never reached the agent.
 func (p *Platform) StartSteerReaction(ctx context.Context, rctx any) func(bool) {
 	rc, ok := rctx.(replyContext)
 	if !ok || rc.messageID == "" {
@@ -7795,15 +7796,18 @@ func (p *Platform) StartSteerReaction(ctx context.Context, rctx any) func(bool) 
 	if emoji == "" {
 		emoji = "Get"
 	}
+	// The persistent receipt already shows this emoji; a second create and a later
+	// delete would remove the receipt too.
+	if rc.receiptMessageID == rc.messageID && rc.receiptEmoji == emoji {
+		return func(bool) {}
+	}
 	id := p.addReactionWithEmoji(rc.messageID, emoji)
 	var once sync.Once
 	return func(consumed bool) {
 		once.Do(func() {
-			// Add the new reaction before removing the old one so the message never shows none.
-			if consumed {
-				p.addReactionWithEmoji(rc.messageID, "DONE")
+			if !consumed {
+				p.removeReaction(rc.messageID, id)
 			}
-			p.removeReaction(rc.messageID, id)
 		})
 	}
 }
