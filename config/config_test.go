@@ -3480,8 +3480,8 @@ func TestStreamPreviewSegmentedConfig(t *testing.T) {
 	if _, err := toml.Decode("[stream_preview]\nenabled = true\n", &defaults); err != nil {
 		t.Fatal(err)
 	}
-	if defaults.StreamPreview.Segmented {
-		t.Fatal("new streaming behavior must default off")
+	if defaults.StreamPreview.Segmented != nil || defaults.StreamPreview.StepList != nil {
+		t.Fatal("unset segmented/step_list must stay nil so the default (on) applies")
 	}
 	var cfg Config
 	if _, err := toml.Decode(`[stream_preview]
@@ -3493,7 +3493,8 @@ typing_step = 8
 		t.Fatal(err)
 	}
 	sp := cfg.StreamPreview
-	if !sp.Segmented || sp.PushIntervalMs != 250 || sp.TypingIntervalMs != 50 || sp.TypingStep != 8 {
+	if sp.Segmented == nil || !*sp.Segmented || sp.PushIntervalMs == nil || *sp.PushIntervalMs != 250 ||
+		sp.TypingIntervalMs == nil || *sp.TypingIntervalMs != 50 || sp.TypingStep == nil || *sp.TypingStep != 8 {
 		t.Fatalf("stream preview config not decoded: %+v", sp)
 	}
 }

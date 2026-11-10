@@ -29,9 +29,16 @@ type StreamPreviewCfg struct {
 	MinDeltaChars     int      // minimum new chars before sending an update (default 30)
 	MaxChars          int      // max preview length (default 2000)
 	TypingMarker      string   // shown under a preview while the turn is still running, e.g. "..."; empty = off
+
+	// Values used instead of IntervalMs/MinDeltaChars/MaxChars/TypingMarker when the
+	// platform renders a segmented preview (Feishu). Zero/empty = use the shared value.
+	SegIntervalMs    int
+	SegMinDeltaChars int
+	SegMaxChars      int
+	SegTypingMarker  string
 }
 
-// DefaultStreamPreviewCfg returns sensible defaults.
+// DefaultStreamPreviewCfg returns the base preview settings shared by all platforms.
 func DefaultStreamPreviewCfg() StreamPreviewCfg {
 	return StreamPreviewCfg{
 		Enabled:           true,
@@ -43,6 +50,30 @@ func DefaultStreamPreviewCfg() StreamPreviewCfg {
 		MinDeltaChars:     30,
 		MaxChars:          2000,
 	}
+}
+
+// ProductStreamPreviewCfg returns the settings used when [stream_preview] does
+// not override them: the Feishu segmented step-list card is on. The Seg* values
+// apply to Feishu only; other platforms keep the shared values above.
+func ProductStreamPreviewCfg() StreamPreviewCfg {
+	cfg := DefaultStreamPreviewCfg()
+	cfg.Segmented = true
+	cfg.StepList = true
+	cfg.PushIntervalMs = 150
+	cfg.TypingStep = 4
+	cfg.RevealCps = 90
+	cfg.RevealCatchupMs = 4000
+	cfg.DrainMaxMs = 8000
+	cfg.EndMode = "settle"
+	cfg.NotifyAfterMs = 60000
+	cfg.DotsPauseMs = 2000
+	cfg.FinishCatchupMs = 3000
+	cfg.PrintStrategy = "delay"
+	cfg.SegIntervalMs = 700
+	cfg.SegMinDeltaChars = 12
+	cfg.SegMaxChars = 4000
+	cfg.SegTypingMarker = "..."
+	return cfg
 }
 
 // FinalReplyOrder controls temporary preview recall relative to final delivery.
@@ -400,6 +431,20 @@ func newStreamPreview(cfg StreamPreviewCfg, p Platform, replyCtx any, ctx contex
 	}
 	if cfg.Segmented {
 		sp.segmented, _ = p.(SegmentedPreviewer)
+	}
+	if sp.segmented != nil {
+		if cfg.SegIntervalMs > 0 {
+			sp.cfg.IntervalMs = cfg.SegIntervalMs
+		}
+		if cfg.SegMinDeltaChars > 0 {
+			sp.cfg.MinDeltaChars = cfg.SegMinDeltaChars
+		}
+		if cfg.SegMaxChars > 0 {
+			sp.cfg.MaxChars = cfg.SegMaxChars
+		}
+		if cfg.SegTypingMarker != "" {
+			sp.cfg.TypingMarker = cfg.SegTypingMarker
+		}
 	}
 	return sp
 }

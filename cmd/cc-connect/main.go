@@ -599,50 +599,9 @@ func main() {
 
 		// Wire streaming preview
 		{
-			spcfg := core.DefaultStreamPreviewCfg()
-			spcfg.Segmented = cfg.StreamPreview.Segmented
-			spcfg.StepList = cfg.StreamPreview.StepList
-			if cfg.StreamPreview.PushIntervalMs > 0 {
-				spcfg.PushIntervalMs = cfg.StreamPreview.PushIntervalMs
-			}
-			if cfg.StreamPreview.TypingIntervalMs > 0 {
-				spcfg.TypingIntervalMs = cfg.StreamPreview.TypingIntervalMs
-			}
-			spcfg.RevealCps = cfg.StreamPreview.RevealCps
-			spcfg.RevealCatchupMs = cfg.StreamPreview.RevealCatchupMs
-			spcfg.DrainMaxMs = cfg.StreamPreview.DrainMaxMs
-			if m := cfg.StreamPreview.EndMode; m == "settle" || m == "recall" {
-				spcfg.EndMode = m
-			}
-			spcfg.NotifyAfterMs = cfg.StreamPreview.NotifyAfterMs
-			spcfg.DotsPauseMs = cfg.StreamPreview.DotsPauseMs
-			spcfg.FinishCatchupMs = cfg.StreamPreview.FinishCatchupMs
-			if s := cfg.StreamPreview.PrintStrategy; s == "fast" || s == "delay" {
-				spcfg.PrintStrategy = s
-			}
-			if cfg.StreamPreview.TypingStep > 0 {
-				spcfg.TypingStep = cfg.StreamPreview.TypingStep
-			}
+			spcfg := buildStreamPreviewCfg(cfg.StreamPreview)
 			if err := core.SetStreamTraceFile(cfg.StreamPreview.TraceFile); err != nil {
 				slog.Warn("stream preview: trace file", "error", err)
-			}
-			if cfg.StreamPreview.Enabled != nil {
-				spcfg.Enabled = *cfg.StreamPreview.Enabled
-			}
-			if cfg.StreamPreview.IntervalMs != nil {
-				spcfg.IntervalMs = *cfg.StreamPreview.IntervalMs
-			}
-			if cfg.StreamPreview.MinDeltaChars != nil {
-				spcfg.MinDeltaChars = *cfg.StreamPreview.MinDeltaChars
-			}
-			if cfg.StreamPreview.MaxChars != nil {
-				spcfg.MaxChars = *cfg.StreamPreview.MaxChars
-			}
-			if cfg.StreamPreview.DisabledPlatforms != nil {
-				spcfg.DisabledPlatforms = cfg.StreamPreview.DisabledPlatforms
-			}
-			if cfg.StreamPreview.TypingMarker != nil {
-				spcfg.TypingMarker = *cfg.StreamPreview.TypingMarker
 			}
 			engine.SetStreamPreviewCfg(spcfg)
 		}
@@ -1984,6 +1943,16 @@ func buildAgentOptions(dataDir string, proj config.ProjectConfig) map[string]any
 	}
 	opts["cc_data_dir"] = dataDir
 	opts["cc_project"] = proj.Name
+	// Feishu streaming cards show the block being written: default it on for
+	// Claude Code projects that have a Feishu/Lark platform; false still turns it off.
+	if _, set := opts["stream_partial_text"]; !set && proj.Agent.Type == "claudecode" {
+		for _, pc := range proj.Platforms {
+			if pc.Type == "feishu" || pc.Type == "lark" {
+				opts["stream_partial_text"] = true
+				break
+			}
+		}
+	}
 	return opts
 }
 
@@ -2132,4 +2101,62 @@ func derefInt(v *int) int {
 		return 0
 	}
 	return *v
+}
+
+// buildStreamPreviewCfg merges [stream_preview] over the defaults. Unset keys
+// keep the defaults; explicit values (including false and 0) are honoured.
+// interval_ms, min_delta_chars, max_chars and typing_marker, when written,
+// apply to every platform; when unset, the Feishu defaults apply to Feishu
+// only and other platforms keep the shared ones.
+func buildStreamPreviewCfg(c config.StreamPreviewConfig) core.StreamPreviewCfg {
+	spcfg := core.ProductStreamPreviewCfg()
+	setBool := func(dst *bool, v *bool) {
+		if v != nil {
+			*dst = *v
+		}
+	}
+	setInt := func(dst *int, v *int) {
+		if v != nil {
+			*dst = *v
+		}
+	}
+	setPos := func(dst *int, v *int) {
+		if v != nil && *v > 0 {
+			*dst = *v
+		}
+	}
+	setBool(&spcfg.Segmented, c.Segmented)
+	setBool(&spcfg.StepList, c.StepList)
+	setPos(&spcfg.PushIntervalMs, c.PushIntervalMs)
+	setPos(&spcfg.TypingIntervalMs, c.TypingIntervalMs)
+	setPos(&spcfg.TypingStep, c.TypingStep)
+	setInt(&spcfg.RevealCps, c.RevealCps)
+	setInt(&spcfg.RevealCatchupMs, c.RevealCatchupMs)
+	setInt(&spcfg.DrainMaxMs, c.DrainMaxMs)
+	setInt(&spcfg.NotifyAfterMs, c.NotifyAfterMs)
+	setInt(&spcfg.DotsPauseMs, c.DotsPauseMs)
+	setInt(&spcfg.FinishCatchupMs, c.FinishCatchupMs)
+	if m := c.EndMode; m == "settle" || m == "recall" {
+		spcfg.EndMode = m
+	}
+	if s := c.PrintStrategy; s == "fast" || s == "delay" {
+		spcfg.PrintStrategy = s
+	}
+	setBool(&spcfg.Enabled, c.Enabled)
+	if c.IntervalMs != nil {
+		spcfg.IntervalMs, spcfg.SegIntervalMs = *c.IntervalMs, 0
+	}
+	if c.MinDeltaChars != nil {
+		spcfg.MinDeltaChars, spcfg.SegMinDeltaChars = *c.MinDeltaChars, 0
+	}
+	if c.MaxChars != nil {
+		spcfg.MaxChars, spcfg.SegMaxChars = *c.MaxChars, 0
+	}
+	if c.DisabledPlatforms != nil {
+		spcfg.DisabledPlatforms = c.DisabledPlatforms
+	}
+	if c.TypingMarker != nil {
+		spcfg.TypingMarker, spcfg.SegTypingMarker = *c.TypingMarker, ""
+	}
+	return spcfg
 }

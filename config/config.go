@@ -281,25 +281,25 @@ type DisplayConfig struct {
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
 type StreamPreviewConfig struct {
-	Segmented         bool     `toml:"segmented"`                    // opt-in Feishu segmented streaming; default false
-	StepList          bool     `toml:"step_list"`                    // with segmented: Feishu step-list card (done/running steps, live text, footer); default false
-	PushIntervalMs    int      `toml:"push_interval_ms"`             // default 200
-	TypingIntervalMs  int      `toml:"typing_interval_ms"`           // default 40
-	TypingStep        int      `toml:"typing_step"`                  // default 6
-	RevealCps         int      `toml:"reveal_cps"`                   // paced reveal base chars/s; 0 = off
-	RevealCatchupMs   int      `toml:"reveal_catchup_ms"`            // default 4000
-	DrainMaxMs        int      `toml:"drain_max_ms"`                 // default 8000
-	EndMode           string   `toml:"end_mode"`                     // "settle" (never recall; see notify_after_ms) or "recall" (default)
-	NotifyAfterMs     int      `toml:"notify_after_ms"`              // settle mode: turns this long or longer send the reply as a new message; default 60000
-	DotsPauseMs       int      `toml:"dots_pause_ms"`                // step list dots stand still while text grew within this long; default 2000
-	FinishCatchupMs   int      `toml:"finish_catchup_ms"`            // max wait for the card to type out the reply before it is recalled; default 3000, negative = off
-	PrintStrategy     string   `toml:"print_strategy"`               // "fast" (default) or "delay"
+	Segmented         *bool    `toml:"segmented"`                    // Feishu segmented streaming card; default true
+	StepList          *bool    `toml:"step_list"`                    // with segmented: Feishu step-list card (done/running steps, live text, footer); default true
+	PushIntervalMs    *int     `toml:"push_interval_ms"`             // default 150
+	TypingIntervalMs  *int     `toml:"typing_interval_ms"`           // default 40
+	TypingStep        *int     `toml:"typing_step"`                  // default 4
+	RevealCps         *int     `toml:"reveal_cps"`                   // paced reveal base chars/s; default 90, 0 = off
+	RevealCatchupMs   *int     `toml:"reveal_catchup_ms"`            // default 4000
+	DrainMaxMs        *int     `toml:"drain_max_ms"`                 // default 8000
+	EndMode           string   `toml:"end_mode"`                     // "settle" (default; never recall, see notify_after_ms) or "recall"
+	NotifyAfterMs     *int     `toml:"notify_after_ms"`              // settle mode: turns this long or longer send the reply as a new message; default 60000
+	DotsPauseMs       *int     `toml:"dots_pause_ms"`                // step list dots stand still while text grew within this long; default 2000
+	FinishCatchupMs   *int     `toml:"finish_catchup_ms"`            // max wait for the card to type out the reply before it is recalled; default 3000, negative = off
+	PrintStrategy     string   `toml:"print_strategy"`               // "delay" (default) or "fast"
 	Enabled           *bool    `toml:"enabled"`                      // default true
 	DisabledPlatforms []string `toml:"disabled_platforms,omitempty"` // platforms where preview is disabled (e.g. ["feishu"])
-	IntervalMs        *int     `toml:"interval_ms"`                  // min ms between updates; default 1500
-	MinDeltaChars     *int     `toml:"min_delta_chars"`              // min new chars before update; default 30
-	MaxChars          *int     `toml:"max_chars"`                    // max preview length; default 2000
-	TypingMarker      *string  `toml:"typing_marker"`                // shown under a running preview, e.g. "..."; default off
+	IntervalMs        *int     `toml:"interval_ms"`                  // min ms between updates; default 700 on Feishu, 1500 elsewhere
+	MinDeltaChars     *int     `toml:"min_delta_chars"`              // min new chars before update; default 12 on Feishu, 30 elsewhere
+	MaxChars          *int     `toml:"max_chars"`                    // max preview length; default 4000 on Feishu, 2000 elsewhere
+	TypingMarker      *string  `toml:"typing_marker"`                // shown under a running preview; default "..." on Feishu, off elsewhere
 	TraceFile         string   `toml:"trace_file"`                   // append per-event streaming timings (JSON lines) to this file; default off
 }
 

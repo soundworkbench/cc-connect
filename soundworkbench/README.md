@@ -8,14 +8,14 @@
 
 ### 流式进度卡（飞书）
 
-用 `[stream_preview] segmented = true` 和 `step_list = true` 开启。这张卡是飞书 CardKit 流式卡（`platform/feishu/segmented_preview.go`、`core/streaming.go`）。
+默认已打开：只写 `[stream_preview] enabled = true`，或干脆不写这一段，飞书就用这张卡；写 `segmented = false` 或 `step_list = false` 可关。这张卡是飞书 CardKit 流式卡（`platform/feishu/segmented_preview.go`、`core/streaming.go`）。
 
 - 卡片开头只有一行：一个转圈 GIF 动画和“思考中…”。没有内容的元素不放进卡片，所以没有空行。
 - Agent 写出的简短单行文字（最多 60 个字符）先不显示。随后有工具调用，它就成为一行带勾图标的已完成步骤；文字超过一行或带换行，就是回复，进正文；回合结束时也作为回复。转圈行不会闪现这类文字，正文也不会出现进度说明。
 - 没有说明的工具调用自成一步，用工具的描述做标签：Bash 或 Agent 的描述、文件基本名、网页主机名或搜索词。当前工具以灰色显示在运行行下方。
 - 已完成行和运行行共用一个图标位置，所以所有步骤文字对齐。卡片显示最近 5 个已完成行，更早的合并成一行“另有 N 步已完成”。图标上传失败时，卡片改用文本符号。
 - 更长或多行的文字是回复，进入卡片正文。设置 `reveal_cps` 后，正文以稳定的速度逐字显示。事件循环从不等待卡片 API 调用。
-- `end_mode = "settle"` 时的回合结束：短于 `notify_after_ms` 的回合在卡片内结束，卡片只留回复。更长的回合把卡片收成一行灰色的“已完成”，并把回复作为新消息发出，让手机收到通知。`end_mode = "recall"`（默认）时，卡片被撤回，回复作为新消息发出；撤回失败时，卡片变成回复，所以回复不会出现两次。
+- `end_mode = "settle"` 时的回合结束：短于 `notify_after_ms` 的回合在卡片内结束，卡片只留回复。更长的回合把卡片收成一行灰色的“已完成”，并把回复作为新消息发出，让手机收到通知。`end_mode = "recall"`时，卡片被撤回，回复作为新消息发出；撤回失败时，卡片变成回复，所以回复不会出现两次。
 - 所有卡片都用 `width_mode = "default"`（固定的默认宽度），不用全宽。
 - `trace_file` 把每个事件的流式耗时写成 JSON 行，用于调优。
 
@@ -107,19 +107,21 @@
 
 | 段 | 键 | 含义 |
 |---|---|---|
-| `[stream_preview]` | `segmented` (false) | 飞书 CardKit 流式卡 |
-| | `step_list` (false) | 与 `segmented` 一起用：带转圈和勾图标的步骤行 |
-| | `end_mode` (`"recall"`) | `"settle"`：从不撤回；在卡片内结束，或收成“已完成” |
+| `[stream_preview]` | `segmented` (true) | 飞书 CardKit 流式卡 |
+| | `step_list` (true) | 与 `segmented` 一起用：带转圈和勾图标的步骤行 |
+| | `end_mode` (`"settle"`) | `"settle"`：从不撤回；在卡片内结束，或收成“已完成” |
 | | `notify_after_ms` (60000) | settle 模式：达到或超过这个时长的回合，把回复作为新消息发出 |
-| | `reveal_cps` (0) | 回复逐字显示的速度，约每秒这么多个字符；0 表示关闭 |
+| | `reveal_cps` (90) | 回复逐字显示的速度，约每秒这么多个字符；写 0 关闭 |
 | | `reveal_catchup_ms` (4000) | 加快显示，使积压在这个时间内清完 |
 | | `drain_max_ms` (8000) | 回合结束时，继续显示剩余内容的最长时间 |
 | | `finish_catchup_ms` (3000) | 撤回前等待卡片打完回复的最长时间；负数表示关闭 |
 | | `dots_pause_ms` (2000) | 文本在这个时间内增长过，转圈符号就停住不动 |
-| | `print_strategy` (`"fast"`) | 客户端打字方式：`"fast"` 在有新文本时立即输出缓冲文本，`"delay"` 先打完缓冲文本 |
-| | `push_interval_ms` (200)、`typing_interval_ms` (40)、`typing_step` (6) | 卡片推送节奏和客户端打字速度 |
-| | `typing_marker` (off) | 运行中的预览下方的标记 |
+| | `print_strategy` (`"delay"`) | 客户端打字方式：`"fast"` 在有新文本时立即输出缓冲文本，`"delay"` 先打完缓冲文本 |
+| | `push_interval_ms` (150)、`typing_interval_ms` (40)、`typing_step` (4) | 卡片推送节奏和客户端打字速度 |
+| | `typing_marker` (飞书 `"..."`，其他平台关) | 运行中的预览下方的标记；写了就对所有平台生效 |
+| | `interval_ms` (飞书 700，其他平台 1500)、`min_delta_chars` (飞书 12，其他 30)、`max_chars` (飞书 4000，其他 2000) | 预览更新节奏和长度；写了就对所有平台生效 |
 | | `trace_file` (off) | 流式耗时，写成 JSON 行 |
+| agent 选项 | `stream_partial_text` (含飞书平台的 claudecode 项目为 true) | 卡片显示正在写的文本块；写 `false` 关闭 |
 | `[display]` | `progress_history`、`keep_progress_card`、`tool_progress_lines` | quiet 模式的进度（见上文） |
 | `[queue_batch]` | `enabled` (true)、`max_messages` (20)、`max_chars` (20000)、`hold_seconds` (60)、`immediate_sources` (`["human"]`) | 队列合并；自动消息最多等待 `hold_seconds` 秒，看是否有更多消息 |
 | `[decision]` | `enabled` (false)、`default_hours` (12) | 决策卡 |
