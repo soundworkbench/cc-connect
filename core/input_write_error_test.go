@@ -31,7 +31,7 @@ func TestProcessInteractiveEvents_ClosedStreamReportsControlWriteFailure(t *test
 	e.interactiveStates[key] = state
 	sent := make(chan error, 1)
 	sent <- nil
-	e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "m1", time.Now(), nil, sent, "ctx")
+	e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "m1", time.Now(), nil, sent, "ctx", 0)
 	if !strings.Contains(strings.Join(p.getSent(), "\n"), "请重发上一条消息") {
 		t.Fatalf("closed control stream must tell user to resend: %v", p.getSent())
 	}

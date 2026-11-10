@@ -989,6 +989,8 @@ func TestCronScheduler_SleepRecovery_PastDueFiresImmediately(t *testing.T) {
 
 	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
 	defer e.cancel()
+	// Idle scheduled prompts normally wait for a burst to merge; run at once here.
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: true, ImmediateSources: []string{"human"}})
 
 	cs := NewCronScheduler(store)
 	e.cronScheduler = cs
@@ -1055,6 +1057,8 @@ func TestCronScheduler_AddJobDuringRunWakesLoop(t *testing.T) {
 
 	e := NewEngine("test", agent, []Platform{platform}, "", LangEnglish)
 	defer e.cancel()
+	// Idle scheduled prompts normally wait for a burst to merge; run at once here.
+	e.SetQueueBatchConfig(QueueBatchConfig{Enabled: true, ImmediateSources: []string{"human"}})
 
 	cs := NewCronScheduler(store)
 	e.cronScheduler = cs

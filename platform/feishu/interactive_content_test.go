@@ -114,7 +114,11 @@ func TestInteractiveCard_IncomingDirectAndNestedForward(t *testing.T) {
 					if r.URL.Query().Get("type") != "image" {
 						t.Errorf("type=%s", r.URL.RawQuery)
 					}
-					calls = append(calls, r.URL.Path)
+					// Upstream's chunked downloader probes with a Range request
+					// before a plain GET; count one call per download attempt.
+					if success || r.Header.Get("Range") == "" {
+						calls = append(calls, r.URL.Path)
+					}
 					if success {
 						w.Header().Set("Content-Type", "image/png")
 						_, _ = w.Write([]byte("image-bytes"))
@@ -129,7 +133,7 @@ func TestInteractiveCard_IncomingDirectAndNestedForward(t *testing.T) {
 			}))
 			defer srv.Close()
 			var got *core.Message
-			p := &Platform{platformName: "feishu", client: lark.NewClient("mock-app", "mock-secret", lark.WithOpenBaseUrl(srv.URL)), handler: func(_ core.Platform, msg *core.Message) { got = msg }}
+			p := &Platform{platformName: "feishu", domain: srv.URL, appID: "mock-app", appSecret: "mock-secret", fetchResourceToken: func(context.Context) (string, error) { return "mock-token", nil }, client: lark.NewClient("mock-app", "mock-secret", lark.WithOpenBaseUrl(srv.URL)), handler: func(_ core.Platform, msg *core.Message) { got = msg }}
 			items := sampleCard(t)
 			sub, root := *items[1].MessageId, *items[0].MessageId
 			p.dispatchMessage(context.Background(), "interactive", *items[1].Body.Content, nil, sub, "session", "", "", replyContext{}, "", 123)

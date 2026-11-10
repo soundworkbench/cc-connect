@@ -311,9 +311,9 @@ func TestAssistantRotateRejectsBusyStaleForgedAndWriteFailure(t *testing.T) {
 	old := e.sessions.GetOrCreateActive(key)
 	old.AddHistory("assistant", cc17Summary)
 	req := assistantRequest{Project: "project", SessionKey: key, RequestID: "rotate", ExpectedSessionID: old.ID, ExpectedHistoryCount: 1, Summary: cc17Summary}
-	old.TryLock()
+	gen, _ := old.TryLock()
 	status, _ := cc17Post(t, c, "/assistant/rotate", req)
-	old.UnlockWithoutUpdate()
+	old.UnlockWithoutUpdate(gen)
 	if status != 409 {
 		t.Fatalf("busy status=%d", status)
 	}

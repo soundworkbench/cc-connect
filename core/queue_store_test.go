@@ -292,7 +292,7 @@ func TestProcessInteractiveEvents_SessionResetBeforeReaderStarts(t *testing.T) {
 	state := e.getOrCreateInteractiveStateWith("test:user", p, "ctx", session, e.sessions, nil, "test:user")
 	e.cleanupInteractiveState("test:user", state)
 	stoppedTyping := false
-	e.processInteractiveEvents(state, session, e.sessions, "test:user", "current", time.Now(), func() { stoppedTyping = true }, nil, "ctx")
+	e.processInteractiveEvents(state, session, e.sessions, "test:user", "current", time.Now(), func() { stoppedTyping = true }, nil, "ctx", 0)
 	if !stoppedTyping {
 		t.Fatal("reset reader left the typing indicator active")
 	}
@@ -389,7 +389,8 @@ func TestProcessInteractiveMessage_PreflightDoesNotAdoptReplacementAfterStop(t *
 	s := queueTestSession()
 	e := queueTestEngine(t, t.TempDir(), p, s)
 	session := e.sessions.GetOrCreateActive("test:user")
-	if !session.TryLock() {
+	lockGen, ok := session.TryLock()
+	if !ok {
 		t.Fatal("session busy")
 	}
 	retired := &interactiveState{stopped: true, queueRetired: true}
@@ -397,7 +398,7 @@ func TestProcessInteractiveMessage_PreflightDoesNotAdoptReplacementAfterStop(t *
 	e.interactiveStates["test:user"] = replacement
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveMessageWith(p, &Message{SessionKey: "test:user", preflightSent: true, historyPreseeded: true, executionState: retired}, session, e.agent, e.sessions, "test:user", "", "test:user")
+		e.processInteractiveMessageWith(p, &Message{SessionKey: "test:user", preflightSent: true, historyPreseeded: true, executionState: retired}, session, e.agent, e.sessions, "test:user", "", "test:user", lockGen)
 		close(done)
 	}()
 	cc27Take(t, done)

@@ -126,6 +126,8 @@ func TestInjectedTurnsDoNotRefreshIdleTimer(t *testing.T) {
 			as := newResultAgentSession("noted")
 			e := NewEngine("test", &resultAgent{session: as}, []Platform{p}, "", LangEnglish)
 			e.SetResetOnIdle(60 * time.Minute)
+			// Idle scheduled prompts normally wait for a burst to merge; run at once here.
+			e.SetQueueBatchConfig(QueueBatchConfig{Enabled: true, ImmediateSources: []string{"human"}})
 
 			key := "test:user1"
 			session := e.sessions.GetOrCreateActive(key)
@@ -138,6 +140,11 @@ func TestInjectedTurnsDoNotRefreshIdleTimer(t *testing.T) {
 
 			if err := tc.run(e, key); err != nil {
 				t.Fatalf("injected turn: %v", err)
+			}
+			// Scheduled prompts are accepted into the session queue and run
+			// asynchronously; wait for the turn to reach the agent.
+			for deadline := time.Now().Add(2 * time.Second); len(as.sentPrompts) == 0 && time.Now().Before(deadline); {
+				time.Sleep(5 * time.Millisecond)
 			}
 			if len(as.sentPrompts) != 1 {
 				t.Fatalf("agent received %d prompts from the %s turn, want 1", len(as.sentPrompts), tc.name)

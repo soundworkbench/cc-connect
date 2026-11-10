@@ -58,7 +58,7 @@ func TestProcessInteractiveEvents_PreviewLifecycleOneCard(t *testing.T) {
 			e.interactiveStates[key] = state
 			done := make(chan struct{})
 			go func() {
-				e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, "ctx")
+				e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, "ctx", 0)
 				close(done)
 			}()
 			as.events <- Event{Type: EventThinking, Content: "progress one"}
@@ -107,7 +107,7 @@ func TestProcessInteractiveEvents_PreviewLifecycleErrorRecalls(t *testing.T) {
 	e.interactiveStates[key] = state
 	errCh := make(chan error, 1)
 	errCh <- fmt.Errorf("simulated send failure")
-	e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "m2", time.Now(), nil, errCh, "ctx")
+	e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "m2", time.Now(), nil, errCh, "ctx", 0)
 	if len(p.starts) != 1 || len(p.deletes) != 1 {
 		t.Fatalf("starts=%v recalls=%v", p.starts, p.deletes)
 	}
@@ -235,7 +235,7 @@ func TestProcessInteractiveEvents_PreviewLifecycleInstantReplyFallback(t *testin
 			key := "lifecycle:instant"
 			e.interactiveStates[key] = state
 			as.events <- Event{Type: EventResult, Content: "final answer", Done: true}
-			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "m", time.Now(), nil, nil, "ctx")
+			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "m", time.Now(), nil, nil, "ctx", 0)
 			sent := p.getSent()
 			want := 2 // Failed/disabled preview must retain its ordinary acknowledgement.
 			if outcome == "success" {
@@ -279,7 +279,7 @@ func TestProcessInteractiveEvents_PreviewLifecyclePermissionKeepsHandle(t *testi
 			time.Sleep(time.Millisecond)
 		}
 	}()
-	e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "m", time.Now(), nil, nil, "ctx")
+	e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "m", time.Now(), nil, nil, "ctx", 0)
 	<-resolved
 	if len(p.starts) != 1 || len(p.edits) != 2 || len(p.deletes) != 1 {
 		t.Fatalf("starts=%v edits=%v recalls=%v", p.starts, p.edits, p.deletes)
@@ -306,7 +306,7 @@ func TestAppendProgressPermissionKeepsHistoryAndHandle(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "m", time.Now(), nil, nil, "ctx")
+		e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "m", time.Now(), nil, nil, "ctx", 0)
 	}()
 	waitEdit := func(want string) {
 		t.Helper()
@@ -378,7 +378,7 @@ func TestProcessInteractiveEvents_NoReplyDeferredPlaceholderZeroFootprint(t *tes
 						as.events <- Event{Type: EventText, Content: chunk}
 					}
 					as.events <- Event{Type: EventResult, Content: "NO_REPLY", Done: true}
-					e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "silent", time.Now(), nil, nil, "ctx")
+					e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "silent", time.Now(), nil, nil, "ctx", 0)
 					if len(p.getSent()) != 0 || len(p.starts) != 0 || len(p.edits) != 0 || len(p.deletes) != 0 {
 						t.Fatalf("silent turn left a footprint: sent=%v starts=%v edits=%v recalls=%v", p.getSent(), p.starts, p.edits, p.deletes)
 					}
@@ -404,7 +404,7 @@ func TestProcessInteractiveEvents_TextWithNoReplyDeliversOnlyText(t *testing.T) 
 				as.events <- Event{Type: EventText, Content: "visible answer"}
 				as.events <- Event{Type: EventText, Content: "\nNO_REPLY"}
 				as.events <- Event{Type: EventResult, Content: result, Done: true}
-				e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "visible", time.Now(), nil, nil, "ctx")
+				e.processInteractiveEvents(state, e.sessions.GetOrCreateActive(key), e.sessions, key, "visible", time.Now(), nil, nil, "ctx", 0)
 				if sent := p.getSent(); len(sent) != 1 || sent[0] != "visible answer" {
 					t.Fatalf("visible text lost or marker leaked: %v", sent)
 				}

@@ -16,7 +16,7 @@ func TestClaudeSteerLive(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
-	cs, err := newClaudeSession(ctx, t.TempDir(), cmd, []string{"--setting-sources", "", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--tools", "Bash"}, "", "haiku", "medium", "", "default", "", "", []string{"Bash(sleep *)"}, nil, nil, nil, "", false, core.SpawnOptions{}, 0, t.TempDir())
+	cs, err := newClaudeSession(ctx, t.TempDir(), cmd, []string{"--setting-sources", "", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--tools", "Bash"}, "", "haiku", "medium", "", "default", "", "", []string{"Bash(sleep *)"}, nil, nil, nil, "", false, core.SpawnOptions{}, 0, 0, t.TempDir(), core.LangEnglish)
 	if err != nil {
 		t.Fatal("session start failed")
 	}

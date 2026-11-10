@@ -16,7 +16,7 @@ func TestReasoningUnsupportedModel_NoEmptyPicker(t *testing.T) {
 	if len(p.sent) != 1 || p.sent[0] != e.i18n.T(MsgReasoningNotSupported) {
 		t.Fatalf("reply=%v", p.sent)
 	}
-	if text := e.renderReasoningCard().RenderText(); !strings.Contains(text, e.i18n.T(MsgReasoningNotSupported)) {
+	if text := e.renderReasoningCard(e.agent).RenderText(); !strings.Contains(text, e.i18n.T(MsgReasoningNotSupported)) {
 		t.Fatalf("card=%s", text)
 	}
 }

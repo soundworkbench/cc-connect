@@ -233,7 +233,7 @@ func TestMergeProgressEngineResult(t *testing.T) {
 		as.events <- Event{Type: EventProgress, Content: progress}
 		as.events <- Event{Type: EventToolUse, ToolName: "Read", ToolInput: "PRIVATE_ARGS"}
 		as.events <- Event{Type: EventResult, Content: "完成", Done: true}
-		e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("merge"), e.sessions, "merge", "m", time.Now(), nil, nil, "ctx")
+		e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("merge"), e.sessions, "merge", "m", time.Now(), nil, nil, "ctx", 0)
 		var sent string
 		for _, c := range p.snapshot() {
 			if strings.HasPrefix(c, "send:") {

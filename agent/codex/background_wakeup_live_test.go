@@ -16,7 +16,7 @@ func TestBackgroundWakeupLive_TwoBatches(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
-	s, err := newAppServerSession(ctx, "", t.TempDir(), "gpt-6-astra", "low", "suggest", "", "", "", nil, os.Getenv("CODEX_HOME"), "", "")
+	s, err := newAppServerSession(ctx, "", nil, "", t.TempDir(), "gpt-6-astra", "low", "suggest", "", "", "", nil, os.Getenv("CODEX_HOME"), "", "")
 	if err != nil {
 		t.Fatal("live session initialization failed")
 	}
@@ -62,7 +62,7 @@ func TestBackgroundWakeupLive_StopBeforeCompletion(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	s, err := newAppServerSession(ctx, "", t.TempDir(), "gpt-6-astra", "low", "suggest", "", "", "", nil, os.Getenv("CODEX_HOME"), "", "")
+	s, err := newAppServerSession(ctx, "", nil, "", t.TempDir(), "gpt-6-astra", "low", "suggest", "", "", "", nil, os.Getenv("CODEX_HOME"), "", "")
 	if err != nil {
 		t.Fatal("live session initialization failed")
 	}

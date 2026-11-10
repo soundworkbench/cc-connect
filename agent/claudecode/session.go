@@ -1318,9 +1318,12 @@ func isNoopTaskNotificationResult(raw map[string]any) bool {
 			}
 		}
 	}
-	usage, _ := raw["usage"].(map[string]any)
+	usage, ok := raw["usage"].(map[string]any)
+	if !ok {
+		return false
+	}
 	for _, key := range []string{"input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"} {
-		if usage[key] != float64(0) {
+		if value, present := usage[key]; present && value != float64(0) {
 			return false
 		}
 	}
@@ -1354,7 +1357,7 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	// result (no model call), sometimes after cc-connect already wrote the
 	// user's prompt. It is not the foreground reply: do not finish the turn,
 	// flush pendingText or overwrite foreground usage.
-	if isNoopTaskNotificationResult(raw) || (isEmptyTaskNotificationResult(raw, content) && !notificationAbsorbedInput(raw)) {
+	if isNoopTaskNotificationResult(raw) {
 		slog.Info("claudeSession: ignored no-op task notification result; continuing turn",
 			"session_id", cs.CurrentSessionID())
 		return

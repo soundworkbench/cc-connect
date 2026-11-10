@@ -153,7 +153,7 @@ func TestDispatchMessage_UnhandledMessageTypes(t *testing.T) {
 		{"vote", `{"topic":"Lunch","options":["noodles","rice"]}`, "[vote: Lunch, options: noodles / rice]"},
 		{"folder", `{"file_key":"fk","file_name":"docs"}`, "[unsupported Feishu message: folder]"},
 		{"system", `{"template":"{from_user} invited {to_chatters} to this chat.","from_user":["bot"],"to_chatters":["Alice"]}`, ""},
-		{"interactive", `{"title":"Alert","elements":[]}`, ""},
+		{"interactive", `{"title":"Alert","elements":[]}`, "Alert"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.msgType, func(t *testing.T) {
@@ -219,7 +219,7 @@ func TestFormatMergeForwardTree_DescribesUnhandledTypes(t *testing.T) {
 		item("om_4", "audio", `{"file_key":"file_v3","duration":2000}`),
 	}}
 	var sb strings.Builder
-	(&Platform{platformName: "feishu"}).formatMergeForwardTree("om_root", children, map[string]string{"ou_alice": "Alice"}, &sb, new([]core.ImageAttachment), new([]core.FileAttachment), 0)
+	(&Platform{platformName: "feishu"}).formatMergeForwardTree("om_root", "om_root", children, map[string]string{"ou_alice": "Alice"}, &sb, new([]core.ImageAttachment), new([]core.FileAttachment), 0)
 	out := sb.String()
 	for _, want := range []string{
 		"Alice: " + videoChatText + "\n",

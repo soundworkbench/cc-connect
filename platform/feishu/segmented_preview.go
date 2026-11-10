@@ -376,7 +376,7 @@ func (p *Platform) AddPreviewTool(_ context.Context, handle any, text string) er
 	return nil
 }
 
-func oneLine(text string, limit int) string {
+func stepOneLine(text string, limit int) string {
 	text = strings.Join(strings.Fields(text), " ")
 	if r := []rune(text); len(r) > limit {
 		return string(r[:limit]) + "…"
@@ -387,7 +387,7 @@ func oneLine(text string, limit int) string {
 // addRow opens a new step for an agent line, or attaches a tool call to the
 // open step. A tool call with no agent line before it becomes a step itself.
 func (v *segmentedPreview) addRow(now time.Time, text string, tool bool) {
-	text = oneLine(text, 120)
+	text = stepOneLine(text, 120)
 	if tool {
 		v.toolCalls++
 		if n := len(v.rows); n > 0 && !v.rows[n-1].toolOnly {
@@ -603,7 +603,7 @@ func (v *segmentedPreview) cardWith(final bool, body string, lay previewLayout) 
 	if !final {
 		elements = append(elements, v.progressElement(v.progress(time.Now())))
 	} else if v.steps > 0 {
-		panel := buildRichPanel(v.i18n.Tf(core.MsgPreviewProcess, v.steps), false, []map[string]any{{"tag": "markdown", "content": strings.Join(v.recent, "\n")}})
+		panel := buildRichPanel(v.i18n.Tf(core.MsgPreviewProcess, v.steps), []map[string]any{{"tag": "markdown", "content": strings.Join(v.recent, "\n")}})
 		panel["element_id"] = v.progressID
 		elements = append(elements, panel)
 	}

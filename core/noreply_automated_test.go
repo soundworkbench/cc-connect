@@ -138,7 +138,7 @@ func runTurn(t *testing.T, automated bool, events ...Event) []string {
 		as.events <- ev
 	}
 	state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx"}
-	e.processTurnEvents(automated, state, e.sessions.GetOrCreateActive("auto"), e.sessions, "auto", "m", time.Now(), nil, nil, "ctx")
+	e.processTurnEvents(automated, state, e.sessions.GetOrCreateActive("auto"), e.sessions, "auto", "m", time.Now(), nil, nil, "ctx", 0)
 	return p.snapshot()
 }
 
@@ -304,7 +304,7 @@ func TestAutomatedTurnNonCompactPaths(t *testing.T) {
 			as.events <- ev
 		}
 		state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx"}
-		e.processTurnEvents(automated, state, e.sessions.GetOrCreateActive("np"), e.sessions, "np", "m", time.Now(), nil, nil, "ctx")
+		e.processTurnEvents(automated, state, e.sessions.GetOrCreateActive("np"), e.sessions, "np", "m", time.Now(), nil, nil, "ctx", 0)
 		var preview []string
 		if lp != nil {
 			lp.previewMu.Lock()

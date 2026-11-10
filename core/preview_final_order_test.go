@@ -114,7 +114,7 @@ func TestPreviewLifecycleFinalOrderRecovery(t *testing.T) {
 			as := newControllableSession("order")
 			state := &interactiveState{agentSession: as, platform: p, replyCtx: "ctx"}
 			as.events <- Event{Type: EventResult, Content: "answer", Done: true}
-			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("order"), e.sessions, "order", "m", time.Now(), nil, nil, "ctx")
+			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("order"), e.sessions, "order", "m", time.Now(), nil, nil, "ctx", 0)
 			got := p.snapshot()
 			if tc.name == "failure" && len(got) == 4 && strings.HasPrefix(got[3], "update:") && strings.Contains(got[3], e.i18n.T(MsgFinalDeliveryFailed)) {
 				got[3] = "update:"
@@ -173,7 +173,7 @@ func TestPreviewLifecycleFinalOrderErrorAndSilent(t *testing.T) {
 				ev = Event{Type: EventResult, Content: "NO_REPLY", Done: true}
 			}
 			as.events <- ev
-			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("order"), e.sessions, "order", "m", time.Now(), nil, nil, "ctx")
+			e.processInteractiveEvents(state, e.sessions.GetOrCreateActive("order"), e.sessions, "order", "m", time.Now(), nil, nil, "ctx", 0)
 			calls := p.snapshot()
 			if silent {
 				if len(calls) != 0 {

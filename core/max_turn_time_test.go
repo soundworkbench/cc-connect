@@ -97,7 +97,7 @@ func runMaxTurnScenario(t *testing.T, maxTurn time.Duration, durations []time.Du
 	sendDone <- nil
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "msg0", time.Now(), nil, sendDone, nil)
+		e.processInteractiveEvents(state, session, e.sessions, key, "msg0", time.Now(), nil, sendDone, nil, 0)
 		close(done)
 	}()
 	select {

@@ -2387,6 +2387,42 @@ func TestCUJ_G5_ToolFailureSurfacesToUser(t *testing.T) {
 			}
 		})
 	}
+}
+
+// CUJ-G5 (background) · A failed turn does not stop a persistent agent's
+// background work, and the next user turn takes the reader back.
+func TestCUJ_G5_BackgroundResultAfterFailedTurn(t *testing.T) {
+	env := newCUJEnv(t)
+	t.Cleanup(func() {
+		if err := env.engine.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	env.userSends("g5", "hello")
+	env.waitFor("turn1", 2*time.Second, func() bool { return len(env.plat.getSent()) >= 1 })
+	env.plat.clearSent()
+
+	env.agent.mu.Lock()
+	if len(env.agent.sessions) == 0 {
+		env.agent.mu.Unlock()
+		t.Fatalf("no agent session was started by turn 1")
+	}
+	sess := env.agent.sessions[len(env.agent.sessions)-1]
+	env.agent.mu.Unlock()
+
+	sess.mu.Lock()
+	sess.nextEventOverride = &Event{
+		Type:  EventError,
+		Error: errors.New("bash tool exited with code 1: permission denied"),
+		Done:  true,
+	}
+	sess.mu.Unlock()
+
+	env.userSends("g5", "run a tool that will fail")
+	env.waitFor("error reply visible", 2*time.Second, func() bool {
+		return len(env.plat.getSent()) >= 1
+	})
 
 	// A failed turn does not stop a persistent agent's background work.
 	// Deliver its result without asking the user to send "continue".

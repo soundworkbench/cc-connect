@@ -24,7 +24,7 @@ func TestQuietCompactPublicProgressAndSingleFinal(t *testing.T) {
 	e.interactiveStates[key] = state
 	done := make(chan struct{})
 	go func() {
-		e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, "ctx")
+		e.processInteractiveEvents(state, session, e.sessions, key, "m1", time.Now(), nil, nil, "ctx", 0)
 		close(done)
 	}()
 	as.events <- Event{Type: EventThinking, Content: "PRIVATE_THINKING"}

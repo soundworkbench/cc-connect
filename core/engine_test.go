@@ -6825,34 +6825,36 @@ func TestSendAskQuestionPrompt_CardPlatform_SingleSelectUsesActionRows(t *testin
 	var sawCardListItem bool
 	for _, elem := range card.Elements {
 		switch e := elem.(type) {
-		case CardActions:
-			for _, btn := range e.Buttons {
-				if strings.HasPrefix(btn.Value, "askq:") {
-					askqButtons++
-					// Each button must carry the askq_label + askq_question
-					// extras so the Feishu callback handler can render the
-					// post-answer card without re-fetching the question.
-					if btn.Extra["askq_label"] == "" {
-						t.Errorf("askq button %q missing askq_label extra", btn.Text)
-					}
-					if btn.Extra["askq_question"] == "" {
-						t.Errorf("askq button %q missing askq_question extra", btn.Text)
-					}
+		case CardListItem:
+			// Stacked option layout: a full-width button per option, with the
+			// description as small text beneath it.
+			if !e.Stacked {
+				sawCardListItem = true
+				break
+			}
+			if strings.HasPrefix(e.BtnValue, "askq:") {
+				askqButtons++
+				// Each button must carry the askq_label + askq_question
+				// extras so the Feishu callback handler can render the
+				// post-answer card without re-fetching the question.
+				if e.Extra["askq_label"] == "" {
+					t.Errorf("askq button %q missing askq_label extra", e.BtnText)
+				}
+				if e.Extra["askq_question"] == "" {
+					t.Errorf("askq button %q missing askq_question extra", e.BtnText)
 				}
 			}
 			actionRows++
-		case CardListItem:
-			sawCardListItem = true
 		}
 	}
 	if actionRows != 3 {
-		t.Errorf("expected 3 CardActions rows (one per option), got %d", actionRows)
+		t.Errorf("expected 3 stacked option rows (one per option), got %d", actionRows)
 	}
 	if askqButtons != 3 {
 		t.Errorf("expected 3 askq buttons in action rows, got %d", askqButtons)
 	}
 	if sawCardListItem {
-		t.Errorf("CardListItem must not be used for single-select AskUserQuestion on Feishu (issue #1658)")
+		t.Errorf("unstacked CardListItem must not be used for single-select AskUserQuestion on Feishu (issue #1658)")
 	}
 }
 

@@ -96,12 +96,13 @@ func TestQueueBatch_AttachmentsMarkersAndFinalReplyBothPaths(t *testing.T) {
 	for _, path := range []string{"event-result", "drain", "orphan-start"} {
 		t.Run(path, func(t *testing.T) {
 			e, p, s := batchEngine(t)
+			var lockGen uint64
 			if path == "event-result" {
 				e.ReceiveMessage(p, batchMessage(0))
 				cc27Take(t, s.deliveries)
 			} else {
 				session := e.sessions.GetOrCreateActive("test:user")
-				session.TryLock()
+				lockGen, _ = session.TryLock()
 				e.ensureInteractiveStateForQueueing("test:user", p, "0", session)
 				if path == "drain" {
 					e.interactiveStates["test:user"].agentSession = s
@@ -113,7 +114,7 @@ func TestQueueBatch_AttachmentsMarkersAndFinalReplyBothPaths(t *testing.T) {
 			if path == "event-result" {
 				s.events <- Event{Type: EventResult, Content: "first", Done: true}
 			} else {
-				go e.drainOrphanedQueue(e.sessions.GetOrCreateActive("test:user"), e.sessions, "test:user", e.agent, "")
+				go e.drainOrphanedQueue(e.sessions.GetOrCreateActive("test:user"), e.sessions, "test:user", e.agent, "", lockGen)
 			}
 			got := cc27Take(t, s.deliveries)
 			if got.id != "3" || len(got.images) != 3 || len(got.files) != 3 {
@@ -296,7 +297,7 @@ func TestQueueBatch_ScheduledHoldAndShutdownPreserveSnapshot(t *testing.T) {
 		msg.scheduledPrompt = true
 		msg.scheduledInputID = fmt.Sprintf("timer:job%d:1", i)
 		msg.UserMessageTimeMs = 0
-		queued, err := e.admitScheduledPrompt(p, msg, session, e.sessions, e.agent, "test:user", "")
+		queued, _, err := e.admitScheduledPrompt(p, msg, session, e.sessions, e.agent, "test:user", "")
 		if !queued || err != nil {
 			t.Fatalf("admission=%v %v", queued, err)
 		}
@@ -451,17 +452,17 @@ func TestQueueBatch_CompletedScheduledReplayDoesNotHoldSession(t *testing.T) {
 	msg := batchMessage(1)
 	msg.scheduledPrompt = true
 	msg.scheduledInputID = "timer:one:1"
-	queued, err := e.admitScheduledPrompt(p, msg, session, e.sessions, e.agent, "test:user", "")
+	queued, lockGen, err := e.admitScheduledPrompt(p, msg, session, e.sessions, e.agent, "test:user", "")
 	if err != nil || queued {
 		t.Fatalf("initial admission=%v %v", queued, err)
 	}
-	go e.processInteractiveMessageWith(p, msg, session, e.agent, e.sessions, "test:user", "", "test:user")
+	go e.processInteractiveMessageWith(p, msg, session, e.agent, e.sessions, "test:user", "", "test:user", lockGen)
 	cc27Take(t, s.deliveries)
 	s.events <- Event{Type: EventResult, Content: "first", Done: true}
 	cc27WaitIdle(t, e, "test:user")
 	cfg.Hold = time.Hour
 	e.SetQueueBatchConfig(cfg)
-	queued, err = e.admitScheduledPrompt(p, msg, session, e.sessions, e.agent, "test:user", "")
+	queued, _, err = e.admitScheduledPrompt(p, msg, session, e.sessions, e.agent, "test:user", "")
 	if err != nil || !queued || session.Busy() {
 		t.Fatalf("replay created a wait or turn: queued=%v busy=%v err=%v", queued, session.Busy(), err)
 	}
