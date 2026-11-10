@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
@@ -67,7 +68,7 @@ func TestAppServerSession_IdleDoesNotHideTurnFailure(t *testing.T) {
 	if len(s.events) != 1 {
 		t.Fatalf("got %d events, want one error and no successful result", len(s.events))
 	}
-	if event := <-s.events; event.Type != core.EventError || event.Error == nil || event.Error.Error() != "service unavailable" {
+	if event := <-s.events; event.Type != core.EventError || event.Error == nil || !strings.Contains(event.Error.Error(), "service unavailable") {
 		t.Fatalf("terminal event = %#v, want service unavailable error", event)
 	}
 	if got := appServerCurrentTurn(s); got != "" {

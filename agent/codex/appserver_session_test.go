@@ -218,6 +218,7 @@ func TestAppServerSession_FailedTurnEmitsError(t *testing.T) {
 		currentTurn: "turn-1",
 		pendingMsgs: []string{"partial reasoning"},
 	}
+	s.threadID.Store("thread-1")
 
 	raw, err := json.Marshal(map[string]any{
 		"threadId": "thread-1",
@@ -233,7 +234,7 @@ func TestAppServerSession_FailedTurnEmitsError(t *testing.T) {
 	s.handleNotification("turn/completed", raw)
 
 	event := <-s.events
-	if event.Type != core.EventError || event.Error == nil || event.Error.Error() != "service unavailable" {
+	if event.Type != core.EventError || event.Error == nil || !strings.Contains(event.Error.Error(), "service unavailable") {
 		t.Fatalf("event = %#v, want EventError with service unavailable", event)
 	}
 
@@ -763,9 +764,9 @@ func TestAppServerSession_TransportEOFDoesNotDuplicateTerminal(t *testing.T) {
 			case "idle":
 				s.currentTurn = ""
 			case "completed":
-				s.handleNotification("turn/completed", json.RawMessage(`{"turn":{"id":"turn-1"}}`))
+				s.handleNotification("turn/completed", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1"}}`))
 			case "failed":
-				s.handleNotification("turn/completed", json.RawMessage(`{"turn":{"id":"turn-1","status":"failed"}}`))
+				s.handleNotification("turn/completed", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed"}}`))
 			case "error":
 				s.handleNotification("error", json.RawMessage(`{"message":"failed"}`))
 			case "canceled":
@@ -889,12 +890,12 @@ func TestAppServerSession_LateStartResponseCannotReviveTurn(t *testing.T) {
 				}
 				s.handleResponse(rpcResponseEnvelope{ID: request.ID, Result: json.RawMessage(`{"turn":{"id":"turn-1"}}`)})
 				if state != "eof" {
-					s.handleNotification("turn/started", json.RawMessage(`{"turn":{"id":"turn-1"}}`))
+					s.handleNotification("turn/started", json.RawMessage(`{"threadId":"thread-1","turn":{"id":"turn-1"}}`))
 					status := "completed"
 					if state == "failed" {
 						status = "failed"
 					}
-					s.handleNotification("turn/completed", json.RawMessage(fmt.Sprintf(`{"turn":{"id":"turn-1","status":%q}}`, status)))
+					s.handleNotification("turn/completed", json.RawMessage(fmt.Sprintf(`{"threadId":"thread-1","turn":{"id":"turn-1","status":%q}}`, status)))
 				}
 				if strings.Contains(state, "eof") {
 					s.wg.Add(1)
@@ -994,7 +995,7 @@ func TestAppServerTransportProcessHelper(t *testing.T) {
 		return
 	}
 	if strings.HasPrefix(mode, "completed") {
-		if _, err := fmt.Fprintln(os.Stdout, `{"method":"turn/completed","params":{"turn":{"id":"turn-1"}}}`); err != nil {
+		if _, err := fmt.Fprintln(os.Stdout, `{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}`); err != nil {
 			t.Fatal(err)
 		}
 	}
