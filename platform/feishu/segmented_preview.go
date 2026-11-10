@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"unicode"
 	"context"
 	"crypto/rand"
 	_ "embed"
@@ -345,7 +346,11 @@ func (p *Platform) AddPreviewProgress(_ context.Context, handle any, text string
 		return nil
 	}
 	if v.cfg.StepList {
-		v.addRow(time.Now(), text, false)
+		// Step rows are Chinese-only: a progress line with no Chinese is left out, and the
+		// next tool call becomes its own row with its Chinese label.
+		if strings.ContainsFunc(text, func(r rune) bool { return unicode.Is(unicode.Han, r) }) {
+			v.addRow(time.Now(), text, false)
+		}
 		return nil
 	}
 	v.steps++
