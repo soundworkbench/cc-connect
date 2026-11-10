@@ -115,11 +115,7 @@ func stepToolLabel(tool string, input any) string {
 	}
 	switch tool {
 	case "Bash", "Agent", "Task":
-		// The card is Chinese-only: an English description falls back to the generic wording.
-		if d := oneLineLabel(strVal(m, "description")); strings.ContainsFunc(d, func(r rune) bool { return unicode.Is(unicode.Han, r) }) {
-			return d
-		}
-		return ""
+		return oneLineLabel(strVal(m, "description"))
 	case "Read":
 		return with(core.MsgProgressRead, path.Base(strings.ReplaceAll(strVal(m, "file_path"), `\`, "/")))
 	case "Edit", "Write":

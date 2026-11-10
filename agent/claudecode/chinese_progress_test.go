@@ -82,19 +82,19 @@ func TestClaudeEnglishToolProgressRegression(t *testing.T) {
 }
 
 func TestStepToolLabel(t *testing.T) {
-	long := strings.Repeat("清理上次留下的测试对话并确认没有动到别的", 5)
+	long := "Delete the twelve leftover test conversations from the previous session and confirm nothing else was touched afterwards"
 	tests := []struct {
 		name, tool string
 		input      any
 		want       string
 	}{
-		{"Bash description", "Bash", map[string]any{"description": "Delete test conversations", "command": "rm -rf /secret"}, ""},
+		{"Bash description", "Bash", map[string]any{"description": "Delete test conversations", "command": "rm -rf /secret"}, "Delete test conversations"},
 		{"Bash Chinese", "Bash", map[string]any{"description": "删除测试对话"}, "删除测试对话"},
-		{"Bash multiline", "Bash", map[string]any{"description": "列出\n  目录文件"}, "列出 目录文件"},
+		{"Bash multiline", "Bash", map[string]any{"description": "List files\n  in the dir"}, "List files in the dir"},
 		{"Bash clipped", "Bash", map[string]any{"description": long}, string([]rune(long)[:80]) + "…"},
 		{"Bash no description", "Bash", map[string]any{"command": "ls"}, ""},
 		{"Agent description", "Agent", map[string]any{"description": "查旧会话", "prompt": "long prompt"}, "查旧会话"},
-		{"Task description", "Task", map[string]any{"description": "Survey the repo"}, ""},
+		{"Task description", "Task", map[string]any{"description": "Survey the repo"}, "Survey the repo"},
 		{"Read base name", "Read", map[string]any{"file_path": "/srv/x/notes/main.go"}, "读取文件 main.go"},
 		{"Edit base name", "Edit", map[string]any{"file_path": "/srv/x/notes/config.toml"}, "修改文件 config.toml"},
 		{"Write windows path", "Write", map[string]any{"file_path": `C:\a\b\out.txt`}, "修改文件 out.txt"},
@@ -120,12 +120,12 @@ func TestStepToolLabel(t *testing.T) {
 // The label rides on the tool event next to, not instead of, the public text.
 func TestClaudeToolEventCarriesStepLabel(t *testing.T) {
 	cs := progressSession()
-	assistantBlock(cs, map[string]any{"type": "tool_use", "id": "t1", "name": "Bash", "input": map[string]any{"command": "git status", "description": "查看状态"}})
+	assistantBlock(cs, map[string]any{"type": "tool_use", "id": "t1", "name": "Bash", "input": map[string]any{"command": "git status", "description": "Check status"}})
 	events := drainProgressEvents(cs)
 	if len(events) != 1 {
 		t.Fatalf("events: %v", events)
 	}
-	if events[0].Metadata["step_label"] != "查看状态" || events[0].Metadata["public_tool_progress"] != "查看状态" {
+	if events[0].Metadata["step_label"] != "Check status" || events[0].Metadata["public_tool_progress"] != "运行命令" {
 		t.Fatalf("metadata: %v", events[0].Metadata)
 	}
 	if strings.Contains(events[0].ToolInput, "git status") {

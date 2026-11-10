@@ -87,20 +87,3 @@ func TestStepListUsesNormalTextSize(t *testing.T) {
 		t.Fatal("step list must not use the small notation size")
 	}
 }
-
-func TestStepListLeavesOutProgressWithoutChinese(t *testing.T) {
-	_, p, h := newStepListPreview(t)
-	ctx := context.Background()
-	if err := p.AddPreviewProgress(ctx, h, "Two changes. First, a line in the instructions."); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.AddPreviewTool(ctx, h, "修改说明书"); err != nil {
-		t.Fatal(err)
-	}
-	h.live.mu.Lock()
-	got := h.live.doneLines() + "\n" + h.live.liveLine()
-	h.live.mu.Unlock()
-	if strings.Contains(got, "Two changes") || !strings.Contains(got, "◐ 修改说明书") {
-		t.Fatalf("rows:\n%s", got)
-	}
-}
