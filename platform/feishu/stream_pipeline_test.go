@@ -565,3 +565,15 @@ func TestQuickLineGoesOutInOrderWithBody(t *testing.T) {
 		}
 	}
 }
+
+// Once the quick line is shown it stands alone in the running row: no "thinking" label under it.
+func TestQuickLineReplacesThinkingLabel(t *testing.T) {
+	for _, stepList := range []bool{true, false} {
+		cfg := core.DefaultStreamPreviewCfg()
+		cfg.StepList = stepList
+		v := &segmentedPreview{cfg: cfg, i18n: core.NewI18n(core.LangChinese), spinnerKey: "img_spin", started: time.Unix(1000, 0), quickLine: "收到，马上看"}
+		if got := v.progress(time.Unix(1003, 0)); got != "收到，马上看" {
+			t.Fatalf("step_list=%v: running row %q", stepList, got)
+		}
+	}
+}

@@ -642,7 +642,7 @@ func (v *segmentedPreview) liveLine() string {
 		text, tool = v.rows[n-1].text, v.rows[n-1].tool
 	}
 	if v.quickLine != "" && v.body == "" && len(v.rows) == 0 {
-		text = v.quickLine + "\n<font color='grey'>" + text + "</font>"
+		text = v.quickLine
 	}
 	if v.spinnerKey == "" {
 		text = spinnerGlyphs[v.frame%len(spinnerGlyphs)] + " " + text
@@ -680,8 +680,9 @@ func (v *segmentedPreview) progress(now time.Time) string {
 	if v.body == "" {
 		if v.quickLine != "" && v.steps == 0 {
 			lines = append(lines, v.quickLine)
+		} else {
+			lines = append(lines, v.i18n.Tf(core.MsgPreviewElapsed, secondsBetween(v.started, now)))
 		}
-		lines = append(lines, v.i18n.Tf(core.MsgPreviewElapsed, secondsBetween(v.started, now)))
 	}
 	if v.steps > 0 {
 		lines = append(lines, v.i18n.Tf(core.MsgPreviewSteps, v.steps))
