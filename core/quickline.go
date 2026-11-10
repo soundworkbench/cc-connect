@@ -43,6 +43,12 @@ type QuickLineSetter interface {
 	SetPreviewQuickLine(ctx context.Context, previewHandle any, text string) error
 }
 
+// QuickLineReader is implemented by platforms that keep the sentence on the card. The
+// final reply leads with it, so it also shows when the reply goes out as a new message.
+type QuickLineReader interface {
+	PreviewQuickLine(previewHandle any) string
+}
+
 // startQuickLine begins the quick call for a turn whose card is already up.
 // It never blocks: the call and the card write run in their own goroutine.
 func (e *Engine) startQuickLine(sp *streamPreview, userMsg string, history []HistoryEntry) {
@@ -72,7 +78,7 @@ func quickLineTimeout(cfg QuickLineCfg) time.Duration {
 	return time.Duration(cfg.TimeoutMs) * time.Millisecond
 }
 
-// setQuickLine hands the sentence to the platform card, which drops it when real
+// setQuickLine hands the sentence to the platform card, which refuses it when real
 // content has already started.
 func (sp *streamPreview) setQuickLine(text string) {
 	sp.mu.Lock()

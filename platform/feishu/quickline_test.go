@@ -126,6 +126,40 @@ func TestQuickLineShowsInCardBeforeContent(t *testing.T) {
 	}
 }
 
+func TestQuickLineStaysAboveReplyWhileStreamingAndInFinal(t *testing.T) {
+	gw := &quickGateway{}
+	calls := runQuickTurn(t, gw, true, 5000, func(f *previewFixture, s *stepSession) {
+		waitPreview(t, func() bool { return callsMention(f.read(), quickSentence) })
+		s.events <- core.Event{Type: core.EventTextDelta, Content: "第一行\n第二行已经开始"}
+		waitPreview(t, func() bool { return callsMention(f.read(), quickSentence+"\n\n第一行\n第二行已经开始") })
+		s.events <- core.Event{Type: core.EventResult, Content: "第一行\n第二行已经开始\n最终结论", Done: true}
+		waitPreview(t, func() bool { return callsMention(f.read(), quickSentence+"\n\n第一行\n第二行已经开始\n最终结论") })
+		time.Sleep(200 * time.Millisecond)
+	})
+	// The settled card leads with the sentence once; its summary repeats the reply start.
+	last := ""
+	for _, c := range calls {
+		if b, _ := json.Marshal(c.body); strings.Contains(string(b), "最终结论") {
+			last = string(b)
+		}
+	}
+	if n, m := strings.Count(last, quickSentence), strings.Count(last, "最终结论"); n != m {
+		t.Fatalf("final card holds the sentence %d times for %d replies: %s", n, m, last)
+	}
+}
+
+func TestQuickLineLeadsReplySentAsNewMessage(t *testing.T) {
+	gw := &quickGateway{}
+	calls := runQuickTurn(t, gw, true, 5000, func(f *previewFixture, s *stepSession) {
+		waitPreview(t, func() bool { return callsMention(f.read(), quickSentence) })
+		s.events <- core.Event{Type: core.EventResult, Content: "只有最终回复", Done: true}
+		waitPreview(t, func() bool { return callsMention(f.read(), quickSentence+"\n\n只有最终回复") })
+	})
+	if !callsMention(calls, quickSentence+"\n\n只有最终回复") {
+		t.Fatal("final reply does not lead with the sentence")
+	}
+}
+
 func TestQuickLineDroppedWhenContentCameFirst(t *testing.T) {
 	gw := &quickGateway{release: make(chan struct{})}
 	calls := runQuickTurn(t, gw, true, 5000, func(f *previewFixture, s *stepSession) {

@@ -54,6 +54,7 @@ const (
 var _ core.SegmentedPreviewer = (*Platform)(nil)
 var _ core.PreviewToolRecorder = (*Platform)(nil)
 var _ core.QuickLineSetter = (*Platform)(nil)
+var _ core.QuickLineReader = (*Platform)(nil)
 
 // One turn owns the ticker and all mutations, including finalization and recall.
 type segmentedPreview struct {
@@ -106,7 +107,8 @@ type segmentedPreview struct {
 	rows      []stepRow
 	toolCalls int
 	// quickLine is the fast model's acknowledgement sentence. It shows in the running row
-	// only while the agent has produced nothing; the first real content drops it for good.
+	// while the agent has produced nothing, then leads the reply text as its first
+	// paragraph. A sentence that arrives after the agent started is never taken.
 	quickLine    string
 	quickDropped bool
 	// draft is the adopted pendDraft; it only marks that the text so far is undecided.
@@ -293,6 +295,7 @@ func (p *Platform) SetPreviewBody(_ context.Context, handle any, text string) er
 		}
 		v.pendMu.Lock()
 		v.pend, v.pendDraft = v.routeText(text)
+		v.pend = v.withQuickLine(v.pend)
 		v.pendDirty = true
 		v.pendMu.Unlock()
 		if core.StreamTraceOn() {
@@ -316,6 +319,7 @@ func (p *Platform) SetPreviewBody(_ context.Context, handle any, text string) er
 	}
 	v.pendMu.Lock()
 	body, draft := v.routeText(text)
+	body = v.withQuickLine(body)
 	v.pendMu.Unlock()
 	v.setDraft(draft)
 	return v.setBody(body)
@@ -405,17 +409,22 @@ func (p *Platform) AddPreviewTool(_ context.Context, handle any, text string) er
 // agentQuiet reports whether the agent has shown or held back nothing yet.
 // Caller holds v.mu.
 func (v *segmentedPreview) agentQuiet() bool {
+	v.pendMu.Lock()
+	defer v.pendMu.Unlock()
+	return v.agentQuietLocked()
+}
+
+// agentQuietLocked is agentQuiet for a caller that holds v.mu and v.pendMu.
+func (v *segmentedPreview) agentQuietLocked() bool {
 	if v.body != "" || len(v.rows) > 0 || v.toolCalls > 0 || v.steps > 0 {
 		return false
 	}
-	v.pendMu.Lock()
-	defer v.pendMu.Unlock()
 	return v.pend == "" && v.pendDraft == "" && v.draft == ""
 }
 
 // SetPreviewQuickLine puts the fast model's sentence into the running row of the
 // card. The ticker then pushes it through the normal element update, in order with
-// every other write. If the agent has already produced content it is dropped.
+// every other write. If the agent has already produced content it is not taken.
 func (p *Platform) SetPreviewQuickLine(_ context.Context, handle any, text string) error {
 	h, ok := handle.(*feishuPreviewHandle)
 	if !ok || h.live == nil {
@@ -428,7 +437,10 @@ func (p *Platform) SetPreviewQuickLine(_ context.Context, handle any, text strin
 	if v.stopped || v.quickDropped || text == "" {
 		return nil
 	}
-	if !v.agentQuiet() {
+	// pendMu is held too: SetPreviewBody reads the sentence under it.
+	v.pendMu.Lock()
+	defer v.pendMu.Unlock()
+	if !v.agentQuietLocked() {
 		v.quickDropped = true
 		return nil
 	}
@@ -436,11 +448,24 @@ func (p *Platform) SetPreviewQuickLine(_ context.Context, handle any, text strin
 	return nil
 }
 
-// dropQuickLine latches the sentence off once the agent shows something. Caller holds v.mu.
-func (v *segmentedPreview) dropQuickLine() {
-	if v.quickLine != "" && !v.agentQuiet() {
-		v.quickLine, v.quickDropped = "", true
+// PreviewQuickLine returns the sentence the card kept, so the final reply can lead with it.
+func (p *Platform) PreviewQuickLine(handle any) string {
+	h, ok := handle.(*feishuPreviewHandle)
+	if !ok || h.live == nil {
+		return ""
 	}
+	v := h.live
+	v.pendMu.Lock()
+	defer v.pendMu.Unlock()
+	return v.quickLine
+}
+
+// withQuickLine puts the kept sentence above reply text as its first paragraph. Caller holds pendMu.
+func (v *segmentedPreview) withQuickLine(body string) string {
+	if v.quickLine == "" || strings.TrimSpace(body) == "" {
+		return body
+	}
+	return v.quickLine + "\n\n" + body
 }
 
 func stepOneLine(text string, limit int) string {
@@ -1017,7 +1042,6 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 		}
 		v.reveal(now)
 	}
-	v.dropQuickLine()
 	if v.fallback && !v.lastPublished.IsZero() && now.Sub(v.lastPublished) < 700*time.Millisecond {
 		return nil
 	}
