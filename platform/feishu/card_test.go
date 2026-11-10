@@ -312,3 +312,61 @@ func TestBuildCardJSONWithStatusFooter_EmptyFooterFallsThrough(t *testing.T) {
 		t.Errorf("whitespace footer should fall through to buildCardJSON")
 	}
 }
+
+func TestRenderCardMap_CompactOptionsStackButtonAndDescription(t *testing.T) {
+	card := core.NewCard().Compact().
+		Markdown("(1/2) **Which database?**").
+		OptionBtnExtra("Recommended for production", "PostgreSQL（推荐）", "primary", "askq:0:1",
+			map[string]string{"askq_label": "PostgreSQL（推荐）", "askq_question": "Which database?"}).
+		OptionBtnExtra("", "SQLite", "default", "askq:0:2", nil).
+		Note("reply with the number").
+		Build()
+
+	got := decodeRenderedCard(t, card)
+	if _, ok := got["header"]; ok {
+		t.Fatalf("compact card must not have a header: %#v", got["header"])
+	}
+	if got["schema"] != "2.0" {
+		t.Fatalf("schema = %#v, want 2.0", got["schema"])
+	}
+	body := got["body"].(map[string]any)
+	if body["vertical_spacing"] != compactCardSpacing {
+		t.Fatalf("vertical_spacing = %#v", body["vertical_spacing"])
+	}
+	els := body["elements"].([]any)
+	// question, button+desc, button (no desc), note
+	if len(els) != 5 {
+		t.Fatalf("got %d elements, want 5: %#v", len(els), els)
+	}
+	if els[0].(map[string]any)["tag"] != "markdown" {
+		t.Fatalf("first element must be the question markdown: %#v", els[0])
+	}
+
+	btn1 := els[1].(map[string]any)
+	if btn1["tag"] != "button" || btn1["width"] != "fill" || btn1["type"] != "primary" {
+		t.Fatalf("first option button = %#v", btn1)
+	}
+	if _, ok := btn1["margin"]; ok {
+		t.Fatalf("first option must not carry the inter-option gap")
+	}
+	val := btn1["behaviors"].([]any)[0].(map[string]any)["value"].(map[string]any)
+	if val["action"] != "askq:0:1" || val["askq_label"] != "PostgreSQL（推荐）" || val["askq_question"] != "Which database?" {
+		t.Fatalf("callback value changed: %#v", val)
+	}
+	desc := els[2].(map[string]any)
+	if desc["tag"] != "markdown" || desc["text_size"] != "notation" || !strings.Contains(desc["content"].(string), "Recommended for production") {
+		t.Fatalf("description line = %#v", desc)
+	}
+
+	btn2 := els[3].(map[string]any)
+	if btn2["tag"] != "button" || btn2["width"] != "fill" || btn2["type"] != "default" || btn2["margin"] != compactOptionGap {
+		t.Fatalf("second option button = %#v", btn2)
+	}
+	if v := btn2["behaviors"].([]any)[0].(map[string]any)["value"].(map[string]any); v["action"] != "askq:0:2" {
+		t.Fatalf("second callback value = %#v", v)
+	}
+	note := els[4].(map[string]any)
+	if note["tag"] != "markdown" || note["text_size"] != "notation" || !strings.Contains(note["content"].(string), "reply with the number") {
+		t.Fatalf("note = %#v", note)
+	}
+}

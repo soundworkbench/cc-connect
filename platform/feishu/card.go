@@ -136,6 +136,9 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 	if card == nil {
 		return result
 	}
+	if card.Compact {
+		return renderCompactCardMap(card, sessionKey)
+	}
 
 	if card.Header != nil && card.Header.Title != "" {
 		color := card.Header.Color
@@ -295,6 +298,93 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 	}
 
 	result["elements"] = elements
+	return result
+}
+
+// compactCardSpacing is the gap between elements in a compact card;
+// compactOptionGap is the extra space above each option after the first, so
+// a description stays closer to its own button than to the next one.
+const (
+	compactCardSpacing = "4px"
+	compactOptionGap   = "6px 0px 0px 0px"
+)
+
+// renderCompactCardMap renders a card as schema 2.0 with tight, uniform
+// spacing and no coloured header unless the card asks for one. Options
+// (CardListItem) become a full-width button with the description in small
+// grey text underneath. Callback data is carried in the button's callback
+// behavior and arrives in the action value exactly as in the classic layout.
+func renderCompactCardMap(card *core.Card, sessionKey string) map[string]any {
+	var elements []map[string]any
+	options := 0
+	callbackButton := func(text, btnType, value string, extra map[string]string) map[string]any {
+		if btnType == "" {
+			btnType = "default"
+		}
+		valMap := map[string]string{"action": value}
+		if sessionKey != "" {
+			valMap["session_key"] = sessionKey
+		}
+		for k, v := range extra {
+			valMap[k] = v
+		}
+		return map[string]any{
+			"tag":       "button",
+			"text":      plainText(text),
+			"type":      btnType,
+			"width":     "fill",
+			"behaviors": []map[string]any{{"type": "callback", "value": valMap}},
+		}
+	}
+	grey := func(text string) map[string]any {
+		return map[string]any{
+			"tag":       "markdown",
+			"content":   "<font color='grey'>" + text + "</font>",
+			"text_size": "notation",
+		}
+	}
+	for _, elem := range card.Elements {
+		switch e := elem.(type) {
+		case core.CardMarkdown:
+			elements = append(elements, map[string]any{"tag": "markdown", "content": e.Content})
+		case core.CardDivider:
+			elements = append(elements, map[string]any{"tag": "hr"})
+		case core.CardActions:
+			for _, btn := range e.Buttons {
+				elements = append(elements, callbackButton(btn.Text, btn.Type, btn.Value, btn.Extra))
+			}
+		case core.CardListItem:
+			btn := callbackButton(e.BtnText, e.BtnType, e.BtnValue, e.Extra)
+			if options > 0 {
+				btn["margin"] = compactOptionGap
+			}
+			options++
+			elements = append(elements, btn)
+			if e.Text != "" {
+				elements = append(elements, grey(e.Text))
+			}
+		case core.CardNote:
+			elements = append(elements, grey(e.Text))
+		}
+	}
+	if len(elements) == 0 {
+		elements = []map[string]any{{"tag": "markdown", "content": " "}}
+	}
+	result := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{"width_mode": "default"},
+		"body": map[string]any{
+			"vertical_spacing": compactCardSpacing,
+			"elements":         elements,
+		},
+	}
+	if card.Header != nil && card.Header.Title != "" {
+		color := card.Header.Color
+		if color == "" {
+			color = "blue"
+		}
+		result["header"] = map[string]any{"title": plainText(card.Header.Title), "template": color}
+	}
 	return result
 }
 

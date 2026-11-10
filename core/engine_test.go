@@ -3048,8 +3048,8 @@ func TestSendPermissionPrompt_CardPlatform(t *testing.T) {
 		t.Fatalf("expected 1 sent card, got %d", len(p.sentCards))
 	}
 	card := p.sentCards[0]
-	if card.Header == nil || card.Header.Color != "orange" {
-		t.Errorf("expected orange header, got %+v", card.Header)
+	if card.Header != nil {
+		t.Errorf("expected no header, got %+v", card.Header)
 	}
 	if !card.HasButtons() {
 		t.Error("expected card to have buttons")
@@ -6634,8 +6634,8 @@ func TestSendAskQuestionPrompt_CardPlatform(t *testing.T) {
 		t.Fatalf("expected 1 card, got %d", len(p.sentCards))
 	}
 	card := p.sentCards[0]
-	if card.Header == nil || card.Header.Color != "blue" {
-		t.Errorf("expected blue header, got %+v", card.Header)
+	if card.Header != nil || !card.Compact {
+		t.Errorf("expected compact card without header, got %+v", card)
 	}
 	askqCount := countCardActionValues(card, "askq:")
 	if askqCount != 3 {
@@ -6653,8 +6653,12 @@ func TestSendAskQuestionPrompt_CardPlatform_MultiQuestion_ShowsIndex(t *testing.
 		t.Fatalf("expected 1 card, got %d", len(p.sentCards))
 	}
 	card := p.sentCards[0]
-	if !strings.Contains(card.Header.Title, "(1/2)") {
-		t.Errorf("expected (1/2) in title, got %s", card.Header.Title)
+	if card.Header != nil {
+		t.Errorf("expected no header, got %+v", card.Header)
+	}
+	md, ok := card.Elements[0].(CardMarkdown)
+	if !ok || !strings.HasPrefix(md.Content, "(1/2) ") {
+		t.Errorf("expected (1/2) prefix in first markdown, got %+v", card.Elements[0])
 	}
 }
 
@@ -6741,8 +6745,8 @@ func TestProcessInteractiveEvents_AskUserQuestionFromAgent_RendersRichCardPrompt
 	}
 
 	card := waitForSentCard(t, &p.stubCardPlatform)
-	if card.Header == nil || card.Header.Color != "blue" {
-		t.Fatalf("card header = %#v, want blue AskUserQuestion card", card.Header)
+	if card.Header != nil || !card.Compact {
+		t.Fatalf("card = %#v, want compact AskUserQuestion card without header", card)
 	}
 	if countCardActionValues(card, "askq:") != 3 {
 		t.Fatalf("askq button count = %d, want 3", countCardActionValues(card, "askq:"))
@@ -16094,5 +16098,35 @@ func TestProcessInteractiveEvents_StreamingCard_BareNoReply_Suppressed(t *testin
 	}
 	if strings.Contains(card.finalContent(), "NO_REPLY") {
 		t.Fatalf("silent reply leaked NO_REPLY into the streaming card: %q", card.finalContent())
+	}
+}
+
+func TestSendAskQuestionPrompt_CardOptionsStacked(t *testing.T) {
+	e := newTestEngine()
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+	qs := testQuestions()
+	qs[0].Options[0].Label = "PostgreSQL（推荐）"
+	e.sendAskQuestionPrompt(p, "ctx", qs, 0)
+
+	card := p.sentCards[0]
+	var items []CardListItem
+	for _, el := range card.Elements {
+		if li, ok := el.(CardListItem); ok {
+			items = append(items, li)
+		}
+	}
+	if len(items) != 3 {
+		t.Fatalf("expected 3 options, got %d", len(items))
+	}
+	for i, li := range items {
+		if !li.Stacked || li.BtnValue != fmt.Sprintf("askq:0:%d", i+1) || li.BtnText != qs[0].Options[i].Label || li.Text != qs[0].Options[i].Description {
+			t.Errorf("option %d = %+v", i, li)
+		}
+		if li.Extra["askq_label"] != li.BtnText || li.Extra["askq_question"] != "Which database?" {
+			t.Errorf("option %d extra = %+v", i, li.Extra)
+		}
+	}
+	if items[0].BtnType != "primary" || items[1].BtnType != "default" {
+		t.Errorf("button types = %s, %s", items[0].BtnType, items[1].BtnType)
 	}
 }

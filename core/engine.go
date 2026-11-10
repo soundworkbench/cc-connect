@@ -11192,8 +11192,7 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 			Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllowAll), "green")}
 
 		card := NewCard().
-			Title(e.i18n.T(MsgPermCardTitle), "orange").
-			Markdown(body).
+			Markdown("**" + e.i18n.T(MsgPermCardTitle) + "**\n" + body).
 			ButtonsEqual(allowBtn, denyBtn).
 			Buttons(allowAllBtn).
 			Note(e.i18n.T(MsgPermCardNote)).
@@ -11218,11 +11217,15 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 	if total > 1 {
 		titleSuffix = fmt.Sprintf(" (%d/%d)", qIdx+1, total)
 	}
+	cardPrefix := ""
+	if total > 1 {
+		cardPrefix = fmt.Sprintf("(%d/%d) ", qIdx+1, total)
+	}
 
 	// Try card (Feishu/Lark)
 	if supportsCards(p) {
-		cb := NewCard().Title(e.i18n.T(MsgAskQuestionTitle)+titleSuffix, "blue")
-		body := "**" + q.Question + "**"
+		cb := NewCard().Compact()
+		body := cardPrefix + "**" + q.Question + "**"
 		if q.MultiSelect {
 			// For multiSelect, buttons would resolve on the first click and prevent
 			// selecting multiple options. Render options as a numbered text list
@@ -11240,12 +11243,12 @@ func (e *Engine) sendAskQuestionPrompt(p Platform, replyCtx any, questions []Use
 		} else {
 			cb.Markdown(body)
 			for i, opt := range q.Options {
-				desc := opt.Label
-				if opt.Description != "" {
-					desc += " — " + opt.Description
+				btnType := "default"
+				if i == 0 && strings.Contains(opt.Label, "推荐") {
+					btnType = "primary"
 				}
 				answerData := fmt.Sprintf("askq:%d:%d", qIdx, i+1)
-				cb.ListItemBtnExtra(desc, opt.Label, "default", answerData, map[string]string{
+				cb.OptionBtnExtra(opt.Description, opt.Label, btnType, answerData, map[string]string{
 					"askq_label":    opt.Label,
 					"askq_question": q.Question,
 				})
@@ -11355,7 +11358,7 @@ func (e *Engine) renderCardForPlatformWorkspace(p Platform, card *Card, workspac
 	if card == nil {
 		return nil
 	}
-	out := &Card{}
+	out := &Card{Compact: card.Compact}
 	if card.Header != nil {
 		h := *card.Header
 		out.Header = &h
@@ -11386,6 +11389,7 @@ func (e *Engine) renderCardForPlatformWorkspace(p Platform, card *Card, workspac
 				BtnType:  v.BtnType,
 				BtnValue: v.BtnValue,
 				Extra:    v.Extra,
+				Stacked:  v.Stacked,
 			})
 		default:
 			out.Elements = append(out.Elements, elem)

@@ -11,6 +11,9 @@ import (
 type Card struct {
 	Header   *CardHeader
 	Elements []CardElement
+	// Compact asks the platform for a tight vertical layout (Feishu: schema 2.0
+	// with small element spacing) instead of the classic card layout.
+	Compact bool
 }
 
 // CardHeader is the optional colored title bar of a card.
@@ -52,6 +55,9 @@ type CardListItem struct {
 	BtnType  string            // "primary", "default", "danger"
 	BtnValue string            // callback data
 	Extra    map[string]string // additional key-value pairs carried in the callback
+	// Stacked puts the button on its own full-width row with Text as a small
+	// grey description below it, instead of the side-by-side layout.
+	Stacked bool
 }
 
 // CardSelect renders a dropdown selector.
@@ -190,6 +196,21 @@ func (b *CardBuilder) ListItemBtnExtra(desc, btnText, btnType, btnValue string, 
 	return b
 }
 
+// Compact switches the card to the tight vertical layout.
+func (b *CardBuilder) Compact() *CardBuilder {
+	b.card.Compact = true
+	return b
+}
+
+// OptionBtnExtra appends a stacked option: a full-width button labelled btnText,
+// with desc (optional) as small grey text below it.
+func (b *CardBuilder) OptionBtnExtra(desc, btnText, btnType, btnValue string, extra map[string]string) *CardBuilder {
+	b.card.Elements = append(b.card.Elements, CardListItem{
+		Text: desc, BtnText: btnText, BtnType: btnType, BtnValue: btnValue, Extra: extra, Stacked: true,
+	})
+	return b
+}
+
 // Select appends a dropdown selector element.
 func (b *CardBuilder) Select(placeholder string, options []CardSelectOption, initValue string) *CardBuilder {
 	if len(options) > 0 {
@@ -253,6 +274,10 @@ func (c *Card) RenderText() string {
 			}
 			sb.WriteString("\n\n")
 		case CardListItem:
+			if e.Stacked && e.Text != "" {
+				sb.WriteString(e.BtnText)
+				sb.WriteString(" — ")
+			}
 			sb.WriteString(e.Text)
 			sb.WriteString("  [")
 			sb.WriteString(e.BtnText)

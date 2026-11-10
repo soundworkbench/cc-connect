@@ -920,15 +920,12 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		})
 
 		permLabel, _ := event.Event.Action.Value["perm_label"].(string)
-		permColor, _ := event.Event.Action.Value["perm_color"].(string)
 		permBody, _ := event.Event.Action.Value["perm_body"].(string)
-		if permColor == "" {
-			permColor = "green"
-		}
-		cb := core.NewCard().Title(permLabel, permColor)
+		content := "**" + permLabel + "**"
 		if permBody != "" {
-			cb.Markdown(permBody)
+			content += "\n" + permBody
 		}
+		cb := core.NewCard().Markdown(content)
 		return &callback.CardActionTriggerResponse{
 			Card: &callback.Card{
 				Type: "raw",
@@ -957,11 +954,11 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		if answerLabel == "" {
 			answerLabel = actionVal
 		}
-		cb := core.NewCard().Title("✅ "+answerLabel, "green")
+		cb := core.NewCard().Compact()
 		if askqQuestion != "" {
 			cb.Markdown(askqQuestion)
 		}
-		cb.Markdown("**→ " + answerLabel + "**")
+		cb.Markdown("**✅ → " + answerLabel + "**")
 		return &callback.CardActionTriggerResponse{
 			Card: &callback.Card{
 				Type: "raw",
