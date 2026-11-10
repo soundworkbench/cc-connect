@@ -302,6 +302,20 @@ type StreamPreviewConfig struct {
 	MaxChars          *int     `toml:"max_chars"`                    // max preview length; default 4000 on Feishu, 2000 elsewhere
 	TypingMarker      *string  `toml:"typing_marker"`                // shown under a running preview; default "..." on Feishu, off elsewhere
 	TraceFile         string   `toml:"trace_file"`                   // append per-event streaming timings (JSON lines) to this file; default off
+
+	QuickLine QuickLineConfig `toml:"quick_line"` // [stream_preview.quick_line]: fast-model acknowledgement line in the card
+}
+
+// QuickLineConfig writes one short sentence from a fast model into the streaming
+// card while the main agent is still thinking. Default off.
+type QuickLineConfig struct {
+	Enabled      bool    `toml:"enabled"`
+	BaseURL      string  `toml:"base_url"`      // Anthropic-compatible gateway; POST {base_url}/v1/messages
+	Model        string  `toml:"model"`         // full model name, sent as is
+	KeyFile      string  `toml:"key_file"`      // file holding the gateway key, read at call time
+	Effort       *string `toml:"effort"`        // output_config.effort; default "minimal", empty = not sent
+	TimeoutMs    int     `toml:"timeout_ms"`    // default 5000
+	SystemPrompt string  `toml:"system_prompt"` // optional override of the built-in Chinese prompt
 }
 
 // InstantReplyConfig controls the immediate confirmation reply sent when a message

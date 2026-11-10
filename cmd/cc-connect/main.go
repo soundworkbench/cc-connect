@@ -2222,5 +2222,28 @@ func buildStreamPreviewCfg(c config.StreamPreviewConfig) core.StreamPreviewCfg {
 	if c.TypingMarker != nil {
 		spcfg.TypingMarker, spcfg.SegTypingMarker = *c.TypingMarker, ""
 	}
+	spcfg.QuickLine = buildQuickLineCfg(c.QuickLine)
 	return spcfg
+}
+
+// buildQuickLineCfg turns [stream_preview.quick_line] into the core setting. An
+// enabled section without a base URL, model or readable key file stays off, with
+// one warning.
+func buildQuickLineCfg(c config.QuickLineConfig) core.QuickLineCfg {
+	q := core.QuickLineCfg{Enabled: c.Enabled, BaseURL: c.BaseURL, Model: c.Model, KeyFile: c.KeyFile, TimeoutMs: c.TimeoutMs, SystemPrompt: c.SystemPrompt}
+	if !q.Enabled {
+		return q
+	}
+	q.Effort = "minimal"
+	if c.Effort != nil {
+		q.Effort = *c.Effort
+	}
+	if q.BaseURL == "" || q.Model == "" || q.KeyFile == "" {
+		slog.Warn("stream_preview.quick_line disabled: base_url, model and key_file are required")
+		q.Enabled = false
+	} else if st, err := os.Stat(q.KeyFile); err != nil || st.IsDir() {
+		slog.Warn("stream_preview.quick_line disabled: key_file is not readable")
+		q.Enabled = false
+	}
+	return q
 }

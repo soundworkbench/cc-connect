@@ -52,6 +52,7 @@ const (
 
 var _ core.SegmentedPreviewer = (*Platform)(nil)
 var _ core.PreviewToolRecorder = (*Platform)(nil)
+var _ core.QuickLineSetter = (*Platform)(nil)
 
 // One turn owns the ticker and all mutations, including finalization and recall.
 type segmentedPreview struct {
@@ -103,6 +104,10 @@ type segmentedPreview struct {
 	lastText  time.Time
 	rows      []stepRow
 	toolCalls int
+	// quickLine is the fast model's acknowledgement sentence. It shows in the running row
+	// only while the agent has produced nothing; the first real content drops it for good.
+	quickLine    string
+	quickDropped bool
 	// draft is the adopted pendDraft; it only marks that the text so far is undecided.
 	draft string
 	// finishChunk is how many runes each push releases during the end-of-turn reveal
@@ -376,6 +381,47 @@ func (p *Platform) AddPreviewTool(_ context.Context, handle any, text string) er
 	return nil
 }
 
+// agentQuiet reports whether the agent has shown or held back nothing yet.
+// Caller holds v.mu.
+func (v *segmentedPreview) agentQuiet() bool {
+	if v.body != "" || len(v.rows) > 0 || v.toolCalls > 0 || v.steps > 0 {
+		return false
+	}
+	v.pendMu.Lock()
+	defer v.pendMu.Unlock()
+	return v.pend == "" && v.pendDraft == "" && v.draft == ""
+}
+
+// SetPreviewQuickLine puts the fast model's sentence into the running row of the
+// card. The ticker then pushes it through the normal element update, in order with
+// every other write. If the agent has already produced content it is dropped.
+func (p *Platform) SetPreviewQuickLine(_ context.Context, handle any, text string) error {
+	h, ok := handle.(*feishuPreviewHandle)
+	if !ok || h.live == nil {
+		return core.ErrNotSupported
+	}
+	v := h.live
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	text = stepOneLine(text, 80)
+	if v.stopped || v.quickDropped || text == "" {
+		return nil
+	}
+	if !v.agentQuiet() {
+		v.quickDropped = true
+		return nil
+	}
+	v.quickLine = text
+	return nil
+}
+
+// dropQuickLine latches the sentence off once the agent shows something. Caller holds v.mu.
+func (v *segmentedPreview) dropQuickLine() {
+	if v.quickLine != "" && !v.agentQuiet() {
+		v.quickLine, v.quickDropped = "", true
+	}
+}
+
 func stepOneLine(text string, limit int) string {
 	text = strings.Join(strings.Fields(text), " ")
 	if r := []rune(text); len(r) > limit {
@@ -525,6 +571,9 @@ func (v *segmentedPreview) liveLine() string {
 	if n := len(v.rows); n > 0 && v.rows[n-1].end.IsZero() {
 		text, tool = v.rows[n-1].text, v.rows[n-1].tool
 	}
+	if v.quickLine != "" && v.body == "" && len(v.rows) == 0 {
+		text = v.quickLine + "\n<font color='grey'>" + text + "</font>"
+	}
 	if v.spinnerKey == "" {
 		text = spinnerGlyphs[v.frame%len(spinnerGlyphs)] + " " + text
 	}
@@ -559,6 +608,9 @@ func (v *segmentedPreview) progress(now time.Time) string {
 	}
 	var lines []string
 	if v.body == "" {
+		if v.quickLine != "" && v.steps == 0 {
+			lines = append(lines, v.quickLine)
+		}
 		lines = append(lines, v.i18n.Tf(core.MsgPreviewElapsed, secondsBetween(v.started, now)))
 	}
 	if v.steps > 0 {
@@ -852,6 +904,7 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 		}
 		v.reveal(now)
 	}
+	v.dropQuickLine()
 	if v.fallback && !v.lastPublished.IsZero() && now.Sub(v.lastPublished) < 700*time.Millisecond {
 		return nil
 	}

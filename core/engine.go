@@ -3430,6 +3430,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		if preview.segmented != nil && preview.canPreview() {
 			admittedPreview = preview
 			e.acknowledgeTurnStart(p, msg.ReplyCtx, preview, false)
+			e.startQuickLine(preview, msg.Content, session.GetHistory(quickLineHistoryTurns))
 			defer preview.discard()
 		}
 	}
@@ -6533,6 +6534,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				}
 				if !muteScheduledNotices && !automated {
 					e.acknowledgeTurnStart(queued.platform, queued.replyCtx, sp, streamCard != nil)
+					e.startQuickLine(sp, queued.content, session.GetHistory(quickLineHistoryTurns))
 				}
 
 				session.AddHistory("user", queued.content)

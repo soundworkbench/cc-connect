@@ -36,6 +36,8 @@ type StreamPreviewCfg struct {
 	SegMinDeltaChars int
 	SegMaxChars      int
 	SegTypingMarker  string
+
+	QuickLine QuickLineCfg // one-sentence acknowledgement from a fast model, written into the card
 }
 
 // DefaultStreamPreviewCfg returns the base preview settings shared by all platforms.
