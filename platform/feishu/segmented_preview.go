@@ -521,6 +521,13 @@ func (p *Platform) cachedStepIcons() stepIconKeys {
 
 // stepIconKeys uploads the step-row images once per platform and caches their keys. After a
 // failed upload it returns empty keys (glyph spinner, text check) and tries again only after a back-off.
+// WarmStepIcons uploads the step-list icons before the first card needs them.
+func (p *Platform) WarmStepIcons(spinner []byte) {
+	if p.useInteractiveCard {
+		p.stepIconKeys(p.bgCtxForStartup(), spinner)
+	}
+}
+
 func (p *Platform) stepIconKeys(ctx context.Context, spinnerOverride []byte) stepIconKeys {
 	p.spinnerMu.Lock()
 	defer p.spinnerMu.Unlock()

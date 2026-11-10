@@ -202,7 +202,8 @@ func TestStepRowsShareIconSlot(t *testing.T) {
 	}
 }
 
-// A configured spinner replaces only the spinner bytes; an empty one keeps the embedded GIF.
+// Start-up warm-up uploads the configured spinner (or the embedded one), so the
+// first card of a fresh process already shows it.
 func TestConfiguredSpinnerImageIsUploaded(t *testing.T) {
 	custom := []byte("GIF89a-custom")
 	for name, tc := range map[string]struct{ cfg, want []byte }{"configured": {custom, custom}, "fallback": {nil, spinnerGIF}} {
@@ -213,9 +214,21 @@ func TestConfiguredSpinnerImageIsUploaded(t *testing.T) {
 			got = append(got, data)
 			return fmt.Sprintf("img_%d", len(got)), nil
 		}
-		p.stepIconKeys(context.Background(), tc.cfg)
+		p.WarmStepIcons(tc.cfg)
 		if len(got) != 3 || string(got[0]) != string(tc.want) || string(got[1]) != string(checkGIF) || string(got[2]) != string(blankGIF) {
 			t.Fatalf("%s: uploads %d, spinner %q", name, len(got), got[0])
+		}
+		cfg := core.DefaultStreamPreviewCfg()
+		cfg.Segmented, cfg.StepList, cfg.SpinnerGIF = true, true, tc.cfg
+		cfg.PushIntervalMs = 60000
+		handle, err := p.StartSegmentedPreview(context.Background(), replyContext{chatID: "oc"}, cfg, core.NewI18n(core.LangChinese))
+		if err != nil {
+			t.Fatal(err)
+		}
+		live := handle.(*feishuPreviewHandle).live
+		t.Cleanup(live.stop)
+		if live.spinnerKey != "img_1" || len(got) != 3 {
+			t.Fatalf("%s: first card spinner %q after %d uploads", name, live.spinnerKey, len(got))
 		}
 	}
 }

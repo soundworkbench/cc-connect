@@ -1425,6 +1425,12 @@ func (e *Engine) checkRateLimit(msg *Message) bool {
 }
 
 // SetStreamPreviewCfg configures the streaming preview behavior.
+// StepIconWarmer is a platform that uploads the step-list icons once at start-up,
+// so the first card of a fresh process shows the configured spinner.
+type StepIconWarmer interface {
+	WarmStepIcons(spinner []byte)
+}
+
 func (e *Engine) SetStreamPreviewCfg(cfg StreamPreviewCfg) {
 	e.streamPreview = cfg
 }
@@ -1540,6 +1546,9 @@ func (e *Engine) Start() error {
 			slog.Warn("platform start failed", "project", e.name, "platform", p.Name(), "error", err)
 			startErrs = append(startErrs, fmt.Errorf("[%s] start platform %s: %w", e.name, p.Name(), err))
 			continue
+		}
+		if w, ok := p.(StepIconWarmer); ok {
+			go w.WarmStepIcons(e.streamPreview.SpinnerGIF)
 		}
 		if isAsync {
 			pendingCount++
