@@ -15,6 +15,7 @@ func newSpinnerPreview(t *testing.T, upload func(context.Context, []byte) (strin
 	t.Helper()
 	f, p := newPreviewFixture(t)
 	p.spinnerUpload = upload
+	p.stepIconKeys(context.Background(), nil) // icons cached by an earlier card
 	cfg := core.DefaultStreamPreviewCfg()
 	cfg.Segmented, cfg.StepList = true, true
 	cfg.PushIntervalMs = 60000
@@ -158,6 +159,7 @@ func TestStepRowsShareIconSlot(t *testing.T) {
 		}
 		return "img_blank", nil
 	}
+	p.stepIconKeys(context.Background(), nil) // icons cached by an earlier card
 	cfg := core.DefaultStreamPreviewCfg()
 	cfg.Segmented, cfg.StepList = true, true
 	cfg.PushIntervalMs = 60000
@@ -211,16 +213,45 @@ func TestConfiguredSpinnerImageIsUploaded(t *testing.T) {
 			got = append(got, data)
 			return fmt.Sprintf("img_%d", len(got)), nil
 		}
-		cfg := core.DefaultStreamPreviewCfg()
-		cfg.Segmented, cfg.StepList, cfg.SpinnerGIF = true, true, tc.cfg
-		cfg.PushIntervalMs = 60000
-		handle, err := p.StartSegmentedPreview(context.Background(), replyContext{chatID: "oc"}, cfg, core.NewI18n(core.LangChinese))
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(handle.(*feishuPreviewHandle).live.stop)
+		p.stepIconKeys(context.Background(), tc.cfg)
 		if len(got) != 3 || string(got[0]) != string(tc.want) || string(got[1]) != string(checkGIF) || string(got[2]) != string(blankGIF) {
 			t.Fatalf("%s: uploads %d, spinner %q", name, len(got), got[0])
 		}
 	}
+}
+
+func TestStartSegmentedPreviewDoesNotWaitForIconUpload(t *testing.T) {
+	f, p := newPreviewFixture(t)
+	release := make(chan struct{})
+	p.spinnerUpload = func(ctx context.Context, _ []byte) (string, error) {
+		select {
+		case <-release:
+			return "img_late", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	cfg := core.DefaultStreamPreviewCfg()
+	cfg.Segmented, cfg.StepList = true, true
+	cfg.PushIntervalMs = 60000
+	done := make(chan any, 1)
+	go func() {
+		handle, err := p.StartSegmentedPreview(context.Background(), replyContext{chatID: "oc"}, cfg, core.NewI18n(core.LangChinese))
+		if err != nil {
+			t.Error(err)
+		}
+		done <- handle
+	}()
+	select {
+	case handle := <-done:
+		if h, ok := handle.(*feishuPreviewHandle); ok {
+			t.Cleanup(h.live.stop)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("card start waited for the icon upload")
+	}
+	if len(f.read()) == 0 {
+		t.Fatal("no card request was sent")
+	}
+	close(release)
 }

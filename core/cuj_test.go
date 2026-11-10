@@ -4060,3 +4060,55 @@ type reasoningJourneyPlatform struct {
 func (p *reasoningJourneyPlatform) SetCardNavigationHandler(h CardNavigationHandler) {
 	p.navigation = h
 }
+
+// A slow reaction call must not delay the card, and the card must exist before
+// the agent emits its first event.
+type slowTypingSegmentedPlatform struct {
+	cujSegmentedPlatform
+	release chan struct{}
+	started chan struct{}
+}
+
+func (p *slowTypingSegmentedPlatform) StartTyping(context.Context, any) func() {
+	close(p.started)
+	<-p.release
+	return func() {}
+}
+
+func TestSegmentedCardOpensAtTurnStartBeforeAgentEvent(t *testing.T) {
+	p := &slowTypingSegmentedPlatform{
+		cujSegmentedPlatform: cujSegmentedPlatform{stubPlatformEngine: stubPlatformEngine{n: "segmented"}},
+		release:              make(chan struct{}),
+		started:              make(chan struct{}),
+	}
+	s := &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 1)}
+	e := NewEngine("segmented", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	cfg := DefaultStreamPreviewCfg()
+	cfg.Segmented, cfg.StepList = true, true
+	e.SetStreamPreviewCfg(cfg)
+	t.Cleanup(func() { _ = e.Stop() })
+	key := "segmented:user"
+	e.ReceiveMessage(p, &Message{SessionKey: key, Platform: p.Name(), MessageID: "1", UserID: "user", Content: "请求", ReplyCtx: "ctx"})
+	select {
+	case <-p.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("reaction call never started")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for len(p.getSent()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("card not sent while the reaction call is still pending and the agent is silent")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := p.getSent(); got[0] != "思考中…" {
+		t.Fatalf("unexpected first card: %q", got)
+	}
+	close(p.release)
+	select {
+	case <-s.sent:
+	case <-time.After(3 * time.Second):
+		t.Fatal("prompt missing")
+	}
+	s.events <- Event{Type: EventResult, Content: "answer", Done: true}
+}

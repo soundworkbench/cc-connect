@@ -3404,13 +3404,18 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	turnStart := time.Now()
 
-	// Start typing indicator if platform supports it, before the preview card,
-	// so the reaction on the user's message shows first.
+	// Start the typing indicator if the platform supports it. The reaction call
+	// runs beside the card start so neither waits on the other.
 	// Ownership is transferred to processInteractiveEvents which manages
 	// stopping/restarting it across queued message turns.
 	var stopTyping func()
 	if ti, ok := p.(TypingIndicator); ok {
-		stopTyping = e.takeTurnTyping(msg.executionState, p, ti, msg.ReplyCtx)
+		typingStop := make(chan func(), 1)
+		go func() { typingStop <- e.takeTurnTyping(msg.executionState, p, ti, msg.ReplyCtx) }()
+		var stopOnce sync.Once
+		stopTyping = func() {
+			stopOnce.Do(func() { (<-typingStop)() })
+		}
 	}
 	defer func() {
 		// Stop typing if ownership was NOT transferred to processInteractiveEvents

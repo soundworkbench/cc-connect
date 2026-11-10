@@ -218,7 +218,11 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 	}
 	v := &segmentedPreview{stopCh: make(chan struct{}), cfg: cfg, i18n: i18n, started: time.Now(), bodyID: bodyID, sentBodyID: bodyID, progressID: progressID, footerID: footerID, doneID: doneID}
 	if cfg.StepList {
-		icons := p.stepIconKeys(ctx, cfg.SpinnerGIF)
+		icons := p.cachedStepIcons()
+		if icons.spinner == "" {
+			// First card after start-up: show glyphs now, upload for later cards.
+			go p.stepIconKeys(context.WithoutCancel(ctx), cfg.SpinnerGIF)
+		}
 		v.spinnerKey, v.checkKey, v.blankKey = icons.spinner, icons.check, icons.blank
 	}
 	if cfg.BodyInflight > 1 {
@@ -504,6 +508,15 @@ func secondsBetween(from, to time.Time) int {
 		return int(d / time.Second)
 	}
 	return 0
+}
+
+// cachedStepIcons returns the uploaded keys without waiting for an upload in flight.
+func (p *Platform) cachedStepIcons() stepIconKeys {
+	if !p.spinnerMu.TryLock() {
+		return stepIconKeys{}
+	}
+	defer p.spinnerMu.Unlock()
+	return p.stepIcons
 }
 
 // stepIconKeys uploads the step-row images once per platform and caches their keys. After a
