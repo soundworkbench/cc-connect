@@ -114,8 +114,15 @@ type FailurePreviewer interface {
 // at all, before the card says it is still waiting. It only changes the card.
 var silenceNoticeAfter = 90 * time.Second
 
-// failedTurnTTL bounds how long a retry button stays usable.
-const failedTurnTTL = 24 * time.Hour
+// Retry buttons keep the original request, attachments included, in memory.
+// These bound how long and how much: past the TTL a button no longer works,
+// and past the count or byte limit the oldest requests go first.
+var (
+	failedTurnTTL      = time.Hour
+	failedTurnMax      = 200
+	failedTurnMaxBytes = 256 << 20
+	failedTurnSweep    = 5 * time.Minute
+)
 
 // retryNotice is the card line for an EventRetry.
 func retryNotice(i *I18n, r *RetryStatus) string {
@@ -213,34 +220,105 @@ type failedTurn struct {
 	handle   any
 	card     FailureCard
 	expires  time.Time
+	size     int // attachment bytes
 }
 
+// failedTurns holds the requests behind live retry buttons, oldest first.
 type failedTurns struct {
-	mu    sync.Mutex
-	turns map[string]*failedTurn
+	mu      sync.Mutex
+	turns   map[string]*failedTurn
+	order   []string // tokens in insertion order; a token taken early stays until it reaches the front
+	bytes   int
+	sweeper sync.Once
 }
 
-func (f *failedTurns) put(token string, t *failedTurn) {
+func attachmentBytes(m *Message) int {
+	n := 0
+	for _, img := range m.Images {
+		n += len(img.Data)
+	}
+	for _, f := range m.Files {
+		n += len(f.Data)
+	}
+	return n
+}
+
+// put keeps t under token, dropping expired and then the oldest requests to
+// stay within the limits. It reports false when t alone exceeds the byte limit.
+func (f *failedTurns) put(ctx context.Context, token string, t *failedTurn) bool {
+	f.sweeper.Do(func() { go f.sweep(ctx) })
+	t.size = attachmentBytes(&t.input)
+	if t.size > failedTurnMaxBytes {
+		return false
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.turns == nil {
 		f.turns = make(map[string]*failedTurn)
 	}
-	now := time.Now()
-	for k, v := range f.turns {
-		if now.After(v.expires) {
-			delete(f.turns, k)
-		}
+	f.pruneLocked(time.Now())
+	for len(f.turns) > 0 && (len(f.turns) >= failedTurnMax || f.bytes+t.size > failedTurnMaxBytes) {
+		f.dropOldestLocked()
 	}
 	f.turns[token] = t
+	f.order = append(f.order, token)
+	f.bytes += t.size
+	return true
+}
+
+func (f *failedTurns) deleteLocked(token string) *failedTurn {
+	t := f.turns[token]
+	if t != nil {
+		delete(f.turns, token)
+		f.bytes -= t.size
+	}
+	return t
+}
+
+func (f *failedTurns) dropOldestLocked() {
+	for len(f.order) > 0 {
+		token := f.order[0]
+		f.order = f.order[1:]
+		if f.deleteLocked(token) != nil {
+			return
+		}
+	}
+}
+
+// pruneLocked drops expired requests and the tokens of taken ones from the
+// front. Every request has the same TTL, so the expired ones come first.
+func (f *failedTurns) pruneLocked(now time.Time) {
+	for len(f.order) > 0 {
+		t := f.turns[f.order[0]]
+		if t != nil && !now.After(t.expires) {
+			return
+		}
+		f.deleteLocked(f.order[0])
+		f.order = f.order[1:]
+	}
+}
+
+// sweep releases expired requests even when no turn fails for a while.
+func (f *failedTurns) sweep(ctx context.Context) {
+	tick := time.NewTicker(failedTurnSweep)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-tick.C:
+			f.mu.Lock()
+			f.pruneLocked(now)
+			f.mu.Unlock()
+		}
+	}
 }
 
 // take removes and returns the turn, so one button admits one retry.
 func (f *failedTurns) take(token string) *failedTurn {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	t := f.turns[token]
-	delete(f.turns, token)
+	t := f.deleteLocked(token)
 	if t == nil || time.Now().After(t.expires) {
 		return nil
 	}
@@ -346,8 +424,9 @@ func (e *Engine) failTurnPreview(state *interactiveState, sp *streamPreview, ses
 	default:
 		close(sp.timerStop)
 	}
-	if token != "" {
-		e.failedTurns.put(token, &failedTurn{platform: sp.platform, input: *input, handle: handle, card: card, expires: time.Now().Add(failedTurnTTL)})
+	if token != "" && !e.failedTurns.put(e.ctx, token, &failedTurn{platform: sp.platform, input: *input, handle: handle, card: card, expires: time.Now().Add(failedTurnTTL)}) {
+		slog.Info("failure card: request too large to keep for retry", "session", sessionKey)
+		token, card.ButtonLabel, card.Action = "", "", ""
 	}
 	if err := fp.FailPreview(sp.ctx, handle, card); err != nil {
 		sp.mu.Unlock()
