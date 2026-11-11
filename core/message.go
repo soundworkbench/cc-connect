@@ -477,6 +477,7 @@ const (
 	EventThinking          EventType = "thinking"           // thinking/processing status
 	EventModelSwitch       EventType = "model_switch"       // agent CLI moved the turn to another model on its own (see ModelSwitch)
 	EventRetry             EventType = "retry"              // a model request failed and the agent is retrying it (see RetryStatus)
+	EventTask              EventType = "task"               // lifecycle of a task running beside the turn (see TaskEvent)
 )
 
 // ModelSwitch describes a model change the agent CLI made without being asked
@@ -536,6 +537,7 @@ type Event struct {
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 	ModelSwitch              *ModelSwitch   // populated for EventModelSwitch
 	Retry                    *RetryStatus   // populated for EventRetry
+	Task                     *TaskEvent     // populated for EventTask
 }
 
 // HistoryEntry is one turn in a conversation.

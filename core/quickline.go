@@ -123,6 +123,15 @@ func quickLineMessages(userMsg string, history []HistoryEntry) []map[string]stri
 
 // fetchQuickLine asks the gateway for the sentence. The key file is read on every call.
 func fetchQuickLine(ctx context.Context, cfg QuickLineCfg, userMsg string, history []HistoryEntry) (string, error) {
+	system := cfg.SystemPrompt
+	if strings.TrimSpace(system) == "" {
+		system = defaultQuickLinePrompt
+	}
+	return fetchQuickText(ctx, cfg, system, quickLineMessages(userMsg, history))
+}
+
+// fetchQuickText asks the quick model for one short line. The key file is read on every call.
+func fetchQuickText(ctx context.Context, cfg QuickLineCfg, system string, messages []map[string]string) (string, error) {
 	key, err := os.ReadFile(cfg.KeyFile)
 	if err != nil {
 		return "", fmt.Errorf("read key file: %w", err)
@@ -131,15 +140,11 @@ func fetchQuickLine(ctx context.Context, cfg QuickLineCfg, userMsg string, histo
 	if token == "" {
 		return "", fmt.Errorf("key file is empty")
 	}
-	system := cfg.SystemPrompt
-	if strings.TrimSpace(system) == "" {
-		system = defaultQuickLinePrompt
-	}
 	payload := map[string]any{
 		"model":      cfg.Model,
 		"max_tokens": quickLineMaxTokens,
 		"system":     system,
-		"messages":   quickLineMessages(userMsg, history),
+		"messages":   messages,
 	}
 	if cfg.Effort != "" {
 		payload["output_config"] = map[string]any{"effort": cfg.Effort}

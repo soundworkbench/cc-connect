@@ -357,6 +357,7 @@ type RateLimitCfg struct {
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
 	failedTurns failedTurns // retry buttons of failed turns, by token
+	taskCards   *taskCardManager
 
 	decisions            *DecisionStore
 	decisionDefaultHours int
@@ -816,6 +817,7 @@ func (pp *pendingPermission) resolve() {
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
+		taskCards:             newTaskCardManager(),
 		name:                  name,
 		agent:                 ag,
 		platforms:             platforms,
@@ -4072,6 +4074,7 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	// the agent session Close() is still blocking (up to 130s).
 	if agentSession != nil {
 		e.closeAgentSessionWithTimeout(sessionKey, agentSession, closePlatform, closeReplyCtx)
+		e.abandonTasks(sessionKey, agentSession)
 	}
 
 	// Now delete the state from the map after the session is closed.
@@ -4639,6 +4642,12 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			default:
 			}
 
+			// Task events update the task cards; they do not start a relayed turn.
+			if event.Type == EventTask {
+				e.handleTaskEvent(state, sessionKey, event.Task)
+				continue
+			}
+
 			if event.Synthetic && event.Metadata["background_cancelled"] == true {
 				e.releaseBackgroundTurnLease(state, session, sessions, sessionKey, workspaceDir)
 				continue
@@ -5159,6 +5168,10 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 		case event, ok = <-events:
 			if !ok {
 				goto channelClosed
+			}
+			if event.Type == EventTask {
+				e.handleTaskEvent(state, sessionKey, event.Task)
+				continue
 			}
 			if event.Type == EventToolUse || event.Type == EventText || event.Type == EventThinking || event.Type == EventProgress {
 				e.steerQueuedMessages(state, session, sessions)
@@ -12575,6 +12588,11 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 
 	if prefix == "act" && cmd == "/retry" {
 		e.retryFailedTurn(args)
+		return nil
+	}
+
+	if prefix == "act" && cmd == "/taskstop" {
+		e.stopTask(args)
 		return nil
 	}
 

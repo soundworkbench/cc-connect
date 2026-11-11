@@ -225,6 +225,20 @@ const (
 	MsgTurnFailedLimit           MsgKey = "turn_failed_limit"
 	MsgRetryButton               MsgKey = "retry_button"
 	MsgRetrySent                 MsgKey = "retry_sent"
+	MsgTaskUntitled              MsgKey = "task_untitled"
+	MsgTaskWorking               MsgKey = "task_working"
+	MsgTaskElapsed               MsgKey = "task_elapsed"
+	MsgTaskElapsedShort          MsgKey = "task_elapsed_short"
+	MsgTaskRecent                MsgKey = "task_recent"
+	MsgTaskDetails               MsgKey = "task_details"
+	MsgTaskStop                  MsgKey = "task_stop"
+	MsgTaskStopConfirmTitle      MsgKey = "task_stop_confirm_title"
+	MsgTaskStopConfirmText       MsgKey = "task_stop_confirm_text"
+	MsgTaskStopping              MsgKey = "task_stopping"
+	MsgTaskCompleted             MsgKey = "task_completed"
+	MsgTaskFailed                MsgKey = "task_failed"
+	MsgTaskStopped               MsgKey = "task_stopped"
+	MsgTaskInterrupted           MsgKey = "task_interrupted"
 	MsgPreviewFooter             MsgKey = "preview_footer"
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
@@ -793,6 +807,21 @@ var messages = map[MsgKey]map[Language]string{
 	MsgTurnFailedLimit:       {LangEnglish: "This didn't go through: the model usage limit has been reached", LangChinese: "这次没做成：模型用量到了上限", LangTraditionalChinese: "這次沒做成：模型用量到了上限", LangJapanese: "今回は完了できませんでした：モデルの利用上限に達しました", LangSpanish: "Esta vez no se pudo completar: se alcanzó el límite de uso del modelo"},
 	MsgRetryButton:           {LangEnglish: "Retry", LangChinese: "重试", LangTraditionalChinese: "重試", LangJapanese: "再試行", LangSpanish: "Reintentar"},
 	MsgRetrySent:             {LangEnglish: "Sent again", LangChinese: "已重新发送", LangTraditionalChinese: "已重新傳送", LangJapanese: "再送信しました", LangSpanish: "Enviado de nuevo"},
+
+	MsgTaskUntitled:         {LangEnglish: "Background task", LangChinese: "后台任务", LangTraditionalChinese: "背景任務", LangJapanese: "バックグラウンドタスク", LangSpanish: "Tarea en segundo plano"},
+	MsgTaskWorking:          {LangEnglish: "Working", LangChinese: "进行中", LangTraditionalChinese: "進行中", LangJapanese: "実行中", LangSpanish: "En curso"},
+	MsgTaskElapsed:          {LangEnglish: "Running for %d min", LangChinese: "已跑 %d 分钟", LangTraditionalChinese: "已跑 %d 分鐘", LangJapanese: "実行 %d 分", LangSpanish: "En marcha desde hace %d min"},
+	MsgTaskElapsedShort:     {LangEnglish: "Running for under a minute", LangChinese: "已跑不到 1 分钟", LangTraditionalChinese: "已跑不到 1 分鐘", LangJapanese: "実行 1 分未満", LangSpanish: "En marcha desde hace menos de un minuto"},
+	MsgTaskRecent:           {LangEnglish: "Latest: %s", LangChinese: "最近进展：%s", LangTraditionalChinese: "最近進展：%s", LangJapanese: "最新の進捗：%s", LangSpanish: "Último avance: %s"},
+	MsgTaskDetails:          {LangEnglish: "Details", LangChinese: "详情", LangTraditionalChinese: "詳情", LangJapanese: "詳細", LangSpanish: "Detalles"},
+	MsgTaskStop:             {LangEnglish: "Stop", LangChinese: "停止", LangTraditionalChinese: "停止", LangJapanese: "停止", LangSpanish: "Detener"},
+	MsgTaskStopConfirmTitle: {LangEnglish: "Stop this background task?", LangChinese: "停止这个后台任务？", LangTraditionalChinese: "停止這個背景任務？", LangJapanese: "このバックグラウンドタスクを停止しますか？", LangSpanish: "¿Detener esta tarea en segundo plano?"},
+	MsgTaskStopConfirmText:  {LangEnglish: "The task stops right away. Work already done is not undone.", LangChinese: "任务会马上停下，已经做完的部分不会撤销。", LangTraditionalChinese: "任務會馬上停下，已經做完的部分不會撤銷。", LangJapanese: "タスクはすぐに停止します。完了した作業は元に戻りません。", LangSpanish: "La tarea se detiene enseguida. Lo ya hecho no se deshace."},
+	MsgTaskStopping:         {LangEnglish: "Stopping…", LangChinese: "正在停止…", LangTraditionalChinese: "正在停止…", LangJapanese: "停止中…", LangSpanish: "Deteniendo…"},
+	MsgTaskCompleted:        {LangEnglish: "✓ Done: %s", LangChinese: "✓ 已完成：%s", LangTraditionalChinese: "✓ 已完成：%s", LangJapanese: "✓ 完了：%s", LangSpanish: "✓ Listo: %s"},
+	MsgTaskFailed:           {LangEnglish: "Didn't go through: %s", LangChinese: "没做成：%s", LangTraditionalChinese: "沒做成：%s", LangJapanese: "完了できませんでした：%s", LangSpanish: "No se completó: %s"},
+	MsgTaskStopped:          {LangEnglish: "Stopped: %s", LangChinese: "已停止：%s", LangTraditionalChinese: "已停止：%s", LangJapanese: "停止しました：%s", LangSpanish: "Detenida: %s"},
+	MsgTaskInterrupted:      {LangEnglish: "Interrupted: %s", LangChinese: "已中断：%s", LangTraditionalChinese: "已中斷：%s", LangJapanese: "中断されました：%s", LangSpanish: "Interrumpida: %s"},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",

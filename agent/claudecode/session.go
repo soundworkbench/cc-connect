@@ -774,8 +774,14 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 	if model, ok := raw["model"].(string); ok && model != "" {
 		cs.activeModel.Store(model)
 	}
-	if subtype, _ := raw["subtype"].(string); subtype == "api_retry" {
+	switch subtype, _ := raw["subtype"].(string); subtype {
+	case "api_retry":
 		cs.emit(core.Event{Type: core.EventRetry, Retry: parseAPIRetry(raw)})
+		return
+	case "task_started", "task_progress", "task_updated", "task_notification":
+		if ev := parseTaskEvent(subtype, raw); ev != nil {
+			cs.emit(core.Event{Type: core.EventTask, Task: ev})
+		}
 		return
 	}
 	if subtype, _ := raw["subtype"].(string); subtype == "model_refusal_fallback" {
