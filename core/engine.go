@@ -4074,7 +4074,6 @@ func (e *Engine) cleanupInteractiveState(sessionKey string, expected ...*interac
 	// the agent session Close() is still blocking (up to 130s).
 	if agentSession != nil {
 		e.closeAgentSessionWithTimeout(sessionKey, agentSession, closePlatform, closeReplyCtx)
-		e.abandonTasks(sessionKey, agentSession)
 	}
 
 	// Now delete the state from the map after the session is closed.
@@ -4337,6 +4336,8 @@ func (e *Engine) closeAgentSession(sessionKey string, agentSession AgentSession,
 	if agentSession == nil {
 		return
 	}
+	// Its background tasks die with the process; settle their cards now.
+	e.abandonTasks(agentSession)
 
 	slog.Debug("cleanupInteractiveState: closing agent session", "session", sessionKey)
 	closeStart := time.Now()
@@ -4618,6 +4619,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				state.mu.Lock()
 				state.eventsNeedResync = true
 				state.mu.Unlock()
+				e.abandonTasks(agentSession)
 				e.releaseBackgroundTurnLease(state, session, sessions, sessionKey, workspaceDir)
 				return
 			}

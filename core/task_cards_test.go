@@ -230,3 +230,40 @@ func TestTaskCardProgressLineFromQuickModel(t *testing.T) {
 		t.Fatalf("prompt=%q", prompts[0])
 	}
 }
+
+func waitInterrupted(t *testing.T, env *taskEnv, title string) {
+	t.Helper()
+	waitUntil(t, "interrupted card", func() bool {
+		_, up := env.p.cards()
+		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Status == "已中断："+title
+	})
+	_, up := env.p.cards()
+	if up[len(up)-1].view.StopAction != "" {
+		t.Fatalf("interrupted card keeps its stop button: %+v", up[len(up)-1].view)
+	}
+	env.e.taskCards.mu.Lock()
+	defer env.e.taskCards.mu.Unlock()
+	if len(env.e.taskCards.cards) != 0 {
+		t.Fatalf("interrupted card still holds a slot: %d", len(env.e.taskCards.cards))
+	}
+}
+
+func TestStopCommandSettlesTaskCards(t *testing.T) {
+	env := newTaskEnv(t)
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "任务甲", Background: yes()})
+	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	env.e.ReceiveMessage(env.p, &Message{SessionKey: env.key, Platform: env.p.Name(), MessageID: "stop", UserID: "user", Content: "/stop", ReplyCtx: "ctx"})
+	waitInterrupted(t, env, "任务甲")
+}
+
+func TestIdleReclaimSettlesTaskCards(t *testing.T) {
+	env := newTaskEnv(t)
+	env.e.SetAgentSessionIdleTimeout(300 * time.Millisecond)
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "任务甲", Background: yes()})
+	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	env.s.events <- Event{Type: EventResult, Content: "已在后台做", Done: true}
+	waitInterrupted(t, env, "任务甲")
+	if !env.s.closed.Get() {
+		t.Fatal("idle reclaim did not close the agent session")
+	}
+}

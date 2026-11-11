@@ -431,14 +431,18 @@ func (e *Engine) stopTask(token string) {
 	}()
 }
 
-// abandonTasks settles the cards of an agent session that is gone: its tasks
-// went with it.
-func (e *Engine) abandonTasks(sessionKey string, agent AgentSession) {
+// abandonTasks settles the cards of an agent session that is closing or gone:
+// its tasks go with it. Every close path (/stop, /new, /switch, idle reclaim,
+// queue reset, a turn's process exit) calls it through closeAgentSession.
+func (e *Engine) abandonTasks(agent AgentSession) {
+	if agent == nil {
+		return
+	}
 	m := e.taskCards
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, c := range m.cards {
-		if c.sessionKey != sessionKey || c.agent != agent || c.ended {
+		if c.agent != agent || c.ended {
 			continue
 		}
 		c.ended, c.state = true, TaskCardInterrupted
