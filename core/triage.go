@@ -58,7 +58,7 @@ func (v triageView) busy() bool { return len(v.tasks) > 0 || v.queued > 0 }
 func (e *Engine) triageIdleMessage(p Platform, msg *Message, session *Session, sessions *SessionManager, interactiveKey string) bool {
 	cfg := e.streamPreview.QuickLine
 	content := strings.TrimSpace(msg.Content)
-	if !cfg.Enabled || !isHumanTurn(msg) || msg.scheduledMute || content == "" ||
+	if !cfg.Enabled || !isHumanTurn(msg) || msg.scheduledMute || msg.channelRetry || content == "" ||
 		len(msg.Images) > 0 || len(msg.Files) > 0 || msg.Audio != nil ||
 		strings.HasPrefix(content, "/") || strings.HasPrefix(content, "!") ||
 		utf8.RuneCountInString(content) > triageMaxRunes {

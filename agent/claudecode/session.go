@@ -136,6 +136,20 @@ type claudeSession struct {
 	firstWriteTimeout time.Duration
 	firstWriteDone    bool // guarded by stdinMu
 	inputFailure      atomic.Pointer[core.InputWriteError]
+
+	// liveTasks holds the IDs of tasks (subagents, background commands) the
+	// CLI reported as started and not yet ended; liveTaskCount is its size.
+	// readLoop writes both. Such a task keeps working, and asking for tool
+	// permission, after the turn's result.
+	liveTasks     sync.Map
+	liveTaskCount atomic.Int32
+	// cliWorking is true from the CLI's first output of a turn until that
+	// turn's result, including turns the CLI starts on its own after a task
+	// notification. readLoop only writes it.
+	cliWorking atomic.Bool
+	// closing is set once Close starts: from then on a lost permission
+	// channel is the expected effect of the teardown, not a failure.
+	closing atomic.Bool
 }
 
 // StartupWarning implements core.StartupWarner. Returns a non-empty string
@@ -677,16 +691,21 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 	case "system":
 		cs.handleSystem(raw)
 	case "assistant":
+		cs.cliWorking.Store(true)
 		cs.handleAssistant(raw)
 	case "user":
 		cs.handleUser(raw)
 	case "result":
+		// A mid-turn compaction result leaves the turn running.
+		cs.cliWorking.Store(isCompactionResult(raw))
 		cs.handleResult(raw)
 	case "command_lifecycle":
 		cs.handleCommandLifecycle(raw)
 	case "stream_event":
+		cs.cliWorking.Store(true)
 		cs.handleStreamEvent(raw)
 	case "control_request":
+		cs.cliWorking.Store(true)
 		cs.handleControlRequest(raw)
 	case "control_cancel_request":
 		requestID, _ := raw["request_id"].(string)
@@ -782,6 +801,7 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 	case "task_started", "task_progress", "task_updated", "task_notification":
 		if ev := parseTaskEvent(subtype, raw); ev != nil {
 			cs.markStoppedTask(ev)
+			cs.trackTask(ev)
 			cs.emit(core.Event{Type: core.EventTask, Task: ev})
 		}
 		return
@@ -1295,6 +1315,15 @@ func (cs *claudeSession) handleUser(raw map[string]any) {
 			}
 			if isError {
 				slog.Debug("claudeSession: tool error", "content", result)
+				if isPermissionChannelFailure(result) && !cs.closing.Load() {
+					// The CLI's stdin reader is gone: every later tool call in
+					// this process fails the same way and no answer can reach it.
+					// Restart instead of letting the turn run on without tools.
+					slog.Warn("claudeSession: CLI lost its tool permission channel; stopping process for restart",
+						"session", cs.CurrentSessionID())
+					cs.abandonInput(&core.InputWriteError{Err: core.ErrPermissionChannelClosed})
+					return
+				}
 			}
 			success := !isError
 			code := 0
@@ -1780,10 +1809,17 @@ func (cs *claudeSession) writeJSON(v any) error {
 func (cs *claudeSession) InputFailure() *core.InputWriteError { return cs.inputFailure.Load() }
 
 func (cs *claudeSession) invalidateInput(n, total int, err error) error {
-	failure := &core.InputWriteError{WrittenBytes: n, TotalBytes: total, Err: err}
-	cs.inputFailure.Store(failure)
-	cs.alive.Store(false)
 	slog.Error("claudeSession: stdin write failed", "session", cs.CurrentSessionID(), "written_bytes", n, "total_bytes", total, "error", err)
+	return cs.abandonInput(&core.InputWriteError{WrittenBytes: n, TotalBytes: total, Err: err})
+}
+
+// abandonInput records why the process can no longer take input, then kills
+// it. The engine reads the failure through InputFailure once events close.
+func (cs *claudeSession) abandonInput(failure *core.InputWriteError) error {
+	if !cs.inputFailure.CompareAndSwap(nil, failure) {
+		return cs.inputFailure.Load()
+	}
+	cs.alive.Store(false)
 	if closeErr := cs.stdin.Close(); closeErr != nil && !errors.Is(closeErr, os.ErrClosed) {
 		slog.Warn("claudeSession: close failed stdin", "session", cs.CurrentSessionID(), "error", closeErr)
 	}
@@ -1793,8 +1829,18 @@ func (cs *claudeSession) invalidateInput(n, total int, err error) error {
 	if cs.cancel != nil {
 		cs.cancel()
 	}
-	slog.Warn("claudeSession: input process terminated; restart required", "session", cs.CurrentSessionID(), "written_bytes", n, "total_bytes", total)
+	slog.Warn("claudeSession: input process terminated; restart required", "session", cs.CurrentSessionID(), "written_bytes", failure.WrittenBytes, "total_bytes", failure.TotalBytes)
 	return failure
+}
+
+// isPermissionChannelFailure recognizes how Claude Code words a tool call
+// whose permission request could not travel over stdio: "Tool permission
+// request failed: AbortError: Stream closed" once its stdin reader has ended,
+// "...: Tool permission stream closed before response received" for a request
+// that was pending at that moment.
+func isPermissionChannelFailure(toolResult string) bool {
+	return strings.Contains(toolResult, "Tool permission request failed") ||
+		strings.Contains(toolResult, "Tool permission stream closed before response received")
 }
 
 func isClaudeEditTool(toolName string) bool {
@@ -1945,13 +1991,24 @@ func (cs *claudeSession) Close() error {
 		}
 	}()
 
-	// Phase 1: Close stdin to signal EOF. Claude Code exits cleanly on
-	// stdin close, running Stop hooks (e.g. claude-mem session summary).
-	cs.stdinMu.Lock()
-	if err := cs.stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
-		slog.Warn("claudeSession: close stdin", "error", err)
+	cs.closing.Store(true)
+
+	// A CLI that is still working (a turn in flight, or a background task
+	// after the turn's result) keeps running after stdin EOF, but its
+	// permission channel is gone: every tool call it makes from then on fails
+	// at once with "Tool permission request failed: AbortError: Stream
+	// closed", until the process is killed. Stop such a process with stdin
+	// still open; the pipe closes with it.
+	if cs.inputFailure.Load() == nil && cs.alive.Load() && cs.busy() {
+		slog.Info("claudeSession: stopping busy process without stdin EOF",
+			"session", cs.CurrentSessionID(), "running_tasks", cs.liveTaskCount.Load())
+		defer cs.closeStdin()
+		return cs.terminate()
 	}
-	cs.stdinMu.Unlock()
+
+	// Phase 1: Close stdin to signal EOF. An idle Claude Code exits cleanly
+	// on stdin close, running Stop hooks (e.g. claude-mem session summary).
+	cs.closeStdin()
 
 	if cs.inputFailure.Load() != nil {
 		<-cs.done
@@ -1971,7 +2028,20 @@ func (cs *claudeSession) Close() error {
 		slog.Warn("claudeSession: graceful stop timed out, sending SIGTERM",
 			"timeout", graceful)
 	}
+	return cs.terminate()
+}
 
+func (cs *claudeSession) closeStdin() {
+	cs.stdinMu.Lock()
+	defer cs.stdinMu.Unlock()
+	if err := cs.stdin.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		slog.Warn("claudeSession: close stdin", "error", err)
+	}
+}
+
+// terminate signals the process group and escalates to SIGKILL; it returns
+// once the process is gone or the kill is known to have failed.
+func (cs *claudeSession) terminate() error {
 	// Phase 2: SIGTERM the whole process group — gives the process and its
 	// descendants (e.g. MCP server bridges) a second chance to run cleanup
 	// handlers that respond to signals but not stdin EOF.
