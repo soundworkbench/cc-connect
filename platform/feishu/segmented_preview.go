@@ -110,6 +110,8 @@ type segmentedPreview struct {
 	// sentence that arrives after the agent started is never taken.
 	quickLine    string
 	quickDropped bool
+	// notice replaces the running step while set: a retry, or a long wait for the model.
+	notice string
 	// draft is the adopted pendDraft; it only marks that the text so far is undecided.
 	draft string
 	// finishChunk is how many runes each push releases during the end-of-turn reveal
@@ -237,6 +239,7 @@ func (p *Platform) StartSegmentedPreview(ctx context.Context, rc any, cfg core.S
 	h := handle.(*feishuPreviewHandle)
 	h.live = v
 	v.fallback = h.cardID == ""
+	p.liveCards.add(h.messageID, h.cardID, i18n.T(core.MsgPreviewInterrupted))
 	go func() {
 		ticker := time.NewTicker(time.Duration(cfg.PushIntervalMs) * time.Millisecond)
 		heartbeat := time.NewTicker(time.Second)
@@ -621,6 +624,9 @@ func (v *segmentedPreview) liveLine() string {
 	if v.quickLine != "" && v.body == "" && len(v.rows) == 0 {
 		text = v.quickLine
 	}
+	if v.notice != "" {
+		text, tool = v.notice, ""
+	}
 	if v.spinnerKey == "" {
 		text = spinnerGlyphs[v.frame%len(spinnerGlyphs)] + " " + text
 	}
@@ -654,7 +660,9 @@ func (v *segmentedPreview) progress(now time.Time) string {
 		return v.liveLine()
 	}
 	var lines []string
-	if v.body == "" {
+	if v.notice != "" {
+		lines = append(lines, v.notice)
+	} else if v.body == "" {
 		if v.quickLine != "" && v.steps == 0 {
 			lines = append(lines, v.quickLine)
 		} else {
@@ -1212,6 +1220,7 @@ func (p *Platform) CollapsePreview(ctx context.Context, handle any) error {
 		return core.ErrNotSupported
 	}
 	v := h.live
+	defer p.liveCards.remove(h.messageID)
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.stopLocked()
@@ -1235,6 +1244,7 @@ func (p *Platform) FinishSegmentedPreview(ctx context.Context, handle any, body 
 		return core.ErrNotSupported
 	}
 	v := h.live
+	defer p.liveCards.remove(h.messageID)
 	if v.cfg.RevealCps > 0 && body != "" {
 		v.drain(body)
 	}

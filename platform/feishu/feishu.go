@@ -174,6 +174,7 @@ type Platform struct {
 	cardNavHandler   core.CardNavigationHandler
 	cancel           context.CancelFunc
 	catchup          *p2pCatchup
+	liveCards        *liveCardStore // cards with a spinner, rewritten if a restart cuts them off
 	catchupCancel    context.CancelFunc
 	catchupDone      chan struct{}
 	dedup            *core.MessageDedup
@@ -590,6 +591,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		resourceMaxBytes:           defaultResourceMaxBytes,
 	}
 	base.configureP2PCatchup(opts)
+	base.configureLiveCards(opts)
 	if !useInteractiveCard {
 		base.self = base
 		return base, nil
@@ -743,6 +745,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	group, isPrimary := registerSharedWS(p)
 	p.sharedGroup = group
 	p.isWSPrimary = isPrimary
+	go p.settleLeftoverCards(p.bgCtxForStartup())
 	if !p.shouldUseWebhookMode() {
 		p.startP2PCatchup(group.ready)
 	}
@@ -5866,6 +5869,7 @@ func (p *Platform) DeletePreviewMessage(ctx context.Context, previewHandle any) 
 	if h.live != nil {
 		h.live.stop()
 	}
+	defer p.liveCards.remove(h.messageID)
 	if streamed {
 		p.closeSegmentedStream(ctx, h)
 	}

@@ -215,6 +215,16 @@ const (
 	MsgPreviewProcess            MsgKey = "preview_process"
 	MsgPreviewDone               MsgKey = "preview_done"
 	MsgPreviewDoneBare           MsgKey = "preview_done_bare"
+	MsgPreviewRetrying           MsgKey = "preview_retrying"
+	MsgPreviewRetryingBare       MsgKey = "preview_retrying_bare"
+	MsgPreviewUsageLimitWait     MsgKey = "preview_usage_limit_wait"
+	MsgPreviewWaitingModel       MsgKey = "preview_waiting_model"
+	MsgPreviewInterrupted        MsgKey = "preview_interrupted"
+	MsgTurnFailed                MsgKey = "turn_failed"
+	MsgTurnFailedModel           MsgKey = "turn_failed_model"
+	MsgTurnFailedLimit           MsgKey = "turn_failed_limit"
+	MsgRetryButton               MsgKey = "retry_button"
+	MsgRetrySent                 MsgKey = "retry_sent"
 	MsgPreviewFooter             MsgKey = "preview_footer"
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
@@ -772,6 +782,17 @@ var messages = map[MsgKey]map[Language]string{
 	MsgPreviewProcess:  {LangEnglish: "Process (%d steps)", LangChinese: "过程（%d 步）", LangTraditionalChinese: "過程（%d 步）", LangJapanese: "プロセス（%dステップ）", LangSpanish: "Proceso (%d pasos)"},
 	MsgPreviewDone:     {LangEnglish: "Done · %d steps", LangChinese: "已完成 · 共 %d 步", LangTraditionalChinese: "已完成 · 共 %d 步", LangJapanese: "完了 · 全%dステップ", LangSpanish: "Listo · %d pasos"},
 	MsgPreviewDoneBare: {LangEnglish: "Done", LangChinese: "已完成", LangTraditionalChinese: "已完成", LangJapanese: "完了", LangSpanish: "Listo"},
+
+	MsgPreviewRetrying:       {LangEnglish: "Can't reach the model service, retrying (attempt %d)", LangChinese: "模型服务连不上，正在重试（第 %d 次）", LangTraditionalChinese: "模型服務連不上，正在重試（第 %d 次）", LangJapanese: "モデルサービスに接続できません。再試行中（%d 回目）", LangSpanish: "No se puede conectar con el modelo, reintentando (intento %d)"},
+	MsgPreviewRetryingBare:   {LangEnglish: "Can't reach the model service, retrying", LangChinese: "模型服务连不上，正在重试", LangTraditionalChinese: "模型服務連不上，正在重試", LangJapanese: "モデルサービスに接続できません。再試行中", LangSpanish: "No se puede conectar con el modelo, reintentando"},
+	MsgPreviewUsageLimitWait: {LangEnglish: "Model usage limit reached, waiting", LangChinese: "模型用量到了上限，正在等待", LangTraditionalChinese: "模型用量到了上限，正在等待", LangJapanese: "モデルの利用上限に達しました。待機中", LangSpanish: "Se alcanzó el límite de uso del modelo, esperando"},
+	MsgPreviewWaitingModel:   {LangEnglish: "Still waiting for the model to respond", LangChinese: "还在等模型响应", LangTraditionalChinese: "還在等模型回應", LangJapanese: "モデルの応答を待っています", LangSpanish: "Todavía esperando la respuesta del modelo"},
+	MsgPreviewInterrupted:    {LangEnglish: "Interrupted, please send again", LangChinese: "已中断，请重发", LangTraditionalChinese: "已中斷，請重發", LangJapanese: "中断されました。もう一度送信してください", LangSpanish: "Interrumpido, vuelve a enviarlo"},
+	MsgTurnFailed:            {LangEnglish: "This didn't go through", LangChinese: "这次没做成", LangTraditionalChinese: "這次沒做成", LangJapanese: "今回は完了できませんでした", LangSpanish: "Esta vez no se pudo completar"},
+	MsgTurnFailedModel:       {LangEnglish: "This didn't go through: the model service is unreachable for now", LangChinese: "这次没做成：模型服务暂时连不上", LangTraditionalChinese: "這次沒做成：模型服務暫時連不上", LangJapanese: "今回は完了できませんでした：モデルサービスに一時的に接続できません", LangSpanish: "Esta vez no se pudo completar: el servicio del modelo no responde por ahora"},
+	MsgTurnFailedLimit:       {LangEnglish: "This didn't go through: the model usage limit has been reached", LangChinese: "这次没做成：模型用量到了上限", LangTraditionalChinese: "這次沒做成：模型用量到了上限", LangJapanese: "今回は完了できませんでした：モデルの利用上限に達しました", LangSpanish: "Esta vez no se pudo completar: se alcanzó el límite de uso del modelo"},
+	MsgRetryButton:           {LangEnglish: "Retry", LangChinese: "重试", LangTraditionalChinese: "重試", LangJapanese: "再試行", LangSpanish: "Reintentar"},
+	MsgRetrySent:             {LangEnglish: "Sent again", LangChinese: "已重新发送", LangTraditionalChinese: "已重新傳送", LangJapanese: "再送信しました", LangSpanish: "Enviado de nuevo"},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",

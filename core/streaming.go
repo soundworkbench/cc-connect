@@ -156,6 +156,7 @@ type streamPreview struct {
 	// a turn that ends silent sends nothing and recalls nothing.
 	hidden    bool
 	segmented SegmentedPreviewer
+	notice    string // status line shown in place of the running step (see setNotice)
 }
 
 // ToolStepKind identifies the kind of progress row shown in rich cards.

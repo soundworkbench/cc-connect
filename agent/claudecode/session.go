@@ -121,6 +121,10 @@ type claudeSession struct {
 	pendingText        []string
 	pendingProgressIDs []string
 	partialBlock       strings.Builder // stream_partial_text: text of the block currently being written
+	// apiErrorKind is the error kind of the latest top-level assistant message
+	// that reports a failed API request ("rate_limit", "server_error", ...).
+	// readLoop only; cleared by each result.
+	apiErrorKind string
 
 	inputMu           sync.Mutex
 	inputs            map[string]*claudeInput
@@ -770,6 +774,10 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 	if model, ok := raw["model"].(string); ok && model != "" {
 		cs.activeModel.Store(model)
 	}
+	if subtype, _ := raw["subtype"].(string); subtype == "api_retry" {
+		cs.emit(core.Event{Type: core.EventRetry, Retry: parseAPIRetry(raw)})
+		return
+	}
 	if subtype, _ := raw["subtype"].(string); subtype == "model_refusal_fallback" {
 		cs.handleRefusalFallback(raw)
 	}
@@ -1106,6 +1114,9 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 	if parent, _ := raw["parent_tool_use_id"].(string); parent != "" {
 		return // Nested-agent output is not a public parent-turn status.
 	}
+	if kind, _ := raw["error"].(string); kind != "" {
+		cs.apiErrorKind = kind
+	}
 	msg, ok := raw["message"].(map[string]any)
 	if !ok {
 		return
@@ -1382,12 +1393,23 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 		cs.pendingProgressIDs = nil
 		return
 	}
+	apiErrorKind := cs.apiErrorKind
+	cs.apiErrorKind = ""
 	inputPending := false
 	if !isCompaction {
 		inputPending = cs.completeInputs(raw)
 		if inputPending {
 			cs.armSteerGrace()
 		}
+	}
+	// A turn the model service never answered (the CLI's retries ran out)
+	// ends as an error, so the card can say so and offer a retry. While a
+	// steered message is still pending the CLI goes on with it; that turn
+	// keeps the ordinary path.
+	if failure := modelFailure(raw, apiErrorKind, content); failure != nil && !inputPending {
+		cs.pendingText, cs.pendingProgressIDs = nil, nil
+		cs.emit(core.Event{Type: core.EventError, Error: failure, SessionID: cs.CurrentSessionID()})
+		return
 	}
 	if isCompaction {
 		slog.Info("claudeSession: mid-turn compaction event; continuing turn", "subtype", resultSubtype(raw))

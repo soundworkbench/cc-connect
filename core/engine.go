@@ -356,6 +356,8 @@ type RateLimitCfg struct {
 
 // Engine routes messages between platforms and the agent for a single project.
 type Engine struct {
+	failedTurns failedTurns // retry buttons of failed turns, by token
+
 	decisions            *DecisionStore
 	decisionDefaultHours int
 	decisionWake         chan struct{}
@@ -589,6 +591,7 @@ type interactiveState struct {
 	busySession              *Session
 	platform                 Platform
 	replyCtx                 any
+	turnInput                *Message // current turn's request, for the failure card's retry button
 	currentMessageID         string
 	lastRecallProbeMessageID string
 	lastRecallProbeAt        time.Time
@@ -3499,6 +3502,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		}
 		state.steerMessageIDs[msg.scheduledInputID] = true
 	}
+	state.turnInput = retryableInput(msg)
 	state.currentMessageID = msg.MessageID
 	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
 	state.mu.Unlock()
@@ -5052,7 +5056,12 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 		}
 		state.mu.Unlock()
 	}()
-	terminalReply := func(p Platform, text string) {
+	// terminalReply ends a failed turn. A person's turn with a live card gets
+	// the failure card (with a retry button) instead of an error message.
+	terminalReply := func(p Platform, text string, cause error, note string) {
+		if !automated && !muteScheduledNotices && e.failTurnPreview(state, sp, sessionKey, cause, note, turnStart) {
+			return
+		}
 		if muteScheduledNotices {
 			sp.discard()
 			return
@@ -5130,9 +5139,11 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				displayErr = localized.Localize(e.i18n.CurrentLang())
 			}
 		}
-		terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError), displayErr))
+		terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError), displayErr), err, displayErr)
 		e.notifyDroppedQueuedMessages(state, err)
 	}
+	watch := newTurnWatch(!automated && sp.segmented != nil)
+	defer watch.stop()
 	stopCh := state.stopSignal()
 	for {
 		var event Event
@@ -5142,6 +5153,9 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 		case <-stopCh:
 			sp.discard()
 			return
+		case <-watch.C():
+			sp.setNotice(watch.silent(e.i18n))
+			continue
 		case event, ok = <-events:
 			if !ok {
 				goto channelClosed
@@ -5168,7 +5182,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			state.eventsNeedResync = true
 			p := state.platform
 			state.mu.Unlock()
-			terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"))
+			terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError), "agent session timed out (no response)"), errAgentIdleTimeout, "agent session timed out (no response)")
 			e.cleanupInteractiveState(sessionKey, state)
 			return
 		case <-turnDeadlineCh:
@@ -5182,8 +5196,8 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			state.mu.Lock()
 			p := state.platform
 			state.mu.Unlock()
-			terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError),
-				fmt.Sprintf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)))
+			deadlineErr := fmt.Errorf("agent turn exceeded maximum time (%v), stopping", e.maxTurnTime)
+			terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError), deadlineErr.Error()), deadlineErr, deadlineErr.Error())
 
 			// Two-phase shutdown: first try a graceful stop so the agent can
 			// write its final state before dying (preserves --resume ability).
@@ -5236,6 +5250,8 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			return
 		}
 
+		sp.setNotice(watch.observe(e.i18n, event))
+
 		// Reset idle timer after receiving an event
 		if idleTimer != nil {
 			if !idleTimer.Stop() {
@@ -5279,6 +5295,9 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 		}
 
 		switch event.Type {
+		case EventRetry:
+			StreamTrace("api_retry", map[string]any{"session": sessionKey, "status": event.Retry.status(), "attempt": event.Retry.attempt()})
+
 		case EventModelSwitch:
 			e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
 
@@ -6437,6 +6456,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				automated = !isHumanQueuedTurn(queued)
 				state.platform = queued.platform
 				state.replyCtx = queued.replyCtx
+				state.turnInput = queued.retryableInput()
 				state.currentMessageID = queued.messageID
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
@@ -6654,7 +6674,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 						break
 					}
 				}
-				terminalReply(p, userMsg)
+				terminalReply(p, userMsg, event.Error, displayErr)
 			}
 			if event.Error == nil {
 				sp.discard()
@@ -6689,7 +6709,7 @@ channelClosed:
 	state.eventsNeedResync = true
 	state.mu.Unlock()
 	defer e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
-	if len(textParts) == 0 {
+	if len(textParts) == 0 && (automated || muteScheduledNotices || !e.failTurnPreview(state, sp, sessionKey, errAgentExited, errAgentExited.Error(), turnStart)) {
 		sp.discard()
 	}
 	defer e.cleanupInteractiveState(sessionKey, state)
@@ -6860,6 +6880,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 		state.platform = queued.platform
 		state.replyCtx = queued.replyCtx
+		state.turnInput = queued.retryableInput()
 		state.currentMessageID = queued.messageID
 		state.fromVoice = queued.fromVoice
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
@@ -12550,6 +12571,11 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	if i := strings.IndexByte(body, ' '); i >= 0 {
 		cmd = body[:i]
 		args = strings.TrimSpace(body[i+1:])
+	}
+
+	if prefix == "act" && cmd == "/retry" {
+		e.retryFailedTurn(args)
+		return nil
 	}
 
 	if prefix == "act" && cmd == "/model" {

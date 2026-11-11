@@ -476,6 +476,7 @@ const (
 	EventUserInputRequest  EventType = "user_input_request" // non-blocking question; answer is a user message
 	EventThinking          EventType = "thinking"           // thinking/processing status
 	EventModelSwitch       EventType = "model_switch"       // agent CLI moved the turn to another model on its own (see ModelSwitch)
+	EventRetry             EventType = "retry"              // a model request failed and the agent is retrying it (see RetryStatus)
 )
 
 // ModelSwitch describes a model change the agent CLI made without being asked
@@ -534,6 +535,7 @@ type Event struct {
 	Metadata                 map[string]any // optional metadata from agent (e.g. compaction_continue)
 	Synthetic                bool           // true if this is a synthetic/generated message (not from real user)
 	ModelSwitch              *ModelSwitch   // populated for EventModelSwitch
+	Retry                    *RetryStatus   // populated for EventRetry
 }
 
 // HistoryEntry is one turn in a conversation.
