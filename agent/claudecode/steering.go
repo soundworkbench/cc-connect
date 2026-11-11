@@ -13,11 +13,13 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
-// Input IDs are CLI UUIDs, not platform IDs. A replay is the acknowledgement;
-// stdin success alone does not prove the CLI consumed a message.
+// Input IDs are CLI UUIDs, not platform IDs. The CLI acknowledges a frame with
+// a replay line or a command_lifecycle event; stdin success alone does not
+// prove the CLI consumed a message.
 type claudeInput struct {
 	ack      chan struct{}
 	replayed bool
+	queued   bool // the CLI reported the frame as held in its own input queue
 	steered  bool
 	content  any  // user message content of a steer, kept for one resend
 	resent   bool // already written a second time under a new UUID
@@ -189,6 +191,35 @@ func (cs *claudeSession) acknowledgeInput(raw map[string]any) {
 	}
 }
 
+// handleCommandLifecycle reads the CLI's per-frame events (command_uuid is the
+// uuid we wrote). Without --replay-user-messages the CLI sends no replay line,
+// so these are the only prompt acknowledgement: "queued" means the CLI holds the
+// frame and will run it, "started"/"completed" mean it took the frame into a
+// turn, either at a tool boundary of the running turn or as the next turn.
+func (cs *claudeSession) handleCommandLifecycle(raw map[string]any) {
+	id, _ := raw["command_uuid"].(string)
+	state, _ := raw["state"].(string)
+	if id == "" {
+		return
+	}
+	cs.inputMu.Lock()
+	defer cs.inputMu.Unlock()
+	p := cs.inputs[id]
+	if p == nil {
+		return
+	}
+	switch state {
+	case "queued":
+		p.queued = true
+	case "started", "completed":
+		p.queued = true
+		if !p.replayed {
+			p.replayed = true
+			close(p.ack)
+		}
+	}
+}
+
 // A boundary-race input can be consumed by the next CLI result. Keep the same
 // Engine lifecycle open until every admitted UUID is accounted for; never ask
 // Engine to send that message again or wait for a result already coalesced by CLI.
@@ -322,12 +353,13 @@ func (cs *claudeSession) armSteerGrace() {
 	}
 }
 
-// steerGraceExpired runs when a result left a steered message unreplayed. While
-// the CLI is still producing output (a notification turn, a tool) the wait
-// continues. Once it has been silent for the whole window, the message is
-// written once more as a new input so it starts its own turn; if that is not
-// replayed either, the turn ends with an error instead of waiting for the
-// engine's idle kill.
+// steerGraceExpired runs when a result left a steered message unaccounted for.
+// While the CLI is still producing output (a notification turn, a tool) the
+// wait continues. A frame the CLI reported as queued is never touched. For a CLI
+// that reports nothing about the frame, once it has been silent for the whole
+// window the message is written once more as a new input so it starts its own
+// turn; if that is not acknowledged either, the turn ends with a notice instead
+// of waiting for the engine's idle kill.
 func (cs *claudeSession) steerGraceExpired() {
 	cs.inputMu.Lock()
 	cs.graceTimer = nil
@@ -345,7 +377,10 @@ func (cs *claudeSession) steerGraceExpired() {
 	// Collect first: the loop below adds entries to the same map.
 	lost := map[string]*claudeInput{}
 	for id, p := range cs.inputs {
-		if p.steered && !p.replayed {
+		// A frame the CLI reported as queued is not lost: it runs when the
+		// current turn ends, however long that takes. Writing it again would
+		// deliver it twice.
+		if p.steered && !p.replayed && !p.queued {
 			lost[id] = p
 		}
 	}
@@ -379,7 +414,7 @@ func (cs *claudeSession) steerGraceExpired() {
 func (cs *claudeSession) emitSteerLost() {
 	defer func() { _ = recover() }() // events is closed once the process has ended
 	select {
-	case cs.events <- core.Event{Type: core.EventError, Error: errors.New("claude: a message sent during the turn was not picked up; please send it again")}:
+	case cs.events <- core.Event{Type: core.EventError, Error: errors.New("这条消息没有送达，请再发一次")}:
 	case <-cs.ctx.Done():
 	}
 }

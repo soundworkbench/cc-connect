@@ -677,6 +677,8 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 		cs.handleUser(raw)
 	case "result":
 		cs.handleResult(raw)
+	case "command_lifecycle":
+		cs.handleCommandLifecycle(raw)
 	case "stream_event":
 		cs.handleStreamEvent(raw)
 	case "control_request":
