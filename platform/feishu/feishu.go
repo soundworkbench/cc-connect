@@ -985,11 +985,6 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	// that clicking a card button (cmd:/perm:/nav:/act:/askq:) cannot bypass
 	// the per-user allowlist when the chat-level allow_chat filter admits the
 	// chat (Issue #1852).
-	if userID == "" || !core.AllowList(p.allowFrom, userID) {
-		slog.Debug(p.tag()+": card action from unauthorized user", "user", userID)
-		return nil, nil
-	}
-
 	chatID := ""
 	messageID := ""
 	if event.Event.Context != nil {
@@ -1000,6 +995,18 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		chatID = userID
 	}
 	sessionKey := p.sessionKeyFromCardAction(chatID, userID, event.Event.Action.Value)
+
+	// In a group a card belongs to the person whose session it serves. Anyone
+	// else who clicks it gets a notice only they see, and the card stays.
+	if owner := p.cardOwner(sessionKey); userID != "" && owner != "" && owner != userID {
+		slog.Info("card: button_not_owner", "session", sessionKey, "card", messageID, "reason", "clicked_by_other_user")
+		return p.notYourButton(owner), nil
+	}
+
+	if userID == "" || !core.AllowList(p.allowFrom, userID) {
+		slog.Debug(p.tag()+": card action from unauthorized user", "user", userID)
+		return nil, nil
+	}
 
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
