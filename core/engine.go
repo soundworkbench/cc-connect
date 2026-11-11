@@ -359,10 +359,10 @@ type Engine struct {
 	failedTurns failedTurns // retry buttons of failed turns, by token
 	taskCards   *taskCardManager
 
-	decisions            *DecisionStore
-	decisionDefaultHours int
-	decisionWake         chan struct{}
-	decisionInflight     sync.Map
+	decisions             *DecisionStore
+	decisionDefaultHours  int
+	decisionWake          chan struct{}
+	decisionInflight      sync.Map
 	sessionAgentsMu       sync.Mutex
 	sessionAgents         map[sessionAgentKey]sessionAgent
 	name                  string
@@ -579,13 +579,13 @@ type queuedMessage struct {
 
 // interactiveState tracks a running interactive agent session and its permission state.
 type interactiveState struct {
-	hold                     *queueHold
-	heldTyping               *heldTyping // reaction shown on the first message while the debounce window is open
-	queueReady               <-chan struct{}
-	queueKey                 string
-	queueSessionID           string
-	queueRetired             bool
-	agentSession             AgentSession
+	hold           *queueHold
+	heldTyping     *heldTyping // reaction shown on the first message while the debounce window is open
+	queueReady     <-chan struct{}
+	queueKey       string
+	queueSessionID string
+	queueRetired   bool
+	agentSession   AgentSession
 	// busySession is the core.Session whose busy lock guards the in-flight
 	// turn. Set by getOrCreateInteractiveStateWith so /stop can release the
 	// lock after tearing the turn down (#1830).
@@ -604,7 +604,7 @@ type interactiveState struct {
 	stopped                  bool
 	backgroundTurnLease      bool
 	backgroundTurnLeaseGen   uint64 // busy-lock generation owned by the background turn lease
-	turnCancelled            bool // set when a graceful ACP CancelTurn aborted the live turn
+	turnCancelled            bool   // set when a graceful ACP CancelTurn aborted the live turn
 	pending                  *pendingPermission
 	steerMessageIDs          map[string]bool // dedup admitted supplements in this session
 	steerWriteFailed         bool            // next queue admission follows a hard stdin write failure
@@ -3568,7 +3568,6 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			}
 		}
 	}
-
 
 	// Stop the unsolicited reader (if running) and hand off event channel
 	// ownership to this foreground turn. Only drain events when the previous
@@ -12214,7 +12213,7 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 			Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllowAll), "green")}
 
 		card := NewCard().
-			Markdown("**" + e.i18n.T(MsgPermCardTitle) + "**\n" + body).
+			Markdown("**"+e.i18n.T(MsgPermCardTitle)+"**\n"+body).
 			ButtonsEqual(allowBtn, denyBtn).
 			Buttons(allowAllBtn).
 			Note(e.i18n.T(MsgPermCardNote)).

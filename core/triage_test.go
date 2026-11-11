@@ -85,7 +85,7 @@ func newTriageEnv(t *testing.T) *triageEnv {
 	env.e = NewEngine("segmented", &controllableAgent{nextSession: env.s}, []Platform{env.p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
 	cfg := DefaultStreamPreviewCfg()
 	cfg.Segmented, cfg.StepList = true, true
-	cfg.QuickLine = QuickLineCfg{Enabled: true, BaseURL: srv.URL, Model: "m", KeyFile: keyFile, TimeoutMs: 2000}
+	cfg.QuickLine = QuickLineCfg{Enabled: true, BaseURL: srv.URL, Model: "m", KeyFile: keyFile, TimeoutMs: 5000}
 	env.e.SetStreamPreviewCfg(cfg)
 	t.Cleanup(func() { _ = env.e.Stop() })
 	return env
@@ -278,12 +278,12 @@ func TestSlowClassifierGivesUpAfterTheCap(t *testing.T) {
 	env.firstTurn("已在后台整理。")
 	env.backgroundTask("t1", "按客户整理 200 个文件", "读取文件")
 	env.label.Store("GREETING")
-	env.delay.Store(int64(3 * time.Second))
+	env.delay.Store(int64(5 * time.Second))
 	start := time.Now()
 	env.send("谢谢")
 	select {
 	case <-env.s.sent:
-	case <-time.After(2500 * time.Millisecond):
+	case <-time.After(4 * time.Second):
 		t.Fatal("a slow classification held the message")
 	}
 	if waited := time.Since(start); waited < triageMaxTimeout {

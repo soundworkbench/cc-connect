@@ -17,8 +17,8 @@ import (
 // "可以" may be its answer.
 
 const (
-	triageMaxRunes     = 60 // longer messages are never triaged
-	triageMaxTimeout   = 1500 * time.Millisecond
+	triageMaxRunes     = 60                      // longer messages are never triaged
+	triageMaxTimeout   = 2500 * time.Millisecond // the fastest quick model takes 1.1–1.3s to first token
 	triageReaction     = "THUMBSUP"
 	triageQuestionTail = 200 // runes of the last reply searched for a question mark
 )
