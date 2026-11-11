@@ -310,9 +310,10 @@ type StreamPreviewConfig struct {
 }
 
 // QuickLineConfig writes one short sentence from a fast model into the streaming
-// card while the main agent is still thinking. Default off.
+// card while the main agent is still thinking. Default on; it stays off when the
+// base URL, model or key file is missing.
 type QuickLineConfig struct {
-	Enabled      bool    `toml:"enabled"`
+	Enabled      *bool   `toml:"enabled"`
 	BaseURL      string  `toml:"base_url"`      // Anthropic-compatible gateway; POST {base_url}/v1/messages
 	Model        string  `toml:"model"`         // full model name, sent as is
 	KeyFile      string  `toml:"key_file"`      // file holding the gateway key, read at call time

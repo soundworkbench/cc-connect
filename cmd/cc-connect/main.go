@@ -2248,24 +2248,43 @@ func buildStreamPreviewCfg(c config.StreamPreviewConfig) core.StreamPreviewCfg {
 	return spcfg
 }
 
-// buildQuickLineCfg turns [stream_preview.quick_line] into the core setting. An
-// enabled section without a base URL, model or readable key file stays off, with
-// one warning.
+// buildQuickLineCfg turns [stream_preview.quick_line] into the core setting. The
+// quick line is on unless enabled = false, and stays off when the base URL, model
+// or a readable key file is missing. Only an explicit enabled = true warns about that.
+// Unset fields fall back to the environment a colleague container already carries
+// (ANTHROPIC_BASE_URL, PARTNER_MODEL_KEY_FILE) plus QUICK_LINE_MODEL.
 func buildQuickLineCfg(c config.QuickLineConfig) core.QuickLineCfg {
-	q := core.QuickLineCfg{Enabled: c.Enabled, BaseURL: c.BaseURL, Model: c.Model, KeyFile: c.KeyFile, TimeoutMs: c.TimeoutMs, SystemPrompt: c.SystemPrompt}
+	q := core.QuickLineCfg{Enabled: c.Enabled == nil || *c.Enabled, BaseURL: c.BaseURL, Model: c.Model, KeyFile: c.KeyFile, TimeoutMs: c.TimeoutMs, SystemPrompt: c.SystemPrompt}
+	if q.BaseURL == "" {
+		q.BaseURL = strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")), "/"), "/v1")
+	}
+	if q.Model == "" {
+		q.Model = strings.TrimSpace(os.Getenv("QUICK_LINE_MODEL"))
+	}
+	if q.KeyFile == "" {
+		q.KeyFile = strings.TrimSpace(os.Getenv("PARTNER_MODEL_KEY_FILE"))
+	}
 	if !q.Enabled {
+		return q
+	}
+	reason := ""
+	if q.BaseURL == "" || q.Model == "" || q.KeyFile == "" {
+		reason = "base_url, model and key_file are required"
+	} else if st, err := os.Stat(q.KeyFile); err != nil || st.IsDir() {
+		reason = "key_file is not readable"
+	}
+	if reason != "" {
+		q.Enabled = false
+		if c.Enabled != nil {
+			slog.Warn("stream_preview.quick_line disabled: " + reason)
+		} else {
+			slog.Info("stream_preview.quick_line off: " + reason)
+		}
 		return q
 	}
 	q.Effort = "minimal"
 	if c.Effort != nil {
 		q.Effort = *c.Effort
-	}
-	if q.BaseURL == "" || q.Model == "" || q.KeyFile == "" {
-		slog.Warn("stream_preview.quick_line disabled: base_url, model and key_file are required")
-		q.Enabled = false
-	} else if st, err := os.Stat(q.KeyFile); err != nil || st.IsDir() {
-		slog.Warn("stream_preview.quick_line disabled: key_file is not readable")
-		q.Enabled = false
 	}
 	return q
 }

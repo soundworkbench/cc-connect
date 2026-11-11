@@ -30,10 +30,10 @@ const (
 	quickLineMaxTokens        = 80
 	quickLineHistoryTurns     = 4
 	quickLineTurnRunes        = 200
-	quickLineMaxRunes         = 60
+	quickLineMaxRunes         = 30
 )
 
-const defaultQuickLinePrompt = "你是用户的工作助理，现在用第一人称回复用户刚发来的消息。只写一句中文，不超过 40 个字：说明你收到了，并说你先去做什么。" +
+const defaultQuickLinePrompt = "你是用户的工作助理，现在用第一人称回复用户刚发来的消息。只写一句中文，不超过 25 个字：说明你收到了，并说你先去做什么。" +
 	"不要声称已经有任何结果，不要实质性地回答问题，不要提到其他助理或模型，不要加引号或前缀。"
 
 // QuickLineSetter is implemented by platforms whose preview card can show the
@@ -190,10 +190,26 @@ func fetchQuickLine(ctx context.Context, cfg QuickLineCfg, userMsg string, histo
 		if line == "" {
 			return "", fmt.Errorf("empty text block")
 		}
-		if r := []rune(line); len(r) > quickLineMaxRunes {
-			line = string(r[:quickLineMaxRunes]) + "…"
-		}
-		return line, nil
+		return clipQuickLine(line), nil
 	}
 	return "", fmt.Errorf("no text block")
+}
+
+// clipQuickLine keeps the sentence to one card line. A longer reply is cut at the
+// last clause break that keeps most of it, else hard-cut with an ellipsis.
+func clipQuickLine(line string) string {
+	r := []rune(line)
+	if len(r) <= quickLineMaxRunes {
+		return line
+	}
+	head := r[:quickLineMaxRunes]
+	for i := len(head) - 1; i >= quickLineMaxRunes/2; i-- {
+		switch head[i] {
+		case '。', '！', '？', '!', '?':
+			return string(head[:i+1])
+		case '，', '；', ',', ';', '、':
+			return string(head[:i]) + "。"
+		}
+	}
+	return string(r[:quickLineMaxRunes-1]) + "…"
 }
