@@ -183,23 +183,19 @@ func TestThanksDuringABackgroundTaskOnlyGetsAnEmoji(t *testing.T) {
 	env.finishTurn("好的")
 }
 
-// "好的" / "可以" may answer a question; with one pending they always reach
-// the agent, whatever the quick model says.
+// "好的" / "可以" / "谢谢" may answer a question; with one pending they always
+// reach the agent, even when the quick model calls them small talk.
 func TestShortAnswersToAPendingQuestionAreNeverSwallowed(t *testing.T) {
 	env := newTriageEnv(t)
 	env.firstTurn("做成表格还是文档？")
 	env.backgroundTask("t1", "按客户整理 200 个文件", "读取文件")
 	env.label.Store("GREETING")
-	calls := env.calls.Load()
-	for _, answer := range []string{"好的", "可以"} {
+	for _, answer := range []string{"好的", "可以", "谢谢", "嗯"} {
 		env.send(answer)
 		if !env.reachesAgent() {
 			t.Fatalf("%q after a question was swallowed", answer)
 		}
 		env.finishTurn("那就做表格，要不要加图表？")
-	}
-	if env.calls.Load() != calls {
-		t.Fatal("the quick model was asked although a question was pending")
 	}
 	if len(env.p.reacted()) != 0 {
 		t.Fatalf("reactions=%v", env.p.reacted())
@@ -224,8 +220,50 @@ func TestShortAnswersToAPendingQuestionAreNeverSwallowed(t *testing.T) {
 		t.Fatal("answer with a pending decision card was swallowed")
 	}
 	env.finishTurn("好")
-	if env.calls.Load() != calls || len(env.p.reacted()) != 0 {
-		t.Fatalf("triaged with a pending decision card: calls=%d reactions=%v", env.calls.Load()-calls, env.p.reacted())
+	if len(env.p.reacted()) != 0 {
+		t.Fatalf("triaged with a pending decision card: reactions=%v", env.p.reacted())
+	}
+}
+
+// A progress question never answers a card or a question, so old unanswered
+// cards do not send it to the agent.
+func TestProgressQuestionAnsweredDespitePendingCards(t *testing.T) {
+	env := newTriageEnv(t)
+	env.firstTurn("已在后台整理，要不要顺便出个汇总？")
+	env.backgroundTask("t1", "按客户整理 200 个文件", "读取文件")
+	store, err := NewDecisionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.e.SetDecisionStore(store, 0)
+	old := time.Now().Add(-3 * time.Hour)
+	if err := store.Add(&Decision{ID: "d1", Project: env.e.name, SessionKey: env.key, Question: "用哪个方案", Options: []string{"甲", "乙"}, State: decisionPending, CreatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(&Decision{ID: "f1", Project: env.e.name, SessionKey: env.key, Form: &FormSpec{Fields: []FormField{{Label: "日期", Type: "date"}}}, State: decisionPending, CreatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	env.label.Store("PROGRESS")
+	for _, q := range []string{"进度怎么样", "好了吗", "在忙什么"} {
+		before := len(env.p.stubPlatformEngine.getSent())
+		env.send(q)
+		if env.reachesAgent() {
+			t.Fatalf("%q with pending cards woke the agent", q)
+		}
+		sent := env.p.stubPlatformEngine.getSent()
+		if len(sent) != before+1 || !strings.Contains(sent[before], "后台任务「按客户整理 200 个文件」还在进行") {
+			t.Fatalf("%q: sent=%q", q, sent[before:])
+		}
+	}
+	// A thank-you may still be the answer: it goes to the agent.
+	env.label.Store("GREETING")
+	env.send("谢谢")
+	if !env.reachesAgent() {
+		t.Fatal("thanks with pending cards was swallowed")
+	}
+	env.finishTurn("不客气")
+	if len(env.p.reacted()) != 0 {
+		t.Fatalf("reactions=%v", env.p.reacted())
 	}
 }
 

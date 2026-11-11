@@ -13,8 +13,8 @@ import (
 // about progress is answered from the bridge's own state; pure small talk or
 // thanks gets an emoji. A fully idle chat skips the quick model, so a short
 // command never waits on it. Everything else, and every failure, goes to the
-// agent as before. A pending question always goes to the agent: "好的" or
-// "可以" may be its answer.
+// agent as before. While a question or card is pending, everything but a
+// progress question goes to the agent: "好的" or "可以" may be its answer.
 
 const (
 	triageMaxRunes     = 60                      // longer messages are never triaged
@@ -68,10 +68,6 @@ func (e *Engine) triageIdleMessage(p Platform, msg *Message, session *Session, s
 	if !view.busy() {
 		return false // nothing to wait for: the agent answers at once
 	}
-	if view.pendingQuestion != "" {
-		triageLog(interactiveKey, triageOther, "pending_question_"+view.pendingQuestion)
-		return false
-	}
 	class, err := e.classifyIdleMessage(cfg, content)
 	switch {
 	case err != nil:
@@ -89,6 +85,10 @@ func (e *Engine) triageIdleMessage(p Platform, msg *Message, session *Session, s
 		sessions.Save()
 		triageLog(interactiveKey, triageProgress, "answered_from_bridge_state")
 		return true
+	case view.pendingQuestion != "":
+		// A progress question never answers a pending question or card, but
+		// an acknowledgement or a thank-you may: it goes to the agent.
+		triageLog(interactiveKey, triageOther, "pending_question_"+view.pendingQuestion)
 	case class == triageGreeting:
 		reactor, ok := p.(MessageReactor)
 		if !ok {
