@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,12 @@ const (
 	decisionExpired  = "expired"  // deadline passed, default applied
 
 	decisionRetryInterval = 30 * time.Second
+
+	// Up to decisionButtonOptions options show as buttons; more, or a
+	// multiple choice, show as a dropdown with a submit button.
+	decisionButtonOptions = 6
+	decisionMaxOptions    = 20
+	decisionChoiceField   = "choice"
 )
 
 var decisionZone = time.FixedZone("CST", 8*3600)
@@ -43,6 +50,11 @@ type DecisionRequest struct {
 	Note            string   `json:"note,omitempty"`             // optional second line under the question
 	NoDefault       bool     `json:"no_default,omitempty"`       // no recommended option, no deadline
 	DeadlineMinutes int      `json:"deadline_minutes,omitempty"` // 0 = configured default
+	// Danger marks an irreversible choice (delete, pay, send outside): red
+	// buttons, a confirm dialog before the choice counts, and never a default.
+	Danger bool `json:"danger,omitempty"`
+	// Multi lets the person pick several options from a dropdown.
+	Multi bool `json:"multi,omitempty"`
 }
 
 // Decision is one persisted decision card.
@@ -57,7 +69,10 @@ type Decision struct {
 	Deadline   time.Time `json:"deadline,omitempty"`
 	MessageID  string    `json:"message_id,omitempty"`
 	State      string    `json:"state"`
-	Chosen     int       `json:"chosen,omitempty"` // 1-based, valid when State != pending
+	Danger     bool      `json:"danger,omitempty"`
+	Multi      bool      `json:"multi,omitempty"`
+	Chosen     int       `json:"chosen,omitempty"`     // 1-based, valid when State != pending; the first pick when Multi
+	ChosenSet  []int     `json:"chosen_set,omitempty"` // every pick, ascending, when Multi
 	ResolvedAt time.Time `json:"resolved_at,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	Delivered  bool      `json:"delivered"` // the answer was handed to the session
@@ -70,8 +85,8 @@ func (d *Decision) validate() error {
 	if len(d.Options) < 2 {
 		return errors.New("at least two options are required")
 	}
-	if len(d.Options) > 6 {
-		return errors.New("at most six options are allowed")
+	if len(d.Options) > decisionMaxOptions {
+		return fmt.Errorf("at most %d options are allowed", decisionMaxOptions)
 	}
 	for _, o := range d.Options {
 		if strings.TrimSpace(o) == "" {
@@ -81,12 +96,25 @@ func (d *Decision) validate() error {
 	return nil
 }
 
-// ChosenLabel returns the label of the resolved option.
+// ChosenLabel returns the label of the resolved option, or the labels of all
+// picked options of a multiple choice.
 func (d *Decision) ChosenLabel() string {
-	if d.Chosen < 1 || d.Chosen > len(d.Options) {
-		return ""
+	picks := d.ChosenSet
+	if len(picks) == 0 {
+		picks = []int{d.Chosen}
 	}
-	return d.Options[d.Chosen-1]
+	var labels []string
+	for _, i := range picks {
+		if i >= 1 && i <= len(d.Options) {
+			labels = append(labels, d.Options[i-1])
+		}
+	}
+	return strings.Join(labels, "、")
+}
+
+// usesForm reports whether the card shows a dropdown instead of buttons.
+func (d *Decision) usesForm() bool {
+	return d.Multi || len(d.Options) > decisionButtonOptions
 }
 
 // inboundText is the message the session receives once the decision is resolved.
@@ -183,13 +211,27 @@ func (s *DecisionStore) SetMessageID(id, msgID string) error {
 // of range, so a double tap or a late tap is applied once. The returned value
 // is a copy.
 func (s *DecisionStore) Resolve(id string, idx int, state string) (*Decision, bool) {
+	return s.ResolveSet(id, []int{idx}, state)
+}
+
+// ResolveSet is Resolve for one or more picks; several picks are kept only
+// for a multiple-choice decision.
+func (s *DecisionStore) ResolveSet(id string, picks []int, state string) (*Decision, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.find(id)
-	if d == nil || d.State != decisionPending || idx < 1 || idx > len(d.Options) {
+	if d == nil || d.State != decisionPending || len(picks) == 0 || (len(picks) > 1 && !d.Multi) {
 		return nil, false
 	}
-	d.State, d.Chosen, d.ResolvedAt = state, idx, time.Now()
+	for _, idx := range picks {
+		if idx < 1 || idx > len(d.Options) {
+			return nil, false
+		}
+	}
+	d.State, d.Chosen, d.ResolvedAt = state, picks[0], time.Now()
+	if d.Multi {
+		d.ChosenSet = append([]int(nil), picks...)
+	}
 	if err := s.saveLocked(); err != nil {
 		slog.Error("decision: persist failed", "id", id, "error", err)
 	}
@@ -281,7 +323,10 @@ func buildDecisionCard(d *Decision) *Card {
 	}
 
 	title, color := "需要你选择", "orange"
-	if d.HasDefault {
+	switch {
+	case d.Danger:
+		title, color = "需要你确认", "red"
+	case d.HasDefault:
 		title, color = "需要你决定", "blue"
 	}
 	cb := NewCard().Title(title, color)
@@ -289,12 +334,20 @@ func buildDecisionCard(d *Decision) *Card {
 	if d.Note != "" {
 		cb.Markdown(d.Note)
 	}
-	for i, opt := range d.Options {
-		label, typ := opt, "default"
-		if d.HasDefault && i == 0 {
-			label, typ = opt+"（推荐）", "primary"
+	if d.usesForm() {
+		cb.card.Elements = append(cb.card.Elements, decisionForm(d))
+	} else {
+		for i, opt := range d.Options {
+			btn := Btn(opt, "default", decisionActionValue(d.ID, i+1))
+			switch {
+			case d.Danger:
+				btn.Type = "danger"
+				btn.Confirm = &CardConfirm{Title: "确认这个操作？", Text: "选择「" + opt + "」后会马上照做，不能撤回。"}
+			case d.HasDefault && i == 0:
+				btn.Text, btn.Type = opt+"（推荐）", "primary"
+			}
+			cb.Buttons(btn)
 		}
-		cb.Buttons(Btn(label, typ, decisionActionValue(d.ID, i+1)))
 	}
 	if d.HasDefault {
 		cb.Note(fmt.Sprintf("%s 前未选择，将按推荐处理：%s", decisionClock(d.Deadline), d.Options[0]))
@@ -302,6 +355,29 @@ func buildDecisionCard(d *Decision) *Card {
 		cb.Note("需要你选择，不会自动处理")
 	}
 	return cb.Build()
+}
+
+// decisionForm is the dropdown of a decision with many options or a multiple
+// choice, submitted as "act:/decision-form <id> <values>".
+func decisionForm(d *Decision) CardForm {
+	field := CardFormField{Name: decisionChoiceField, Kind: "select", Placeholder: "请选择", Required: true}
+	if d.Multi {
+		field.Kind, field.Placeholder = "multi_select", "可以选多个"
+	}
+	for i, opt := range d.Options {
+		label := opt
+		if d.HasDefault && !d.Multi && i == 0 {
+			label += "（推荐）"
+		}
+		field.Options = append(field.Options, CardSelectOption{Text: label, Value: strconv.Itoa(i + 1)})
+	}
+	form := CardForm{Name: "decision_" + d.ID, Fields: []CardFormField{field}, SubmitText: "提交", SubmitType: "primary",
+		SubmitValue: "act:/decision-form " + d.ID}
+	if d.Danger {
+		form.SubmitType = "danger"
+		form.Confirm = &CardConfirm{Title: "确认这个操作？", Text: "提交后会马上照你选的做，不能撤回。"}
+	}
+	return form
 }
 
 // ── Engine side ────────────────────────────────────────────────
@@ -330,7 +406,9 @@ func (e *Engine) SendDecisionCard(req DecisionRequest) (string, error) {
 		Question:   strings.TrimSpace(req.Question),
 		Note:       strings.TrimSpace(req.Note),
 		Options:    req.Options,
-		HasDefault: !req.NoDefault,
+		HasDefault: !req.NoDefault && !req.Danger && !req.Multi,
+		Danger:     req.Danger,
+		Multi:      req.Multi,
 		State:      decisionPending,
 		CreatedAt:  time.Now(),
 	}
@@ -400,6 +478,48 @@ func (e *Engine) handleDecisionTap(args string) *Card {
 		return buildDecisionCard(d) // already answered or expired: show how it ended
 	}
 	return nil
+}
+
+// handleDecisionForm handles "act:/decision-form <id> <values>", the submit of
+// a decision's dropdown, and returns the card that replaces it.
+func (e *Engine) handleDecisionForm(args string) *Card {
+	if e.decisions == nil {
+		return nil
+	}
+	id, raw, _ := strings.Cut(strings.TrimSpace(args), " ")
+	var values map[string]any
+	_ = json.Unmarshal([]byte(raw), &values)
+	var picks []int
+	seen := map[int]bool{}
+	add := func(v any) {
+		if s, ok := v.(string); ok {
+			if n, err := strconv.Atoi(s); err == nil && !seen[n] {
+				seen[n] = true
+				picks = append(picks, n)
+			}
+		}
+	}
+	switch v := values[decisionChoiceField].(type) {
+	case []any:
+		for _, x := range v {
+			add(x)
+		}
+	default:
+		add(v)
+	}
+	sort.Ints(picks)
+	if d, ok := e.decisions.ResolveSet(id, picks, decisionAnswered); ok {
+		e.wakeDecisions()
+		return buildDecisionCard(d)
+	}
+	d := e.decisions.Get(id)
+	if d == nil {
+		return nil
+	}
+	if d.State == decisionPending {
+		return &Card{Toast: "请先选择"}
+	}
+	return buildDecisionCard(d)
 }
 
 func (e *Engine) decisionLoop() {

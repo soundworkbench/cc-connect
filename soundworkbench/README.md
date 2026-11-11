@@ -132,6 +132,10 @@ WebSocket 真正连上后，按项目已有会话记录（包括多工作区记�
 - `p2p_thread_isolation = true`：私聊中每个话题一个会话。普通消息和引用回复留在已有会话中。
 - 交互卡片和合并转发被读成文本、图片和嵌套转发，供 Agent 使用（`platform/feishu/interactive_content.go`）。来自其他应用的卡片中的图片无法下载；文本中会说明这一点。
 - 决策卡（`core/decision.go`，用 `[decision] enabled = true` 开启）：`cc-connect send --decision card.json` 发出一张卡片，每个选项一个按钮。JSON 含 `question`、`options`（推荐项在前）、`note`、`no_default` 和 `deadline_minutes`。一次点选，或截止时间到后的默认选项（`default_hours`，12），会作为消息回到会话，卡片被改写，不能再次使用。
+  - `"danger": true`：删除、花钱、对外发送这类做了撤不回的操作。卡片标题为红色“需要你确认”，按钮变红，点了先弹确认框，确认后才算数；强制没有推荐项、没有截止时间（等同 `no_default`），不会到期自动处理。
+  - `"multi": true`：可以多选。卡片改成下拉多选框，下面一个“提交”按钮；没有推荐项和截止时间。回到会话的消息把选中的项按原顺序用“、”连起来，例如“【决定】周报包含哪些部分？：进展、计划”。
+  - 选项超过 6 个时，单选也自动改成下拉框加“提交”按钮；最多 20 个选项。没选就提交时，飞书前端先拦下；绕过时只弹提示“请先选择”，卡片不变。
+  - 下拉和提交按钮用通用的表单元素 `core.CardForm` 渲染；提交时飞书回调带 `form_value`，桥把它以 JSON 接在动作后面（`act:/decision-form <id> {"choice":[...]}`）。
 
 ### 用量和推理强度
 

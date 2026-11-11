@@ -968,6 +968,11 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		if len(ids) > 0 {
 			actionVal += " " + strings.Join(ids, ",")
 		}
+	} else if len(event.Event.Action.FormValue) > 0 && strings.HasPrefix(actionVal, "act:/") {
+		// A core.CardForm submit: the values follow the action as JSON.
+		if b, err := json.Marshal(event.Event.Action.FormValue); err == nil {
+			actionVal += " " + string(b)
+		}
 	}
 
 	userID := ""

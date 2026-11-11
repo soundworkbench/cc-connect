@@ -83,6 +83,35 @@ func (CardActions) cardElement()  {}
 func (CardNote) cardElement()     {}
 func (CardListItem) cardElement() {}
 func (CardSelect) cardElement()   {}
+func (CardForm) cardElement()     {}
+
+// CardConfirm is a dialog the platform shows before a button's callback fires.
+type CardConfirm struct {
+	Title string
+	Text  string
+}
+
+// CardFormField is one input of a CardForm.
+type CardFormField struct {
+	Name        string // key in the submitted values; unique within the card
+	Label       string // shown above the field; empty = none
+	Kind        string // "input", "date", "select" or "multi_select"
+	Placeholder string
+	Required    bool
+	Options     []CardSelectOption // select kinds only
+}
+
+// CardForm renders fields with a submit button. On submit the platform calls
+// the card action SubmitValue, followed by a space and the submitted values as
+// a JSON object (field name to string, or list of strings for multi_select).
+type CardForm struct {
+	Name        string // unique within the card
+	Fields      []CardFormField
+	SubmitText  string
+	SubmitType  string // "primary", "default", "danger"
+	SubmitValue string
+	Confirm     *CardConfirm // optional dialog before submitting
+}
 
 // CardButton represents a clickable button inside a CardActions element.
 type CardButton struct {
@@ -90,6 +119,8 @@ type CardButton struct {
 	Type  string            // "primary", "default", "danger"
 	Value string            // callback data, e.g. "cmd:/new", "cmd:/switch 3"
 	Extra map[string]string // additional key-value pairs carried in the callback (platform-specific)
+	// Confirm, when set, asks the person to confirm before the callback fires.
+	Confirm *CardConfirm
 }
 
 // CardActionLayout controls how a CardActions row should be rendered by
@@ -298,6 +329,26 @@ func (c *Card) RenderText() string {
 		case CardNote:
 			sb.WriteString(e.Text)
 			sb.WriteString("\n")
+		case CardForm:
+			for _, f := range e.Fields {
+				label := f.Label
+				if label == "" {
+					label = f.Placeholder
+				}
+				sb.WriteString(label)
+				for i, opt := range f.Options {
+					if i == 0 {
+						sb.WriteString(": ")
+					} else {
+						sb.WriteString(" | ")
+					}
+					sb.WriteString(opt.Text)
+				}
+				sb.WriteString("\n")
+			}
+			sb.WriteString("[")
+			sb.WriteString(e.SubmitText)
+			sb.WriteString("]\n\n")
 		}
 	}
 
@@ -308,7 +359,7 @@ func (c *Card) RenderText() string {
 func (c *Card) HasButtons() bool {
 	for _, elem := range c.Elements {
 		switch elem.(type) {
-		case CardActions, CardListItem, CardSelect:
+		case CardActions, CardListItem, CardSelect, CardForm:
 			return true
 		}
 	}

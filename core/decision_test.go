@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -268,5 +269,93 @@ func TestDecisionRequestValidation(t *testing.T) {
 		if _, err := e.SendDecisionCard(req); err == nil {
 			t.Errorf("%s: want error", name)
 		}
+	}
+}
+
+func decisionButtons(c *Card) []CardButton {
+	var btns []CardButton
+	for _, el := range c.Elements {
+		if a, ok := el.(CardActions); ok {
+			btns = append(btns, a.Buttons...)
+		}
+	}
+	return btns
+}
+
+func decisionFormOf(t *testing.T, c *Card) CardForm {
+	t.Helper()
+	for _, el := range c.Elements {
+		if f, ok := el.(CardForm); ok {
+			return f
+		}
+	}
+	t.Fatalf("card has no form: %#v", c)
+	return CardForm{}
+}
+
+func TestDangerDecisionHasRedConfirmedButtonsAndNoDefault(t *testing.T) {
+	e, p, _, store := newDecisionEngine(t, t.TempDir())
+	id := sendTestDecision(t, e, DecisionRequest{Question: "删除 3 个旧文件？", Options: []string{"删除", "不删"}, Danger: true, DeadlineMinutes: 5})
+	card := p.idCards[0]
+	if card.Header.Title != "需要你确认" || card.Header.Color != "red" || strings.Contains(cardText(card), "推荐") {
+		t.Fatalf("danger card:\n%s", cardText(card))
+	}
+	for _, b := range decisionButtons(card) {
+		if b.Type != "danger" || b.Confirm == nil || b.Confirm.Title == "" || !strings.Contains(b.Confirm.Text, b.Text) {
+			t.Fatalf("button=%#v", b)
+		}
+	}
+	if d := store.Get(id); d.HasDefault || !d.Deadline.IsZero() {
+		t.Fatalf("danger decision got a default: %#v", d)
+	}
+}
+
+func TestMultiDecisionSubmitsSeveralPicks(t *testing.T) {
+	e, p, sess, store := newDecisionEngine(t, t.TempDir())
+	id := sendTestDecision(t, e, DecisionRequest{Question: "周报包含哪些部分？", Options: []string{"进展", "风险", "计划"}, Multi: true})
+	f := decisionFormOf(t, p.idCards[0])
+	if len(decisionButtons(p.idCards[0])) != 0 || len(f.Fields) != 1 || f.Fields[0].Kind != "multi_select" || len(f.Fields[0].Options) != 3 ||
+		f.SubmitText != "提交" || f.SubmitValue != "act:/decision-form "+id {
+		t.Fatalf("form=%#v", f)
+	}
+	if card := e.handleCardNav(f.SubmitValue+` {"choice":[]}`, decKey); card == nil || card.Toast != "请先选择" {
+		t.Fatalf("empty submit card=%#v", card)
+	}
+	card := e.handleCardNav(f.SubmitValue+` {"choice":["3","1"]}`, decKey)
+	if card == nil || !strings.Contains(card.Header.Title, "已决定：进展、计划") {
+		t.Fatalf("answered card=%#v", card)
+	}
+	if got := waitPrompts(t, sess, 1); !strings.Contains(got[0], "【决定】周报包含哪些部分？：进展、计划") {
+		t.Fatalf("prompt=%q", got[0])
+	}
+	if d := store.Get(id); d.HasDefault || len(d.ChosenSet) != 2 {
+		t.Fatalf("stored=%#v", d)
+	}
+}
+
+func TestManyOptionsBecomeADropdown(t *testing.T) {
+	e, p, sess, _ := newDecisionEngine(t, t.TempDir())
+	opts := []string{"一", "二", "三", "四", "五", "六", "七"}
+	id := sendTestDecision(t, e, DecisionRequest{Question: "选哪一周？", Options: opts, Danger: true})
+	f := decisionFormOf(t, p.idCards[0])
+	if f.Fields[0].Kind != "select" || len(f.Fields[0].Options) != 7 || f.SubmitType != "danger" || f.Confirm == nil {
+		t.Fatalf("form=%#v", f)
+	}
+	// a single choice keeps one pick
+	if card := e.handleCardNav("act:/decision-form "+id+` {"choice":["2","3"]}`, decKey); card == nil || card.Toast == "" {
+		t.Fatalf("two picks on a single choice: %#v", card)
+	}
+	if card := e.handleCardNav("act:/decision-form "+id+` {"choice":"7"}`, decKey); card == nil || !strings.Contains(card.Header.Title, "已决定：七") {
+		t.Fatalf("card=%#v", card)
+	}
+	if got := waitPrompts(t, sess, 1); !strings.Contains(got[0], "选哪一周？：七") {
+		t.Fatalf("prompt=%q", got[0])
+	}
+	var tooMany []string
+	for i := 0; i <= decisionMaxOptions; i++ {
+		tooMany = append(tooMany, fmt.Sprint(i))
+	}
+	if _, err := e.SendDecisionCard(DecisionRequest{SessionKey: decKey, Question: "Q", Options: tooMany}); err == nil {
+		t.Fatal("too many options accepted")
 	}
 }

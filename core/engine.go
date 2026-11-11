@@ -12597,6 +12597,10 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.handleModelCardAction(args, sessionKey)
 	}
 
+	if prefix == "act" && cmd == "/decision-form" {
+		return e.handleDecisionForm(args)
+	}
+
 	if prefix == "act" && cmd == "/decision" {
 		return e.handleDecisionTap(args)
 	}

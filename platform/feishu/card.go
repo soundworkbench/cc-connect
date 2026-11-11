@@ -186,6 +186,9 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 					"type":  btnType,
 					"value": valMap,
 				}
+				if c := renderConfirm(btn.Confirm); c != nil {
+					action["confirm"] = c
+				}
 				if e.Layout == core.CardActionLayoutEqualColumns {
 					action["width"] = "fill"
 				}
@@ -290,6 +293,8 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 				"tag":      "note",
 				"elements": []map[string]any{plainText(e.Text)},
 			})
+		case core.CardForm:
+			elements = append(elements, renderForm(e, sessionKey))
 		}
 	}
 
