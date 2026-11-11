@@ -22,9 +22,10 @@ type taskCardCall struct {
 // taskCardPlatform records task cards; each SendTaskCard returns a new handle.
 type taskCardPlatform struct {
 	failurePlatform
-	tmu     sync.Mutex
-	sent    []taskCardCall
-	updates []taskCardCall
+	tmu      sync.Mutex
+	sent     []taskCardCall
+	updates  []taskCardCall
+	onUpdate func()
 }
 
 func (p *taskCardPlatform) SendTaskCard(_ context.Context, _ any, v TaskCardView) (any, error) {
@@ -39,6 +40,9 @@ func (p *taskCardPlatform) UpdateTaskCard(_ context.Context, h any, v TaskCardVi
 	p.tmu.Lock()
 	defer p.tmu.Unlock()
 	p.updates = append(p.updates, taskCardCall{h, v})
+	if p.onUpdate != nil {
+		p.onUpdate()
+	}
 	return nil
 }
 
@@ -265,5 +269,165 @@ func TestIdleReclaimSettlesTaskCards(t *testing.T) {
 	waitInterrupted(t, env, "任务甲")
 	if !env.s.closed.Get() {
 		t.Fatal("idle reclaim did not close the agent session")
+	}
+}
+
+// quickTaskServer answers every quick-model call with reply and records when
+// each call came.
+func quickTaskServer(t *testing.T, env *taskEnv, reply func(n int) string) func() []time.Time {
+	t.Helper()
+	var mu sync.Mutex
+	var calls []time.Time
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, time.Now())
+		n := len(calls)
+		mu.Unlock()
+		b, _ := json.Marshal(map[string]any{"content": []map[string]string{{"type": "text", "text": reply(n)}}})
+		_, _ = w.Write(b)
+	}))
+	t.Cleanup(srv.Close)
+	keyFile := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(keyFile, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env.e.streamPreview.QuickLine = QuickLineCfg{Enabled: true, BaseURL: srv.URL, Model: "m", KeyFile: keyFile, TimeoutMs: 2000}
+	return func() []time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]time.Time(nil), calls...)
+	}
+}
+
+func lastRecent(env *taskEnv) string {
+	_, up := env.p.cards()
+	if len(up) == 0 {
+		return ""
+	}
+	return up[len(up)-1].view.Recent
+}
+
+// The agent's progress line holds while it is fresh; once it is older than
+// cliStale the quick model may write one, at most every summaryGap. In the
+// 11-11 test one line stayed for two minutes because the agent's line, once
+// seen, blocked the quick model for good.
+func TestTaskCardQuickModelTakesOverStaleAgentLine(t *testing.T) {
+	env := newTaskEnv(t)
+	calls := quickTaskServer(t, env, func(n int) string {
+		// A reply that says its sentence twice is shown once.
+		return fmt.Sprintf("正在整理第%d批纪要正在整理第%d批纪要", n, n)
+	})
+	env.e.taskCards.cliStale = 300 * time.Millisecond
+	env.e.taskCards.summaryGap = 400 * time.Millisecond
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理纪要", Background: yes()})
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "搜索会议", Summary: "在找本周的会议"})
+	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "读取纪要"})
+	time.Sleep(100 * time.Millisecond)
+	if n := len(calls()); n != 0 {
+		t.Fatalf("quick model called %d times while the agent's line was fresh", n)
+	}
+	time.Sleep(300 * time.Millisecond)
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "比对纪要"})
+	waitUntil(t, "quick line over the stale agent line", func() bool { return lastRecent(env) == "最近进展：正在整理第1批纪要" })
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "写清单"})
+	time.Sleep(100 * time.Millisecond)
+	if n := len(calls()); n != 1 {
+		t.Fatalf("quick model called %d times within summaryGap", n)
+	}
+	time.Sleep(400 * time.Millisecond)
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "核对负责人"})
+	waitUntil(t, "second quick line", func() bool { return lastRecent(env) == "最近进展：正在整理第2批纪要" })
+	if c := calls(); c[1].Sub(c[0]) < 400*time.Millisecond {
+		t.Fatalf("two quick lines %v apart, want at least summaryGap", c[1].Sub(c[0]))
+	}
+	// A fresh agent line takes the slot back.
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Summary: "在核对负责人"})
+	waitUntil(t, "agent line back", func() bool { return lastRecent(env) == "最近进展：在核对负责人" })
+}
+
+func TestCollapseRepeat(t *testing.T) {
+	for in, want := range map[string]string{
+		"正在运行命令搜索本周的视频会议正在运行命令搜索本周的视频会议": "正在运行命令搜索本周的视频会议",
+		"正在读纪要。正在读纪要。正在读纪要。":             "正在读纪要。",
+		"正在读第 3 份纪要 正在读第 3 份纪要":          "正在读第 3 份纪要",
+		"正在比对两份纪要":                       "正在比对两份纪要",
+		"哈哈哈哈":                           "哈哈哈哈",
+		"读取纪要，读取纪要附件":                    "读取纪要，读取纪要附件",
+	} {
+		if got := collapseRepeat(in); got != want {
+			t.Errorf("collapseRepeat(%q)=%q, want %q", in, got, want)
+		}
+	}
+}
+
+// A task that adds no step (a subagent writing, not calling tools) still
+// changes its card about every idleBeat, never faster than minGap. In the 11-11
+// test a card stayed the same for 47 s.
+func TestIdleTaskCardShowsItIsAlive(t *testing.T) {
+	env := newTaskEnv(t)
+	env.e.taskCards.idleBeat = 150 * time.Millisecond
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理纪要", Background: yes(), Step: "写清单"})
+	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	waitUntil(t, "three idle beats", func() bool { _, up := env.p.cards(); return len(up) >= 3 })
+	sent, up := env.p.cards()
+	if up[0].view.Status != "仍在进行：写清单" || up[1].view.Status != "写清单" || up[2].view.Status != "仍在进行：写清单" {
+		t.Fatalf("idle statuses: %q %q %q", up[0].view.Status, up[1].view.Status, up[2].view.Status)
+	}
+	prev := sent[0].view
+	for _, u := range up {
+		if sameTaskView(u.view, prev) {
+			t.Fatalf("idle update changed nothing: %+v", u.view)
+		}
+		prev = u.view
+	}
+	// A new step shows as it is.
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "核对负责人"})
+	waitUntil(t, "new step", func() bool {
+		_, up := env.p.cards()
+		return up[len(up)-1].view.Status == "核对负责人"
+	})
+}
+
+// Updates of a busy card stay at least minGap apart, idle beats included.
+func TestTaskCardUpdatesKeepMinGap(t *testing.T) {
+	env := newTaskEnv(t)
+	env.e.taskCards.minGap = 80 * time.Millisecond
+	env.e.taskCards.idleBeat = 100 * time.Millisecond
+	var mu sync.Mutex
+	var at []time.Time
+	env.p.onUpdate = func() { mu.Lock(); at = append(at, time.Now()); mu.Unlock() }
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理纪要", Background: yes()})
+	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	for i := 0; i < 20; i++ {
+		env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: fmt.Sprintf("第 %d 步", i)})
+		time.Sleep(15 * time.Millisecond)
+	}
+	time.Sleep(400 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(at) < 3 {
+		t.Fatalf("updates=%d", len(at))
+	}
+	for i := 1; i < len(at); i++ {
+		if gap := at[i].Sub(at[i-1]); gap < 70*time.Millisecond {
+			t.Fatalf("updates %d and %d %v apart, want at least minGap", i-1, i, gap)
+		}
+	}
+}
+
+// When the card is idle the quick model may write a line even without a new
+// step.
+func TestIdleTaskCardAsksTheQuickModel(t *testing.T) {
+	env := newTaskEnv(t)
+	calls := quickTaskServer(t, env, func(n int) string { return fmt.Sprintf("正在写第%d部分", n) })
+	env.e.taskCards.idleBeat = 150 * time.Millisecond
+	env.e.taskCards.summaryGap = 0
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "写报告", Background: yes()})
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "写报告正文"})
+	waitUntil(t, "first quick line", func() bool { return lastRecent(env) == "最近进展：正在写第1部分" })
+	waitUntil(t, "idle quick line", func() bool { return lastRecent(env) == "最近进展：正在写第2部分" })
+	if n := len(calls()); n < 2 {
+		t.Fatalf("quick calls=%d", n)
 	}
 }

@@ -243,6 +243,7 @@ const (
 	MsgTriageMoreTasks           MsgKey = "triage_more_tasks"
 	MsgTriageSeeCards            MsgKey = "triage_see_cards"
 	MsgTriageQueued              MsgKey = "triage_queued"
+	MsgTaskStill                 MsgKey = "task_still"
 	MsgPreviewFooter             MsgKey = "preview_footer"
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
@@ -815,6 +816,7 @@ var messages = map[MsgKey]map[Language]string{
 	MsgPreviewMoved:          {LangEnglish: "↓ Moved below", LangChinese: "↓ 已移到下方", LangTraditionalChinese: "↓ 已移到下方", LangJapanese: "↓ 下に移動しました", LangSpanish: "↓ Movido abajo"},
 
 	MsgTaskUntitled:     {LangEnglish: "Background task", LangChinese: "后台任务", LangTraditionalChinese: "背景任務", LangJapanese: "バックグラウンドタスク", LangSpanish: "Tarea en segundo plano"},
+	MsgTaskStill:        {LangEnglish: "Still on: %s", LangChinese: "仍在进行：%s", LangTraditionalChinese: "仍在進行：%s", LangJapanese: "引き続き実行中：%s", LangSpanish: "Sigue en curso: %s"},
 	MsgTaskWorking:      {LangEnglish: "Working", LangChinese: "进行中", LangTraditionalChinese: "進行中", LangJapanese: "実行中", LangSpanish: "En curso"},
 	MsgTaskElapsed:      {LangEnglish: "Running for %d min", LangChinese: "已跑 %d 分钟", LangTraditionalChinese: "已跑 %d 分鐘", LangJapanese: "実行 %d 分", LangSpanish: "En marcha desde hace %d min"},
 	MsgTaskElapsedShort: {LangEnglish: "Running for under a minute", LangChinese: "已跑不到 1 分钟", LangTraditionalChinese: "已跑不到 1 分鐘", LangJapanese: "実行 1 分未満", LangSpanish: "En marcha desde hace menos de un minuto"},

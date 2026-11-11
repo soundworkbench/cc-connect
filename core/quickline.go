@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // QuickLineCfg configures the one-sentence acknowledgement a fast model writes
@@ -189,9 +190,31 @@ func fetchQuickText(ctx context.Context, cfg QuickLineCfg, system string, messag
 		if line == "" {
 			return "", fmt.Errorf("empty text block")
 		}
-		return clipQuickLine(line), nil
+		return clipQuickLine(collapseRepeat(line)), nil
 	}
 	return "", fmt.Errorf("no text block")
+}
+
+// collapseRepeat keeps one copy of a sentence the model wrote more than once
+// in a row ("正在搜索会议正在搜索会议", "正在搜索会议。 正在搜索会议。").
+func collapseRepeat(line string) string {
+	r := []rune(line)
+	for p := 1; p <= len(r)/2; p++ {
+		unit := strings.TrimSpace(string(r[:p]))
+		if unit == "" || utf8.RuneCountInString(unit) < 4 {
+			continue
+		}
+		rest := line
+		n := 0
+		for strings.HasPrefix(rest, unit) {
+			rest = strings.TrimLeft(strings.TrimPrefix(rest, unit), " ，,；;")
+			n++
+		}
+		if rest == "" && n > 1 {
+			return unit
+		}
+	}
+	return line
 }
 
 // clipQuickLine keeps the sentence to one card line. A longer reply is cut at the
