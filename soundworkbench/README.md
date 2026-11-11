@@ -146,7 +146,9 @@ WebSocket 真正连上后，按项目已有会话记录（包括多工作区记�
   - `"multi": true`：可以多选。卡片改成下拉多选框，下面一个“提交”按钮；没有推荐项和截止时间。回到会话的消息把选中的项按原顺序用“、”连起来，例如“【决定】周报包含哪些部分？：进展、计划”。
   - 选项超过 6 个时，单选也自动改成下拉框加“提交”按钮；最多 20 个选项。没选就提交时，飞书前端先拦下；绕过时只弹提示“请先选择”，卡片不变。
   - 下拉和提交按钮用通用的表单元素 `core.CardForm` 渲染；提交时飞书回调带 `form_value`，桥把它以 JSON 接在动作后面（`act:/decision-form <id> {"choice":[...]}`）。
-- 卡片归属（飞书）：卡片按钮带着它所属的会话（`session_key`）。按人分的会话（`feishu:<群>:<用户>`）里，别人点了这张卡，只给点的人弹一个提示“这个按钮是给 <名字> 的”，卡片不变，按钮也不生效；名字 1.5 秒内查不到就写“这个按钮不是给你的”（查询会在后台完成并缓存，下一次就有名字）。整群共用一个会话（`share_session_in_channel`）或按话题分的会话没有单一归属，照旧谁点都算。不在 `allow_from` 里、又不属于上面情况的点击，仍然静默忽略：同一个应用可能挂着多个项目，它们轮流处理回调，提前回提示会挡住真正负责的项目。日志记 `card: button_not_owner`。
+- 卡片归属（飞书）：卡片按钮带着它所属的会话（`session_key`）。按人分的会话（`feishu:<群>:<用户>`）里，别人点了这张卡，只给点的人弹一个提示“这个按钮是给 <名字> 的”，卡片不变，按钮也不生效；名字 1.5 秒内查不到就写“这个按钮不是给你的”（查询会在后台完成并缓存，下一次就有名字）。整群共用一个会话（`share_session_in_channel`）或按话题分的会话没有单一归属，照旧谁点都算。不在 `allow_from` 里、又不属于上面情况的点击，不回提示：同一个应用可能挂着多个项目，它们轮流处理回调，提前回提示会挡住真正负责的项目。日志记 `card: button_not_owner`。
+- 没处理的点击都记一行 INFO：飞书侧 `card: callback_dropped`，原因 `reason` 为 `empty_event`、`chat_not_allowed`、`user_not_allowed`、`no_action`（回调里没有按钮的 value，带按钮 tag、name 和表单字段数）、`no_card_update`、`no_handler`、`unknown_action`；核心侧 `card: decision_dropped`、`decision_form_dropped`、`form_dropped`，原因如 `unknown_decision`、`unknown_form`、`form_values_unreadable`。日志里只有动作名，不记表单填的内容。
+- 表单卡是飞书 JSON 1.0 卡片，提交按钮用 `"action_type": "form_submit"` 绑定提交（`form_action_type` 是 JSON 2.0 的写法，1.0 卡片里不生效，按钮点了不提交）。下拉、多选和 `send --form` 的表单都靠它提交。
 - 表单（`core/form.go`，需开 `[decision]`）：`cc-connect send --form form.json` 发一张表单卡，一次收齐几个参数。提交后卡片改成“✅ 已提交：标题”并列出填的内容，不能再提交；填的内容作为一条消息回到会话，与决定卡片一样落盘、重启后照常送达。没有截止时间。JSON：
 
   ```json

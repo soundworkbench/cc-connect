@@ -487,12 +487,12 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 			"vertical_align": "center",
 			"elements": []map[string]any{
 				{
-					"tag":              "button",
-					"text":             plainText(submitText),
-					"type":             "danger",
-					"name":             "delete_mode_submit",
-					"form_action_type": "submit",
-					"value":            map[string]string{"action": "act:/delete-mode form-submit"},
+					"tag":         "button",
+					"text":        plainText(submitText),
+					"type":        "danger",
+					"name":        "delete_mode_submit",
+					"action_type": "form_submit", // JSON 1.0 card
+					"value":       map[string]string{"action": "act:/delete-mode form-submit"},
 				},
 			},
 		},

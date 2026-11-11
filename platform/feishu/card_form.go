@@ -10,9 +10,12 @@ func renderConfirm(c *core.CardConfirm) map[string]any {
 	return map[string]any{"title": plainText(c.Title), "text": plainText(c.Text)}
 }
 
-// renderForm renders a core.CardForm as a form container. Each field and the
-// submit button carry a name, as Feishu requires; the submit callback brings
-// the values in form_value, keyed by field name (see onCardAction).
+// renderForm renders a core.CardForm as a form container of a JSON 1.0 card.
+// Each field and the submit button carry a name, as Feishu requires. In 1.0
+// the submit button is bound with action_type "form_submit" (form_action_type
+// is the JSON 2.0 key and a 1.0 card ignores it, so the button would never
+// submit). The callback brings the button's value plus the fields in
+// form_value, keyed by field name (see onCardAction).
 func renderForm(f core.CardForm, sessionKey string) map[string]any {
 	var els []map[string]any
 	for _, field := range f.Fields {
@@ -50,12 +53,12 @@ func renderForm(f core.CardForm, sessionKey string) map[string]any {
 		submitType = "primary"
 	}
 	submit := map[string]any{
-		"tag":              "button",
-		"text":             plainText(f.SubmitText),
-		"type":             submitType,
-		"name":             f.Name + "_submit",
-		"form_action_type": "submit",
-		"value":            value,
+		"tag":         "button",
+		"text":        plainText(f.SubmitText),
+		"type":        submitType,
+		"name":        f.Name + "_submit",
+		"action_type": "form_submit",
+		"value":       value,
 	}
 	if c := renderConfirm(f.Confirm); c != nil {
 		submit["confirm"] = c

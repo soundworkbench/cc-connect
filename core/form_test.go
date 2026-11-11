@@ -1,6 +1,8 @@
 package core
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -75,6 +77,27 @@ func TestFormRequestValidation(t *testing.T) {
 		mod(&req)
 		if _, err := e.SendFormCard(req); err == nil {
 			t.Errorf("%s: want error", name)
+		}
+	}
+}
+
+func TestUnusableFormSubmitsAreLoggedWithAReason(t *testing.T) {
+	e, _, _, _ := newDecisionEngine(t, t.TempDir())
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+	for action, want := range map[string]string{
+		`act:/decision-form gone {"choice":"1"}`: `msg="card: decision_form_dropped" id=gone reason=unknown_decision`,
+		`act:/form-submit gone {"f1":"x"}`:       `msg="card: form_dropped" id=gone reason=unknown_form`,
+		`act:/decision gone 1`:                   `msg="card: decision_dropped" id=gone reason=unknown_decision`,
+	} {
+		buf.Reset()
+		if card := e.handleCardNav(action, decKey); card != nil {
+			t.Fatalf("%s: card=%#v", action, card)
+		}
+		if !strings.Contains(buf.String(), "level=INFO") || !strings.Contains(buf.String(), want) {
+			t.Fatalf("%s: log=%s", action, buf.String())
 		}
 	}
 }

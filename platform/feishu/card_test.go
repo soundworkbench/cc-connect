@@ -220,7 +220,7 @@ func TestRenderCardMap_DeleteModeUsesCheckerForm(t *testing.T) {
 	if !strings.Contains(s, `"name":"delete_mode_submit"`) || !strings.Contains(s, `"name":"delete_mode_cancel"`) {
 		t.Fatalf("expected button names inside form, got %s", s)
 	}
-	if !strings.Contains(s, `"form_action_type":"submit"`) || !strings.Contains(s, `act:/delete-mode form-submit`) {
+	if !strings.Contains(s, `"action_type":"form_submit"`) || strings.Contains(s, `form_action_type`) || !strings.Contains(s, `act:/delete-mode form-submit`) {
 		t.Fatalf("expected form submit action, got %s", s)
 	}
 	if strings.Contains(s, `act:/delete-mode toggle`) {

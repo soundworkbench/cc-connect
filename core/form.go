@@ -1,7 +1,6 @@
 package core
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -205,18 +204,19 @@ func (e *Engine) SendFormCard(req FormRequest) (string, error) {
 // handleFormSubmit handles "act:/form-submit <id> <values>".
 func (e *Engine) handleFormSubmit(args string) *Card {
 	if e.decisions == nil {
+		cardActionDropped("form", "", "decisions_disabled")
 		return nil
 	}
 	id, raw, _ := strings.Cut(strings.TrimSpace(args), " ")
 	d := e.decisions.Get(id)
 	if d == nil || d.Form == nil {
+		cardActionDropped("form", id, "unknown_form")
 		return nil
 	}
 	if d.State != decisionPending {
 		return formCard(d)
 	}
-	var values map[string]any
-	_ = json.Unmarshal([]byte(raw), &values)
+	values := parseFormValues("form", id, raw)
 	answers, ok := formAnswers(d.Form, values)
 	if !ok {
 		return &Card{Toast: "请把必填项填完"}
@@ -226,6 +226,7 @@ func (e *Engine) handleFormSubmit(args string) *Card {
 		if cur := e.decisions.Get(id); cur != nil {
 			return formCard(cur)
 		}
+		cardActionDropped("form", id, "unknown_form")
 		return nil
 	}
 	e.wakeDecisions()

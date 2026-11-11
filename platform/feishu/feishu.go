@@ -939,12 +939,14 @@ func (p *Platform) webhookHandler(w http.ResponseWriter, r *http.Request) {
 //   - cmd:/xxx   — legacy: dispatch as a user command (sends a new message)
 func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 	if event.Event == nil || event.Event.Action == nil {
+		p.cardDropped("empty_event")
 		return nil, nil
 	}
 
 	// Check allow_chat filter: skip card actions from chats this platform doesn't own.
 	if event.Event.Context != nil && event.Event.Context.OpenChatID != "" {
 		if !core.AllowList(p.allowChat, event.Event.Context.OpenChatID) {
+			p.cardDropped("chat_not_allowed", "chat", event.Event.Context.OpenChatID)
 			return nil, nil
 		}
 	}
@@ -1004,7 +1006,12 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	}
 
 	if userID == "" || !core.AllowList(p.allowFrom, userID) {
-		slog.Debug(p.tag()+": card action from unauthorized user", "user", userID)
+		p.cardDropped("user_not_allowed", "user", userID, "card", messageID)
+		return nil, nil
+	}
+	if actionVal == "" {
+		a := event.Event.Action
+		p.cardDropped("no_action", "card", messageID, "tag", a.Tag, "name", a.Name, "form_fields", len(a.FormValue))
 		return nil, nil
 	}
 
@@ -1067,11 +1074,11 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				}, nil
 			}
 		}
-		if strings.HasPrefix(actionVal, "act:") {
-			slog.Debug(p.tag()+": card action produced no card update", "action", actionVal)
-			return nil, nil
+		reason := "no_card_update"
+		if p.cardNavHandler == nil {
+			reason = "no_handler"
 		}
-		slog.Warn(p.tag()+": card nav returned nil, ignoring", "action", actionVal)
+		p.cardDropped(reason, "card", messageID, "action", cardActionForLog(actionVal))
 		return nil, nil
 	}
 
@@ -1086,6 +1093,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		case "perm:allow_all":
 			responseText = "allow all"
 		default:
+			p.cardDropped("unknown_action", "card", messageID, "action", cardActionForLog(actionVal))
 			return nil, nil
 		}
 
@@ -1183,9 +1191,26 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				}, nil
 			}
 		}
+		return nil, nil
 	}
 
+	p.cardDropped("unknown_action", "card", messageID, "action", cardActionForLog(actionVal))
 	return nil, nil
+}
+
+// cardDropped logs a card callback that is answered without doing anything,
+// with the reason, so a button that "does nothing" can be traced.
+func (p *Platform) cardDropped(reason string, args ...any) {
+	slog.Info("card: callback_dropped", append([]any{"platform", p.tag(), "reason", reason}, args...)...)
+}
+
+// cardActionForLog is the action without the form values that follow it:
+// those are what the user typed.
+func cardActionForLog(action string) string {
+	if i := strings.Index(action, " {"); i >= 0 {
+		return action[:i]
+	}
+	return action
 }
 
 func (p *Platform) addReaction(messageID string) string {

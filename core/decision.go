@@ -475,14 +475,17 @@ func (e *Engine) wakeDecisions() {
 // replaces the tapped one.
 func (e *Engine) handleDecisionTap(args string) *Card {
 	if e.decisions == nil {
+		cardActionDropped("decision", "", "decisions_disabled")
 		return nil
 	}
 	f := strings.Fields(args)
 	if len(f) != 2 {
+		cardActionDropped("decision", "", "bad_arguments")
 		return nil
 	}
 	idx, err := strconv.Atoi(f[1])
 	if err != nil {
+		cardActionDropped("decision", f[0], "bad_arguments")
 		return nil
 	}
 	if d, ok := e.decisions.Resolve(f[0], idx, decisionAnswered); ok {
@@ -492,18 +495,36 @@ func (e *Engine) handleDecisionTap(args string) *Card {
 	if d := e.decisions.Get(f[0]); d != nil {
 		return buildDecisionCard(d) // already answered or expired: show how it ended
 	}
+	cardActionDropped("decision", f[0], "unknown_decision")
 	return nil
+}
+
+// cardActionDropped logs a decision or form callback that changes nothing.
+func cardActionDropped(kind, id, reason string) {
+	slog.Info("card: "+kind+"_dropped", "id", id, "reason", reason)
+}
+
+// parseFormValues reads the form values a platform appends to a form submit.
+func parseFormValues(kind, id, raw string) map[string]any {
+	var values map[string]any
+	if raw == "" {
+		return nil // every field left empty
+	}
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		cardActionDropped(kind, id, "form_values_unreadable")
+	}
+	return values
 }
 
 // handleDecisionForm handles "act:/decision-form <id> <values>", the submit of
 // a decision's dropdown, and returns the card that replaces it.
 func (e *Engine) handleDecisionForm(args string) *Card {
 	if e.decisions == nil {
+		cardActionDropped("decision_form", "", "decisions_disabled")
 		return nil
 	}
 	id, raw, _ := strings.Cut(strings.TrimSpace(args), " ")
-	var values map[string]any
-	_ = json.Unmarshal([]byte(raw), &values)
+	values := parseFormValues("decision_form", id, raw)
 	var picks []int
 	seen := map[int]bool{}
 	add := func(v any) {
@@ -529,6 +550,7 @@ func (e *Engine) handleDecisionForm(args string) *Card {
 	}
 	d := e.decisions.Get(id)
 	if d == nil {
+		cardActionDropped("decision_form", id, "unknown_decision")
 		return nil
 	}
 	if d.State == decisionPending {
