@@ -2,12 +2,15 @@ package claudecode
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,6 +80,9 @@ func TestPermissionChannelHelperProcess(t *testing.T) {
 	}
 	switch mode {
 	case "background":
+		// Claude Code writes to stderr while it runs, so a SIGTERM exit comes
+		// with stderr text.
+		_, _ = os.Stderr.WriteString("claude: running\n")
 		helperLine(taskFrame("task_started", map[string]any{"description": "后台跑测试", "task_type": "local_agent", "is_backgrounded": true}))
 		helperLine(map[string]any{"type": "result", "subtype": "success", "is_error": false, "result": "已在后台开始", "session_id": "perm-channel", "user_message_uuid": first["uuid"]})
 		for range lines {
@@ -84,6 +90,9 @@ func TestPermissionChannelHelperProcess(t *testing.T) {
 		_ = os.WriteFile(os.Getenv("CC_PERM_CHANNEL_MARKER"), []byte("stdin closed while a task was running"), 0o644)
 		helperLine(toolResultFrame(streamClosedToolResult))
 		time.Sleep(30 * time.Second)
+	case "crash":
+		_, _ = os.Stderr.WriteString("claude: fatal error\n")
+		os.Exit(3)
 	case "lost":
 		helperLine(map[string]any{"type": "assistant", "session_id": "perm-channel", "message": map[string]any{"role": "assistant", "content": []any{
 			map[string]any{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": map[string]any{"command": "ls"}},
@@ -239,5 +248,85 @@ func TestPermissionChannelFailure_DuringCloseIsExpected(t *testing.T) {
 	}
 	if isPermissionChannelFailure("Exit code 1\nls: cannot access") {
 		t.Fatal("an ordinary tool error is not a permission channel failure")
+	}
+}
+
+type lockedLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *lockedLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *lockedLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+func captureLog(t *testing.T) *lockedLog {
+	t.Helper()
+	l := &lockedLog{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(l, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return l
+}
+
+// A stop cc-connect asked for (/stop, /new, a wait at its limit) ends the
+// process with SIGTERM; that is logged as requested, not as a failure.
+func TestClose_RequestedStopIsNotAFailure(t *testing.T) {
+	cs := permChannelSession(t, "background", filepath.Join(t.TempDir(), "stdin-eof"))
+	if err := cs.Send("开始", "m1", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(5 * time.Second)
+	for done := false; !done; {
+		select {
+		case ev := <-cs.Events():
+			done = ev.Type == core.EventResult && ev.Done
+		case <-deadline:
+			t.Fatal("turn result not received")
+		}
+	}
+	logs := captureLog(t)
+	if err := cs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	out := logs.String()
+	if strings.Contains(out, "process failed") || !strings.Contains(out, "stopped as requested") {
+		t.Fatalf("requested stop logged as a failure:\n%s", out)
+	}
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "running_tasks=1") {
+		t.Fatalf("stopping a running background task must warn with its count:\n%s", out)
+	}
+}
+
+func TestProcessExitNotRequested_IsLoggedAsFailure(t *testing.T) {
+	logs := captureLog(t)
+	cs := permChannelSession(t, "crash", "")
+	if err := cs.Send("开始", "m1", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(5 * time.Second)
+	gotErr := false
+	for open := true; open; {
+		select {
+		case ev, ok := <-cs.Events():
+			if !ok {
+				open = false
+				break
+			}
+			gotErr = gotErr || ev.Type == core.EventError
+		case <-deadline:
+			t.Fatal("events did not close after the crash")
+		}
+	}
+	if !gotErr || !strings.Contains(logs.String(), "level=ERROR") || !strings.Contains(logs.String(), "process failed") {
+		t.Fatalf("an exit cc-connect did not ask for must stay an error (event=%v):\n%s", gotErr, logs.String())
 	}
 }

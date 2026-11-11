@@ -124,3 +124,30 @@ func TestProcessInteractiveEvents_LostPermissionChannelResumesOnce(t *testing.T)
 		})
 	}
 }
+
+// countingBgSession is busy (a turn in flight) and reports how many tasks run.
+type countingBgSession struct {
+	*bgWorkSession
+	tasks int
+}
+
+func (s *countingBgSession) RunningTasks() int { return s.tasks }
+
+// /stop during a turn with no background task must not warn about background
+// work; only tasks that are really running do.
+func TestCloseAgentSession_WarnsOnlyWithRunningTasks(t *testing.T) {
+	for _, tc := range []struct {
+		tasks int
+		warn  bool
+	}{{0, false}, {2, true}} {
+		buf, restore := captureSlog(t)
+		e := NewEngine("test", &stubAgent{}, []Platform{&stubPlatformEngine{n: "test"}}, "", LangEnglish)
+		as := &countingBgSession{bgWorkSession: newBgWorkSession("stop"), tasks: tc.tasks}
+		e.closeAgentSession("test:stop", as, nil, nil)
+		restore()
+		_ = e.Stop()
+		if got := strings.Contains(buf.String(), "background work is still running"); got != tc.warn {
+			t.Fatalf("running_tasks=%d: warned=%v, want %v (log %q)", tc.tasks, got, tc.warn, buf.String())
+		}
+	}
+}

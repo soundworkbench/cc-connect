@@ -637,7 +637,11 @@ func (cs *claudeSession) finishReadLoop(waitErrCh <-chan error, stderrBuf *bytes
 		if stderrBuf != nil {
 			stderrMsg = strings.TrimSpace(stderrBuf.String())
 		}
-		if stderrMsg != "" {
+		if cs.closing.Load() {
+			// Close asked the process to stop (/stop, /new, a wait that hit
+			// its limit); a SIGTERM exit is the expected outcome, not a failure.
+			slog.Info("claudeSession: stopped as requested", "exit", err)
+		} else if stderrMsg != "" {
 			slog.Error("claudeSession: process failed", "error", err, "stderr", stderrMsg)
 			evt := core.Event{Type: core.EventError, Error: fmt.Errorf("%s", stderrMsg)}
 			select {
@@ -2004,8 +2008,12 @@ func (cs *claudeSession) Close() error {
 	// closed", until the process is killed. Stop such a process with stdin
 	// still open; the pipe closes with it.
 	if cs.inputFailure.Load() == nil && cs.alive.Load() && cs.busy() {
-		slog.Warn("claudeSession: stopping busy process without stdin EOF",
-			"session", cs.CurrentSessionID(), "running_tasks", cs.liveTaskCount.Load())
+		if n := cs.liveTaskCount.Load(); n > 0 {
+			slog.Warn("claudeSession: stopping process with background tasks still running",
+				"session", cs.CurrentSessionID(), "running_tasks", n)
+		} else {
+			slog.Info("claudeSession: stopping busy process without stdin EOF", "session", cs.CurrentSessionID())
+		}
 		defer cs.closeStdin()
 		return cs.terminate()
 	}

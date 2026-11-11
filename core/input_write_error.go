@@ -41,6 +41,24 @@ type BackgroundWorkReporter interface {
 	HasBackgroundWork() bool
 }
 
+// RunningTasksReporter is implemented by agent sessions that can count the
+// tasks still running, as opposed to a turn merely being in flight.
+type RunningTasksReporter interface {
+	RunningTasks() int
+}
+
+// runningTasks counts the tasks still running in as; an agent that cannot
+// count them but reports background work counts as one.
+func runningTasks(as AgentSession) int {
+	if r, ok := as.(RunningTasksReporter); ok {
+		return r.RunningTasks()
+	}
+	if hasBackgroundWork(as) {
+		return 1
+	}
+	return 0
+}
+
 func hasBackgroundWork(as AgentSession) bool {
 	r, ok := as.(BackgroundWorkReporter)
 	return ok && r.HasBackgroundWork()

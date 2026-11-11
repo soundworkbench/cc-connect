@@ -135,6 +135,9 @@ func (cs *claudeSession) trackTask(ev *core.TaskEvent) {
 	}
 }
 
+// RunningTasks implements core.RunningTasksReporter.
+func (cs *claudeSession) RunningTasks() int { return int(cs.liveTaskCount.Load()) }
+
 // taskSettleGrace is how long after its last task ended the CLI may still
 // start the turn that reports the result. It does so within milliseconds;
 // silence this long means no such turn is coming.

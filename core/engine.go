@@ -4395,10 +4395,10 @@ func (e *Engine) closeAgentSession(sessionKey string, agentSession AgentSession,
 	if agentSession == nil {
 		return
 	}
-	if hasBackgroundWork(agentSession) {
+	if n := runningTasks(agentSession); n > 0 {
 		// Only an explicit stop, reset or switch, or a background-work wait
-		// that reached its limit, gets here with work still running.
-		slog.Warn("closing agent session while background work is still running", "session", sessionKey)
+		// that reached its limit, gets here with tasks still running.
+		slog.Warn("closing agent session while background work is still running", "session", sessionKey, "running_tasks", n)
 	}
 	// Its background tasks die with the process; settle their cards now.
 	e.abandonTasks(agentSession)
