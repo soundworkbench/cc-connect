@@ -115,6 +115,46 @@ func (cs *claudeSession) markStoppedTask(ev *core.TaskEvent) {
 	}
 }
 
+// trackTask keeps liveTasks in step with the CLI's task lifecycle. Hidden
+// tasks (ambient, skip_transcript) are the CLI's own bookkeeping and do not
+// count as work the person is waiting for.
+func (cs *claudeSession) trackTask(ev *core.TaskEvent) {
+	switch ev.Kind {
+	case core.TaskStarted:
+		if ev.Hidden {
+			return
+		}
+		if _, loaded := cs.liveTasks.LoadOrStore(ev.TaskID, struct{}{}); !loaded {
+			cs.liveTaskCount.Add(1)
+		}
+	case core.TaskEnded:
+		if _, loaded := cs.liveTasks.LoadAndDelete(ev.TaskID); loaded {
+			cs.liveTaskCount.Add(-1)
+		}
+	}
+}
+
+// HasBackgroundWork implements core.BackgroundWorkReporter: a task the CLI
+// started is still running, so the process must stay up, with its stdin
+// open, until the task ends.
+func (cs *claudeSession) HasBackgroundWork() bool {
+	return cs.alive.Load() && cs.liveTaskCount.Load() > 0
+}
+
+// busy reports whether the CLI is working: a turn is in flight (ours or one
+// the CLI started itself) or a task is still running. Send holds inputMu
+// while it writes a turn, so a held lock counts as busy.
+func (cs *claudeSession) busy() bool {
+	if cs.liveTaskCount.Load() > 0 || cs.cliWorking.Load() {
+		return true
+	}
+	if !cs.inputMu.TryLock() {
+		return true
+	}
+	defer cs.inputMu.Unlock()
+	return cs.inputActive
+}
+
 var stopTaskSeq atomic.Int64
 
 // StopTask asks the CLI to stop one task (control request stop_task). The

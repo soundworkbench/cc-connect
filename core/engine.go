@@ -4189,6 +4189,16 @@ func (e *Engine) cleanupInteractiveStateForIdleToken(sessionKey string, expected
 		e.interactiveMu.Unlock()
 		return
 	}
+	if hasBackgroundWork(state.agentSession) {
+		// A subagent or background command is still running: the session is
+		// not idle. Look again after another idle period.
+		state.mu.Unlock()
+		e.interactiveMu.Unlock()
+		slog.Info("agent session idle timeout: background work still running, keeping session",
+			"session_key", sessionKey)
+		e.scheduleAgentSessionIdleClose(sessionKey, state)
+		return
+	}
 	agentSession = state.agentSession
 	state.agentSession = nil
 	state.agentSessionIdleCancel = nil
@@ -4836,33 +4846,67 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				autoApprove := state.approveAll
 				state.mu.Unlock()
 
-				result := PermissionResult{Behavior: "deny", Message: "denied: no active user turn"}
 				if autoApprove {
-					result = PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
-				}
-				reqID := event.RequestID
-				respondCtx := ctx // capture current unsolicited reader context
-				go func() {
-					// Run in a goroutine to keep reader iterations fast, but honour
-					// the reader's context so we don't call into a dead session after
-					// stopUnsolicitedReader cancels the context.
-					select {
-					case <-respondCtx.Done():
-						return
-					default:
-					}
-					if err := agentSession.RespondPermission(reqID, result); err != nil {
-						if respondCtx.Err() == nil {
-							slog.Error("unsolicited: failed to respond permission", "error", err)
+					result := PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
+					reqID := event.RequestID
+					respondCtx := ctx // capture current unsolicited reader context
+					go func() {
+						// Run in a goroutine to keep reader iterations fast, but honour
+						// the reader's context so we don't call into a dead session after
+						// stopUnsolicitedReader cancels the context.
+						select {
+						case <-respondCtx.Done():
+							return
+						default:
 						}
+						if err := agentSession.RespondPermission(reqID, result); err != nil {
+							if respondCtx.Err() == nil {
+								slog.Error("unsolicited: failed to respond permission", "error", err)
+							}
+						}
+					}()
+					continue
+				}
+
+				// A background task (or a turn the agent started after one)
+				// still belongs to the person's request: ask them with the same
+				// card as a foreground turn. Denying here stopped the task with
+				// "no active user turn" and left the person to say "continue".
+				slog.Info("permission request", "request_id", event.RequestID, "tool", event.ToolName, "unsolicited", true)
+				pending := &pendingPermission{
+					RequestID:    event.RequestID,
+					ToolName:     event.ToolName,
+					ToolInput:    event.ToolInputRaw,
+					InputPreview: event.ToolInput,
+					Resolved:     make(chan struct{}),
+				}
+				state.mu.Lock()
+				state.pending = pending
+				state.mu.Unlock()
+				permLimit := e.display.ToolMaxLen
+				if permLimit > 0 {
+					permLimit = permLimit * 8 / 5
+				}
+				toolInput := truncateIf(event.ToolInput, permLimit)
+				e.sendPermissionPrompt(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput), event.ToolName, toolInput)
+
+				select {
+				case <-pending.Resolved:
+					slog.Info("permission resolved", "request_id", event.RequestID, "unsolicited", true)
+				case <-ctx.Done():
+					// The session is being torn down while the card is open:
+					// drop the pending state and release the waiting agent.
+					state.mu.Lock()
+					if state.pending == pending {
+						state.pending = nil
 					}
-				}()
-				if !autoApprove {
-					toolName := event.ToolName
-					if toolName == "" {
-						toolName = "(unknown)"
-					}
-					e.send(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgBackgroundAutoDenied), toolName))
+					state.mu.Unlock()
+					pending.resolve()
+					_ = agentSession.RespondPermission(event.RequestID, PermissionResult{
+						Behavior: "deny", Message: "denied: the conversation was reset before the user answered",
+					})
+					flushPartial("cancelled")
+					return
 				}
 
 			case EventError:
@@ -5161,6 +5205,17 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 		state.mu.Lock()
 		p := state.platform
 		state.mu.Unlock()
+		if errors.Is(err, ErrPermissionChannelClosed) {
+			slog.Warn("agent lost its tool permission channel", "session_key", sessionKey, "agent_session", session.GetAgentSessionID())
+			if !automated && e.resumeAfterLostPermissionChannel(state, p) {
+				sp.discard()
+				e.send(p, replyCtx, e.i18n.T(MsgPermissionChannelRetrying))
+				return
+			}
+			terminalReply(p, e.i18n.T(MsgPermissionChannelLost), err, e.i18n.T(MsgPermissionChannelLost))
+			e.notifyDroppedQueuedMessages(state, err)
+			return
+		}
 		displayErr := err.Error()
 		var writeErr *InputWriteError
 		if errors.As(err, &writeErr) {
@@ -15794,6 +15849,12 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 				resp = "(empty response)"
 			}
 			slog.Info("relay: turn complete", "from", fromProject, "to", e.name, "response_len", len(resp))
+			if hasBackgroundWork(agentSession) {
+				// Tasks the turn started are still running; closing now would
+				// cut them off. Let them finish in the background.
+				go e.drainRelaySession(agentSession, session, sessions, agent.Name(), relaySessionKey)
+				return resp, nil
+			}
 			agentSession.Close()
 			return resp, nil
 		case EventError:
@@ -15878,6 +15939,9 @@ func (e *Engine) drainRelaySession(agentSession AgentSession, session *Session, 
 			}
 			switch ev.Type {
 			case EventResult:
+				if hasBackgroundWork(agentSession) {
+					continue
+				}
 				slog.Info("relay: background drain completed (agent finished turn)",
 					"relay_key", relaySessionKey)
 				agentSession.Close()

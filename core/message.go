@@ -412,6 +412,7 @@ type Message struct {
 	preflightSent     bool      // rotation confirmed its first Send on a prepared agent
 	historyPreseeded  bool      // local rotation persisted its first message before activation
 	scheduledPrompt   bool
+	channelRetry      bool   // automatic resend after the agent lost its tool permission channel
 	scheduledMute     bool   // suppress scheduler notices for this input only
 	scheduledInputID  string // scheduler occurrence ID, never a platform message ID
 	humanBatch        bool   // merged queue batch containing a person's message (see isHumanQueuedTurn)

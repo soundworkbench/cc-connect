@@ -351,6 +351,7 @@ func retryableInput(msg *Message) *Message {
 		LegacyChannelKey: msg.LegacyChannelKey,
 		ReplyCtx:         msg.ReplyCtx,
 		FromVoice:        msg.FromVoice,
+		channelRetry:     msg.channelRetry,
 	}
 }
 
@@ -472,6 +473,25 @@ func (e *Engine) failTurnPreview(state *interactiveState, sp *streamPreview, ses
 // retryFailedTurn handles the failure card's retry button: the original
 // request is admitted again, once. A button that no longer works (used,
 // expired, or from before a restart) answers with a notice.
+// resumeAfterLostPermissionChannel admits, once, a request to continue the
+// turn whose agent process lost its tool permission channel. The admission
+// starts a fresh process on the same agent session, so the agent resumes its
+// own transcript. It reports false when the turn was itself such a resend.
+func (e *Engine) resumeAfterLostPermissionChannel(state *interactiveState, p Platform) bool {
+	state.mu.Lock()
+	input := state.turnInput
+	state.mu.Unlock()
+	if input == nil || input.channelRetry || p == nil {
+		return false
+	}
+	msg := *input
+	msg.Content = e.i18n.T(MsgPermissionChannelResume)
+	msg.Images, msg.Files = nil, nil
+	msg.channelRetry = true
+	go e.ReceiveMessage(p, &msg)
+	return true
+}
+
 func (e *Engine) retryFailedTurn(token, sessionKey string) *Card {
 	t := e.failedTurns.take(strings.TrimSpace(token))
 	if t == nil {

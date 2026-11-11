@@ -14967,68 +14967,102 @@ func TestUnsolicitedReader_KeepsLiveSessionAfterTurnError(t *testing.T) {
 
 // TestUnsolicitedReader_PermissionDeny verifies that unsolicited permission
 // requests are denied when approveAll is false.
-func TestUnsolicitedReader_PermissionDeny(t *testing.T) {
+// A tool permission request outside a user turn (a background task still at
+// work after the turn's result) is shown to the person, not auto-denied with
+// "no active user turn".
+func TestUnsolicitedReader_PermissionAsksUser(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 	defer e.Stop()
 
-	// NOTE: constructed inline rather than copying a *controllableAgentSession,
-	// because that struct now carries an atomic.Bool (closeFinished) and must
-	// not be copied by value.
-	permRecorder := &permRecordingSession{
-		controllableAgentSession: controllableAgentSession{
-			sessionID: "unsol-perm",
-			alive:     true,
-			events:    make(chan Event, 8),
-			closed:    make(chan struct{}),
-		},
-	}
+	rec := &permRecordingSession{controllableAgentSession: *newControllableSession("unsol-perm")}
+	key := "test:perm:u1"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: rec, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Lock()
+	e.interactiveStates[key] = state
+	e.interactiveMu.Unlock()
+	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+	defer e.stopUnsolicitedReader(state)
 
-	sessions := e.sessions
-	session := sessions.GetOrCreateActive("test:perm:u1")
+	rec.events <- Event{Type: EventPermissionRequest, RequestID: "req-1", ToolName: "Bash", ToolInput: "ls", ToolInputRaw: map[string]any{"command": "ls"}}
 
-	state := &interactiveState{
-		agentSession:     permRecorder,
-		platform:         p,
-		replyCtx:         "ctx",
-		eventsNeedResync: false,
-		approveAll:       false,
-	}
-
-	e.startUnsolicitedReader(state, session, sessions, "test:perm:u1", "")
-
-	// Send a permission request.
-	permRecorder.events <- Event{
-		Type:      EventPermissionRequest,
-		RequestID: "req-1",
-		ToolName:  "Bash",
-	}
-
-	// Wait for the response.
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(3 * time.Second)
 	for {
-		permRecorder.mu.Lock()
-		calls := permRecorder.permCalls
-		permRecorder.mu.Unlock()
-		if calls > 0 {
+		_, pending := e.lookupPending(key)
+		if pending != nil {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for permission response")
+			t.Fatal("background permission request was not shown to the user")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-
-	permRecorder.mu.Lock()
-	result := permRecorder.lastPermResult
-	permRecorder.mu.Unlock()
-
-	if result.Behavior != "deny" {
-		t.Errorf("expected deny, got %q", result.Behavior)
+	for _, m := range p.getSent() {
+		if strings.Contains(m, "auto-denied") {
+			t.Fatalf("unexpected auto-deny notice: %q", m)
+		}
+	}
+	rec.mu.Lock()
+	calls := rec.permCalls
+	rec.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("permission answered before the user replied (%d calls)", calls)
 	}
 
-	e.stopUnsolicitedReader(state)
+	if !e.handlePendingPermission(p, &Message{SessionKey: key, UserID: "u1", Content: "allow", ReplyCtx: "ctx"}, "allow", key) {
+		t.Fatal("expected the reply to resolve the pending background permission")
+	}
+	deadline = time.After(3 * time.Second)
+	for {
+		rec.mu.Lock()
+		calls, res := rec.permCalls, rec.lastPermResult
+		rec.mu.Unlock()
+		if calls > 0 {
+			if res.Behavior != "allow" {
+				t.Fatalf("behavior = %q, want allow", res.Behavior)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for RespondPermission")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestUnsolicitedReader_PermissionApproveAllAllows(t *testing.T) {
+	p := &stubPlatformEngine{n: "test"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	rec := &permRecordingSession{controllableAgentSession: *newControllableSession("unsol-yolo")}
+	key := "test:perm:u2"
+	session := e.sessions.GetOrCreateActive(key)
+	state := &interactiveState{agentSession: rec, platform: p, replyCtx: "ctx", approveAll: true}
+	e.startUnsolicitedReader(state, session, e.sessions, key, "")
+	defer e.stopUnsolicitedReader(state)
+
+	rec.events <- Event{Type: EventPermissionRequest, RequestID: "req-1", ToolName: "Bash"}
+	deadline := time.After(3 * time.Second)
+	for {
+		rec.mu.Lock()
+		calls, res := rec.permCalls, rec.lastPermResult
+		rec.mu.Unlock()
+		if calls > 0 {
+			if res.Behavior != "allow" {
+				t.Fatalf("behavior = %q, want allow", res.Behavior)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for RespondPermission")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 func startUnsolicitedAskFixture(t *testing.T, key string) (*Engine, *stubCardPlatform, *permRecordingSession, *interactiveState) {

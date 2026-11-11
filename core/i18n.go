@@ -282,6 +282,9 @@ const (
 	MsgFinalDeliveryFailed       MsgKey = "final_delivery_failed"
 	MsgError                     MsgKey = "error"
 	MsgPromptNotDelivered        MsgKey = "prompt_not_delivered"
+	MsgPermissionChannelRetrying MsgKey = "permission_channel_retrying"
+	MsgPermissionChannelLost     MsgKey = "permission_channel_lost"
+	MsgPermissionChannelResume   MsgKey = "permission_channel_resume"
 	MsgAgentTurnFailed           MsgKey = "agent_turn_failed"
 	MsgAgentTurnInterrupted      MsgKey = "agent_turn_interrupted"
 	MsgSessionNotFound           MsgKey = "session_not_found"
@@ -1044,6 +1047,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "最終訊息傳送失敗，已保留進度資訊。",
 		LangJapanese:           "最終メッセージの送信に失敗しました。進捗を保持しました。",
 		LangSpanish:            "No se pudo enviar el mensaje final. Se conservó el progreso.",
+	},
+	MsgPermissionChannelRetrying: {
+		LangEnglish:            "The tool approval channel dropped. Reconnected; continuing where it stopped.",
+		LangChinese:            "工具审批通道断开了，已重新连接，正在从中断处继续。",
+		LangTraditionalChinese: "工具審批通道斷開了，已重新連線，正在從中斷處繼續。",
+		LangJapanese:           "ツール承認の通信が切れました。再接続し、中断したところから続けます。",
+		LangSpanish:            "Se cortó el canal de aprobación de herramientas. Reconectado; continúo donde se detuvo.",
+	},
+	MsgPermissionChannelLost: {
+		LangEnglish:            "The tool approval channel dropped again, so this step did not finish. Reply \"continue\" to try again.",
+		LangChinese:            "工具审批通道又断开了，这一步没有完成。回复“继续”即可重试。",
+		LangTraditionalChinese: "工具審批通道又斷開了，這一步沒有完成。回覆「繼續」即可重試。",
+		LangJapanese:           "ツール承認の通信がまた切れたため、この手順は完了していません。「続けて」と返信すると再試行します。",
+		LangSpanish:            "El canal de aprobación de herramientas se cortó de nuevo y este paso no terminó. Responde \"continuar\" para reintentarlo.",
+	},
+	MsgPermissionChannelResume: {
+		LangEnglish:            "(Automatic resume) The tool approval channel dropped and the session was restarted. Continue the previous request from where it stopped; tool calls that failed with \"Tool permission request failed\" did not run and must be redone.",
+		LangChinese:            "（自动续做）工具审批通道刚才断开，会话已重启。请从中断处继续完成上一条请求；报“Tool permission request failed”的工具调用没有执行，需要重做。",
+		LangTraditionalChinese: "（自動續做）工具審批通道剛才斷開，會話已重啟。請從中斷處繼續完成上一則請求；報「Tool permission request failed」的工具呼叫沒有執行，需要重做。",
+		LangJapanese:           "（自動再開）ツール承認の通信が切れたため、セッションを再起動しました。前の依頼を中断したところから続けてください。「Tool permission request failed」で失敗したツール呼び出しは実行されていないので、やり直してください。",
+		LangSpanish:            "(Reanudación automática) El canal de aprobación de herramientas se cortó y la sesión se reinició. Continúa la solicitud anterior desde donde se detuvo; las llamadas que fallaron con \"Tool permission request failed\" no se ejecutaron y deben repetirse.",
 	},
 	MsgPromptNotDelivered: {
 		LangEnglish:            "Your previous message was not delivered completely. The agent process was stopped and will restart for your next message. Please resend.",
