@@ -47,7 +47,8 @@ func (p *Platform) UpdateTaskCard(ctx context.Context, handle any, view core.Tas
 // taskCardJSON lays out a task card. Live: the title marking it a background
 // task, the current step with the spinner, the elapsed minutes, the latest
 // progress, a grey line saying the chat stays free, and the steps panel.
-// Ended: the outcome line, the summary and the steps panel. There is no stop
+// Ended: the outcome line, the summary and the steps panel, which also holds
+// the agent's original text when the card shows a shorter line. There is no stop
 // button: the person asks the agent to stop a task.
 func (p *Platform) taskCardJSON(v core.TaskCardView) string {
 	var els []map[string]any
@@ -82,12 +83,22 @@ func (p *Platform) taskCardJSON(v core.TaskCardView) string {
 			els = append(els, map[string]any{"tag": "markdown", "content": escapeCardText(v.Summary)})
 		}
 	}
+	var details []map[string]any
 	if len(v.Details) > 0 {
 		lines := make([]string, len(v.Details))
 		for i, d := range v.Details {
 			lines[i] = "· " + escapeCardText(d)
 		}
-		els = append(els, buildRichPanel(v.DetailsTitle, []map[string]any{{"tag": "markdown", "content": strings.Join(lines, "\n"), "text_size": "notation"}}))
+		details = append(details, map[string]any{"tag": "markdown", "content": strings.Join(lines, "\n"), "text_size": "notation"})
+	}
+	if v.Full != "" {
+		// Plain text: raw output and errors keep their characters as written.
+		details = append(details,
+			map[string]any{"tag": "markdown", "content": "**" + escapeCardText(v.FullTitle) + "**", "text_size": "notation"},
+			map[string]any{"tag": "div", "text": map[string]any{"tag": "plain_text", "content": v.Full, "text_size": "notation"}})
+	}
+	if len(details) > 0 {
+		els = append(els, buildRichPanel(v.DetailsTitle, details))
 	}
 	summary := v.Title
 	if !v.State.Live() {

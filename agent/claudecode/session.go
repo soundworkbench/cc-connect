@@ -29,6 +29,7 @@ import (
 // In "auto" mode, permission requests are auto-approved internally
 // (avoiding --dangerously-skip-permissions which fails under root).
 type claudeSession struct {
+	stoppingTasks   sync.Map // task IDs a stop was asked for (TaskStop tool, StopTask)
 	cmd             *exec.Cmd
 	stdin           io.WriteCloser
 	stdinMu         sync.Mutex
@@ -780,6 +781,7 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 		return
 	case "task_started", "task_progress", "task_updated", "task_notification":
 		if ev := parseTaskEvent(subtype, raw); ev != nil {
+			cs.markStoppedTask(ev)
 			cs.emit(core.Event{Type: core.EventTask, Task: ev})
 		}
 		return
@@ -1188,6 +1190,7 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 			if toolName == "AskUserQuestion" {
 				continue
 			}
+			cs.noteTaskStop(toolName, item["input"])
 			inputSummary := chineseToolProgress(toolName, item["input"], strVal(item, "title"))
 			meta := map[string]any{"public_tool_progress": inputSummary}
 			if label := stepToolLabel(toolName, item["input"]); label != "" {

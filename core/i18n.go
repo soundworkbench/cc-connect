@@ -244,6 +244,9 @@ const (
 	MsgTriageSeeCards            MsgKey = "triage_see_cards"
 	MsgTriageQueued              MsgKey = "triage_queued"
 	MsgTaskStill                 MsgKey = "task_still"
+	MsgTaskFailedExit            MsgKey = "task_failed_exit"
+	MsgTaskFailedGeneric         MsgKey = "task_failed_generic"
+	MsgTaskFullText              MsgKey = "task_full_text"
 	MsgPreviewFooter             MsgKey = "preview_footer"
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
@@ -815,23 +818,26 @@ var messages = map[MsgKey]map[Language]string{
 	MsgRetryExpired:          {LangEnglish: "This button no longer works. Please send your message again.", LangChinese: "这个按钮已失效，请重新发送消息", LangTraditionalChinese: "這個按鈕已失效，請重新傳送訊息", LangJapanese: "このボタンは無効です。メッセージをもう一度送信してください", LangSpanish: "Este botón ya no funciona. Vuelve a enviar el mensaje."},
 	MsgPreviewMoved:          {LangEnglish: "↓ Moved below", LangChinese: "↓ 已移到下方", LangTraditionalChinese: "↓ 已移到下方", LangJapanese: "↓ 下に移動しました", LangSpanish: "↓ Movido abajo"},
 
-	MsgTaskUntitled:     {LangEnglish: "Background task", LangChinese: "后台任务", LangTraditionalChinese: "背景任務", LangJapanese: "バックグラウンドタスク", LangSpanish: "Tarea en segundo plano"},
-	MsgTaskStill:        {LangEnglish: "Still on: %s", LangChinese: "仍在进行：%s", LangTraditionalChinese: "仍在進行：%s", LangJapanese: "引き続き実行中：%s", LangSpanish: "Sigue en curso: %s"},
-	MsgTaskWorking:      {LangEnglish: "Working", LangChinese: "进行中", LangTraditionalChinese: "進行中", LangJapanese: "実行中", LangSpanish: "En curso"},
-	MsgTaskElapsed:      {LangEnglish: "Running for %d min", LangChinese: "已跑 %d 分钟", LangTraditionalChinese: "已跑 %d 分鐘", LangJapanese: "実行 %d 分", LangSpanish: "En marcha desde hace %d min"},
-	MsgTaskElapsedShort: {LangEnglish: "Running for under a minute", LangChinese: "已跑不到 1 分钟", LangTraditionalChinese: "已跑不到 1 分鐘", LangJapanese: "実行 1 分未満", LangSpanish: "En marcha desde hace menos de un minuto"},
-	MsgTaskRecent:       {LangEnglish: "Latest: %s", LangChinese: "最近进展：%s", LangTraditionalChinese: "最近進展：%s", LangJapanese: "最新の進捗：%s", LangSpanish: "Último avance: %s"},
-	MsgTaskDetails:      {LangEnglish: "Details", LangChinese: "详情", LangTraditionalChinese: "詳情", LangJapanese: "詳細", LangSpanish: "Detalles"},
-	MsgTaskCompleted:    {LangEnglish: "Background task · ✓ Done: %s", LangChinese: "后台任务 · ✓ 已完成：%s", LangTraditionalChinese: "背景任務 · ✓ 已完成：%s", LangJapanese: "バックグラウンドタスク · ✓ 完了：%s", LangSpanish: "Tarea en segundo plano · ✓ Lista: %s"},
-	MsgTaskFailed:       {LangEnglish: "Background task · Didn't go through: %s", LangChinese: "后台任务 · 没做成：%s", LangTraditionalChinese: "背景任務 · 沒做成：%s", LangJapanese: "バックグラウンドタスク · 完了できませんでした：%s", LangSpanish: "Tarea en segundo plano · No se completó: %s"},
-	MsgTaskStopped:      {LangEnglish: "Background task · Stopped: %s", LangChinese: "后台任务 · 已停止：%s", LangTraditionalChinese: "背景任務 · 已停止：%s", LangJapanese: "バックグラウンドタスク · 停止しました：%s", LangSpanish: "Tarea en segundo plano · Detenida: %s"},
-	MsgTaskInterrupted:  {LangEnglish: "Background task · Interrupted: %s", LangChinese: "后台任务 · 已中断：%s", LangTraditionalChinese: "背景任務 · 已中斷：%s", LangJapanese: "バックグラウンドタスク · 中断されました：%s", LangSpanish: "Tarea en segundo plano · Interrumpida: %s"},
-	MsgTaskRunningTitle: {LangEnglish: "Background task · Running: %s", LangChinese: "后台任务 · 正在进行：%s", LangTraditionalChinese: "背景任務 · 正在進行：%s", LangJapanese: "バックグラウンドタスク · 実行中：%s", LangSpanish: "Tarea en segundo plano · En curso: %s"},
-	MsgTaskHint:         {LangEnglish: "Running in the background, so the chat stays free: keep talking to me, and I'll tell you when it's done. To stop it, just tell me.", LangChinese: "在后台进行，不影响聊天，你可以接着跟我说话；做完我会告诉你。要停的话直接跟我说。", LangTraditionalChinese: "在背景進行，不影響聊天，你可以接著跟我說話；做完我會告訴你。要停的話直接跟我說。", LangJapanese: "バックグラウンドで実行中なので、チャットはそのまま続けられます。終わったらお知らせします。止めたいときはそう言ってください。", LangSpanish: "Se ejecuta en segundo plano, así que puedes seguir hablando conmigo; te aviso cuando termine. Si quieres detenerla, dímelo."},
-	MsgTriageTask:       {LangEnglish: "Background task \"%s\" is still running (%s), now on: %s.", LangChinese: "后台任务「%s」还在进行（%s），现在在：%s。", LangTraditionalChinese: "背景任務「%s」還在進行（%s），現在在：%s。", LangJapanese: "バックグラウンドタスク「%s」は実行中です（%s）。現在：%s。", LangSpanish: "La tarea en segundo plano «%s» sigue en curso (%s), ahora: %s."},
-	MsgTriageMoreTasks:  {LangEnglish: "%d more background tasks are running.", LangChinese: "另外还有 %d 个后台任务在跑。", LangTraditionalChinese: "另外還有 %d 個背景任務在跑。", LangJapanese: "ほかに %d 件のバックグラウンドタスクが実行中です。", LangSpanish: "Hay %d tareas más en segundo plano."},
-	MsgTriageSeeCards:   {LangEnglish: "Its card above shows the progress; I'll tell you when it's done.", LangChinese: "进展看上面的任务卡，做完我会告诉你。", LangTraditionalChinese: "進展看上面的任務卡，做完我會告訴你。", LangJapanese: "進捗は上のタスクカードで確認できます。終わったらお知らせします。", LangSpanish: "El avance está en su tarjeta de arriba; te aviso cuando termine."},
-	MsgTriageQueued:     {LangEnglish: "%d more messages are waiting; I'll take them in order.", LangChinese: "还有 %d 条消息排着队，我会按顺序处理。", LangTraditionalChinese: "還有 %d 條訊息排著隊，我會按順序處理。", LangJapanese: "ほかに %d 件のメッセージが待っています。順番に対応します。", LangSpanish: "Hay %d mensajes más en espera; los atenderé en orden."},
+	MsgTaskUntitled:      {LangEnglish: "Background task", LangChinese: "后台任务", LangTraditionalChinese: "背景任務", LangJapanese: "バックグラウンドタスク", LangSpanish: "Tarea en segundo plano"},
+	MsgTaskStill:         {LangEnglish: "Still on: %s", LangChinese: "仍在进行：%s", LangTraditionalChinese: "仍在進行：%s", LangJapanese: "引き続き実行中：%s", LangSpanish: "Sigue en curso: %s"},
+	MsgTaskFailedExit:    {LangEnglish: "The command ended with an error (exit code %s). The original message is under Details.", LangChinese: "命令出错结束（退出码 %s），原始信息在“详情”里。", LangTraditionalChinese: "命令出錯結束（退出碼 %s），原始訊息在「詳情」裡。", LangJapanese: "コマンドがエラーで終了しました（終了コード %s）。元のメッセージは「詳細」にあります。", LangSpanish: "El comando terminó con un error (código de salida %s). El mensaje original está en Detalles."},
+	MsgTaskFailedGeneric: {LangEnglish: "It ended with an error. The original message is under Details.", LangChinese: "出错结束，原始信息在“详情”里。", LangTraditionalChinese: "出錯結束，原始訊息在「詳情」裡。", LangJapanese: "エラーで終了しました。元のメッセージは「詳細」にあります。", LangSpanish: "Terminó con un error. El mensaje original está en Detalles."},
+	MsgTaskFullText:      {LangEnglish: "Original text", LangChinese: "原文", LangTraditionalChinese: "原文", LangJapanese: "原文", LangSpanish: "Texto original"},
+	MsgTaskWorking:       {LangEnglish: "Working", LangChinese: "进行中", LangTraditionalChinese: "進行中", LangJapanese: "実行中", LangSpanish: "En curso"},
+	MsgTaskElapsed:       {LangEnglish: "Running for %d min", LangChinese: "已跑 %d 分钟", LangTraditionalChinese: "已跑 %d 分鐘", LangJapanese: "実行 %d 分", LangSpanish: "En marcha desde hace %d min"},
+	MsgTaskElapsedShort:  {LangEnglish: "Running for under a minute", LangChinese: "已跑不到 1 分钟", LangTraditionalChinese: "已跑不到 1 分鐘", LangJapanese: "実行 1 分未満", LangSpanish: "En marcha desde hace menos de un minuto"},
+	MsgTaskRecent:        {LangEnglish: "Latest: %s", LangChinese: "最近进展：%s", LangTraditionalChinese: "最近進展：%s", LangJapanese: "最新の進捗：%s", LangSpanish: "Último avance: %s"},
+	MsgTaskDetails:       {LangEnglish: "Details", LangChinese: "详情", LangTraditionalChinese: "詳情", LangJapanese: "詳細", LangSpanish: "Detalles"},
+	MsgTaskCompleted:     {LangEnglish: "Background task · ✓ Done: %s", LangChinese: "后台任务 · ✓ 已完成：%s", LangTraditionalChinese: "背景任務 · ✓ 已完成：%s", LangJapanese: "バックグラウンドタスク · ✓ 完了：%s", LangSpanish: "Tarea en segundo plano · ✓ Lista: %s"},
+	MsgTaskFailed:        {LangEnglish: "Background task · Didn't go through: %s", LangChinese: "后台任务 · 没做成：%s", LangTraditionalChinese: "背景任務 · 沒做成：%s", LangJapanese: "バックグラウンドタスク · 完了できませんでした：%s", LangSpanish: "Tarea en segundo plano · No se completó: %s"},
+	MsgTaskStopped:       {LangEnglish: "Background task · Stopped: %s", LangChinese: "后台任务 · 已停止：%s", LangTraditionalChinese: "背景任務 · 已停止：%s", LangJapanese: "バックグラウンドタスク · 停止しました：%s", LangSpanish: "Tarea en segundo plano · Detenida: %s"},
+	MsgTaskInterrupted:   {LangEnglish: "Background task · Interrupted: %s", LangChinese: "后台任务 · 已中断：%s", LangTraditionalChinese: "背景任務 · 已中斷：%s", LangJapanese: "バックグラウンドタスク · 中断されました：%s", LangSpanish: "Tarea en segundo plano · Interrumpida: %s"},
+	MsgTaskRunningTitle:  {LangEnglish: "Background task · Running: %s", LangChinese: "后台任务 · 正在进行：%s", LangTraditionalChinese: "背景任務 · 正在進行：%s", LangJapanese: "バックグラウンドタスク · 実行中：%s", LangSpanish: "Tarea en segundo plano · En curso: %s"},
+	MsgTaskHint:          {LangEnglish: "Running in the background, so the chat stays free: keep talking to me, and I'll tell you when it's done. To stop it, just tell me.", LangChinese: "在后台进行，不影响聊天，你可以接着跟我说话；做完我会告诉你。要停的话直接跟我说。", LangTraditionalChinese: "在背景進行，不影響聊天，你可以接著跟我說話；做完我會告訴你。要停的話直接跟我說。", LangJapanese: "バックグラウンドで実行中なので、チャットはそのまま続けられます。終わったらお知らせします。止めたいときはそう言ってください。", LangSpanish: "Se ejecuta en segundo plano, así que puedes seguir hablando conmigo; te aviso cuando termine. Si quieres detenerla, dímelo."},
+	MsgTriageTask:        {LangEnglish: "Background task \"%s\" is still running (%s), now on: %s.", LangChinese: "后台任务「%s」还在进行（%s），现在在：%s。", LangTraditionalChinese: "背景任務「%s」還在進行（%s），現在在：%s。", LangJapanese: "バックグラウンドタスク「%s」は実行中です（%s）。現在：%s。", LangSpanish: "La tarea en segundo plano «%s» sigue en curso (%s), ahora: %s."},
+	MsgTriageMoreTasks:   {LangEnglish: "%d more background tasks are running.", LangChinese: "另外还有 %d 个后台任务在跑。", LangTraditionalChinese: "另外還有 %d 個背景任務在跑。", LangJapanese: "ほかに %d 件のバックグラウンドタスクが実行中です。", LangSpanish: "Hay %d tareas más en segundo plano."},
+	MsgTriageSeeCards:    {LangEnglish: "Its card above shows the progress; I'll tell you when it's done.", LangChinese: "进展看上面的任务卡，做完我会告诉你。", LangTraditionalChinese: "進展看上面的任務卡，做完我會告訴你。", LangJapanese: "進捗は上のタスクカードで確認できます。終わったらお知らせします。", LangSpanish: "El avance está en su tarjeta de arriba; te aviso cuando termine."},
+	MsgTriageQueued:      {LangEnglish: "%d more messages are waiting; I'll take them in order.", LangChinese: "还有 %d 条消息排着队，我会按顺序处理。", LangTraditionalChinese: "還有 %d 條訊息排著隊，我會按順序處理。", LangJapanese: "ほかに %d 件のメッセージが待っています。順番に対応します。", LangSpanish: "Hay %d mensajes más en espera; los atenderé en orden."},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",

@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -63,5 +64,36 @@ func TestTaskCardLiveAndSettled(t *testing.T) {
 	}
 	if len(store.entries) != 0 {
 		t.Fatalf("settled card still recorded: %+v", store.entries)
+	}
+}
+
+// A failed card shows one Chinese line; the raw error sits in the details
+// panel as plain text.
+func TestFailedTaskCardKeepsTheRawErrorInDetails(t *testing.T) {
+	_, p := newPreviewFixture(t)
+	raw := "Background command \"清理\" failed with exit code 1\n<stderr> rm: /tmp/x: denied"
+	text := plainJSON(parsePreviewJSON(t, p.taskCardJSON(core.TaskCardView{
+		State: core.TaskCardFailed, Status: "后台任务 · 没做成：清理", Summary: "命令出错结束（退出码 1），原始信息在“详情”里。",
+		DetailsTitle: "详情", Details: []string{"运行命令"}, FullTitle: "原文", Full: raw,
+	})))
+	if !strings.Contains(text, "<font color='red'>后台任务 · 没做成：清理</font>") || !strings.Contains(text, "命令出错结束（退出码 1）") {
+		t.Fatalf("failed card: %s", text)
+	}
+	var card struct {
+		Body struct {
+			Elements []map[string]any `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(text), &card); err != nil {
+		t.Fatal(err)
+	}
+	for _, el := range card.Body.Elements {
+		b, _ := json.Marshal(el)
+		if inPanel := el["tag"] == "collapsible_panel"; inPanel != strings.Contains(string(b), "failed with exit code 1") {
+			t.Fatalf("raw error belongs in the details panel only: %s", text)
+		}
+	}
+	if !strings.Contains(text, `"tag":"div","text":{"content":"Background command \"清理\" failed with exit code 1\n<stderr> rm: /tmp/x: denied","tag":"plain_text"`) {
+		t.Fatalf("raw error not kept as plain text: %s", text)
 	}
 }

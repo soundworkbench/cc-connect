@@ -107,3 +107,44 @@ func TestStopTaskWritesControlRequest(t *testing.T) {
 		t.Fatalf("frame=%+v", frame)
 	}
 }
+
+// A background command stopped on purpose ends as "failed" with a signal's
+// exit code (11-11 test: task b0qp7qehs, "failed with exit code 144"). Ends
+// after a TaskStop call or with exit code 143/144 count as stops.
+func TestStoppedTasksEndAsStopped(t *testing.T) {
+	cs := progressSession()
+	assistantBlock(cs, map[string]any{"type": "tool_use", "id": "tu1", "name": "TaskStop", "input": map[string]any{"task_id": "b1"}})
+	drainProgressEvents(cs)
+	for _, line := range []string{
+		`{"type":"system","subtype":"task_notification","task_id":"b1","status":"failed","summary":"Background command \"整理\" failed with exit code 1"}`,
+		`{"type":"system","subtype":"task_notification","task_id":"b2","status":"failed","summary":"Background command \"搜索会议\" failed with exit code 144"}`,
+		`{"type":"system","subtype":"task_notification","task_id":"b3","status":"failed","summary":"Background command \"x\" failed with exit code 143"}`,
+		`{"type":"system","subtype":"task_notification","task_id":"b4","status":"failed","summary":"Background command \"x\" failed with exit code 1"}`,
+		`{"type":"system","subtype":"task_notification","task_id":"b5","status":"failed","summary":"Background command \"x\" failed with exit code 1440"}`,
+	} {
+		cs.handleReadLoopLine(line)
+	}
+	want := map[string]string{"b1": "stopped", "b2": "stopped", "b3": "stopped", "b4": "failed", "b5": "failed"}
+	for _, ev := range drainProgressEvents(cs) {
+		if ev.Task == nil {
+			continue
+		}
+		if ev.Task.Status != want[ev.Task.TaskID] {
+			t.Errorf("%s: status=%s, want %s", ev.Task.TaskID, ev.Task.Status, want[ev.Task.TaskID])
+		}
+		delete(want, ev.Task.TaskID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing events: %v", want)
+	}
+	// The StopTask control request counts the same way.
+	cs.stdin = &bufferCloser{}
+	cs.alive.Store(true)
+	if err := cs.StopTask("b6"); err != nil {
+		t.Fatal(err)
+	}
+	cs.handleReadLoopLine(`{"type":"system","subtype":"task_notification","task_id":"b6","status":"failed","summary":"Agent failed"}`)
+	if evs := drainProgressEvents(cs); len(evs) != 1 || evs[0].Task.Status != "stopped" {
+		t.Fatalf("after StopTask: %+v", evs)
+	}
+}

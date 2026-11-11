@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -82,6 +83,38 @@ func taskProgressStep(description, summary string) string {
 	return oneLineLabel(step)
 }
 
+// signalExit matches the exit code of a command killed by a signal and so
+// stopped, not failed: 143 is SIGTERM, and a background command stopped
+// through TaskStop in the 11-11 test ended with 144.
+var signalExit = regexp.MustCompile(`exit code 14[34]\b`)
+
+// noteTaskStop remembers the task a TaskStop call (KillShell and KillBash
+// are its older names) asks to stop.
+func (cs *claudeSession) noteTaskStop(tool string, input any) {
+	if tool != "TaskStop" && tool != "KillShell" && tool != "KillBash" {
+		return
+	}
+	m, _ := input.(map[string]any)
+	for _, key := range []string{"task_id", "shell_id"} {
+		if id := strVal(m, key); id != "" {
+			cs.stoppingTasks.Store(id, true)
+		}
+	}
+}
+
+// markStoppedTask reports a task that ended because it was stopped as
+// "stopped": the CLI reports a stopped background command as "failed" with
+// the signal's exit code.
+func (cs *claudeSession) markStoppedTask(ev *core.TaskEvent) {
+	if ev.Kind != core.TaskEnded {
+		return
+	}
+	_, asked := cs.stoppingTasks.LoadAndDelete(ev.TaskID)
+	if ev.Status == "failed" && (asked || signalExit.MatchString(ev.Summary)) {
+		ev.Status = "stopped"
+	}
+}
+
 var stopTaskSeq atomic.Int64
 
 // StopTask asks the CLI to stop one task (control request stop_task). The
@@ -90,6 +123,7 @@ func (cs *claudeSession) StopTask(taskID string) error {
 	if !cs.alive.Load() {
 		return fmt.Errorf("session process is not running")
 	}
+	cs.stoppingTasks.Store(taskID, true)
 	return cs.writeJSON(map[string]any{
 		"type":       "control_request",
 		"request_id": fmt.Sprintf("cc-connect-stop-task-%d", stopTaskSeq.Add(1)),
