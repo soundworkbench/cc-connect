@@ -128,7 +128,7 @@ func TestBackgroundTaskCardOpensUpdatesAndSettles(t *testing.T) {
 	})
 	_, up := env.p.cards()
 	last := up[len(up)-1]
-	if last.handle != sent[0].handle || last.view.Status != "后台任务 · ✓ 已完成：按客户整理 200 个文件" || last.view.Summary != "整理完成\n共 200 个文件\n分到 12 个客户" ||
+	if last.handle != sent[0].handle || last.view.Status != "后台任务 · ✓ 已完成：按客户整理 200 个文件" || last.view.Summary != "整理完成" || last.view.Full != "整理完成\n共 200 个文件\n分到 12 个客户\n多余的一行" ||
 		last.view.Hint != "" || strings.Join(last.view.Details, "|") != "读取文件|编辑文件" {
 		t.Fatalf("settled=%+v", last)
 	}
@@ -484,5 +484,93 @@ func TestStoppedTaskCardHidesTheRawText(t *testing.T) {
 	v := settledView(t, env)
 	if v.State != TaskCardStopped || v.Status != "后台任务 · 已停止：搜索会议" || v.Summary != "" || !strings.Contains(v.Full, "exit code 144") {
 		t.Fatalf("stopped=%+v", v)
+	}
+}
+
+// The 11-11 test's done card pasted the whole result, /tmp paths included.
+const rawTaskResult = "11/4–11/11 飞书视频会议纪要要点（共 8 场）\n补查结果：搜索只返回这 8 场，没有新会议。\n输出已写到 /tmp/minutes/summary.md\n```\nls /tmp/minutes\n```"
+
+// A long or raw result becomes one line from the quick model; the card keeps
+// the full text in its details.
+func TestLongTaskResultGetsOneLine(t *testing.T) {
+	env := newTaskEnv(t)
+	var prompt string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct{ Content string } `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		prompt = body.Messages[0].Content
+		mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+		fmt.Fprint(w, `{"content":[{"type":"text","text":"整理好了 8 场会的要点清单"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	keyFile := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(keyFile, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env.e.streamPreview.QuickLine = QuickLineCfg{Enabled: true, BaseURL: srv.URL, Model: "m", KeyFile: keyFile, TimeoutMs: 2000}
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理一周会议纪要", Background: yes()})
+	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	env.task(TaskEvent{Kind: TaskEnded, TaskID: "a", Status: "completed", Summary: rawTaskResult})
+	v := settledView(t, env)
+	if v.Summary != "整理好了 8 场会的要点清单" || v.FullTitle != "原文" || v.Full != rawTaskResult {
+		t.Fatalf("settled=%+v", v)
+	}
+	_, up := env.p.cards()
+	for _, u := range up {
+		if strings.Contains(u.view.Summary, "/tmp") {
+			t.Fatalf("raw result reached the card body: %+v", u.view)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(prompt, "整理一周会议纪要") || !strings.Contains(prompt, "补查结果") {
+		t.Fatalf("prompt=%q", prompt)
+	}
+}
+
+// Without a quick line the card shows the result's first sentence, cut short.
+func TestLongTaskResultFallsBackToFirstSentence(t *testing.T) {
+	env := newTaskEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) }))
+	t.Cleanup(srv.Close)
+	keyFile := filepath.Join(t.TempDir(), "key")
+	if err := os.WriteFile(keyFile, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env.e.streamPreview.QuickLine = QuickLineCfg{Enabled: true, BaseURL: srv.URL, Model: "m", KeyFile: keyFile, TimeoutMs: 2000}
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理纪要", Background: yes()})
+	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	env.task(TaskEvent{Kind: TaskEnded, TaskID: "a", Status: "completed", Summary: "## 结果\n" + strings.Repeat("整理了会议纪要", 10) + "。后面还有很多。\n/tmp/x"})
+	v := settledView(t, env)
+	if want := string([]rune(strings.Repeat("整理了会议纪要", 10))[:taskBriefRunes]) + "…"; v.Summary != want || !strings.Contains(v.Full, "/tmp/x") {
+		t.Fatalf("fallback=%+v, want summary %q", v, want)
+	}
+}
+
+// A short Chinese result stays as written, with nothing extra in the details.
+func TestShortTaskResultStaysAsWritten(t *testing.T) {
+	env := newTaskEnv(t)
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理纪要", Background: yes()})
+	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	env.task(TaskEvent{Kind: TaskEnded, TaskID: "a", Status: "completed", Summary: "整理好了 8 场会的要点。今天的周会没有纪要。"})
+	if v := settledView(t, env); v.Summary != "整理好了 8 场会的要点。今天的周会没有纪要。" || v.Full != "" {
+		t.Fatalf("settled=%+v", v)
+	}
+}
+
+func TestFirstSentence(t *testing.T) {
+	for in, want := range map[string]string{
+		"## 结果\n整理好了。还有别的。": "整理好了。",
+		"- Done. Wrote it":  "Done.",
+		"没有句号的一行\n第二行":      "没有句号的一行",
+	} {
+		if got := firstSentence(in, 40); got != want {
+			t.Errorf("firstSentence(%q)=%q, want %q", in, got, want)
+		}
 	}
 }

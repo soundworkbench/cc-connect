@@ -106,6 +106,8 @@ type taskCard struct {
 	ended      bool
 	state      TaskCardState
 	summary    string
+	brief      string // completed: the quick model's one line for a long or raw summary
+	condensing bool   // the quick model is writing brief; the settled card waits for it
 
 	scheduled bool // the open timer is set
 	opened    bool // the card is sent (or being sent); run owns updates
@@ -204,6 +206,9 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 			c.state = TaskCardStopped
 		default:
 			c.state = TaskCardCompleted
+			if c.opened {
+				m.condenseLocked(e, c)
+			}
 		}
 	}
 	m.scheduleLocked(e, c)
@@ -300,9 +305,9 @@ func (m *taskCardManager) run(e *Engine, c *taskCard, shown TaskCardView) {
 			m.maybeSummarizeLocked(e, c, true)
 			view = m.viewLocked(e, c)
 		}
-		final := c.ended
+		final, waiting := c.ended, c.condensing
 		m.mu.Unlock()
-		if !final && sameTaskView(view, shown) {
+		if waiting || !final && sameTaskView(view, shown) {
 			continue
 		}
 		if err := c.platform.UpdateTaskCard(e.ctx, c.handle, view); err != nil {
@@ -376,6 +381,12 @@ func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 			v.Status = i.Tf(MsgTaskInterrupted, title)
 		default:
 			v.Status = i.Tf(MsgTaskCompleted, title)
+			if !briefEnough(c.summary) {
+				v.Summary = c.brief
+				if v.Summary == "" {
+					v.Summary = firstSentence(c.summary, taskBriefRunes)
+				}
+			}
 		}
 		if c.summary != "" && v.Summary != c.summary {
 			v.FullTitle, v.Full = i.T(MsgTaskFullText), clipRunesKeepLines(c.summary, taskCardFullRunes)
@@ -442,6 +453,71 @@ func readableLine(s string) bool {
 		}
 	}
 	return han > 0 && latin <= 3*han
+}
+
+const taskBriefRunes = 40
+
+var sentenceEnd = regexp.MustCompile(`[。！？!?]|\.(\s|$)`)
+
+// briefEnough reports whether a completed task's summary can sit on the card
+// as written: one readable line of at most two sentences.
+func briefEnough(s string) bool {
+	return readableLine(s) && len(sentenceEnd.FindAllStringIndex(s, -1)) <= 2
+}
+
+// firstSentence is the first sentence of s's first line that is not a
+// Markdown heading, without list marks, cut to limit runes. A text of
+// headings only gives its first heading.
+func firstSentence(s string, limit int) string {
+	heading := ""
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		isHeading := strings.HasPrefix(line, "#")
+		if line = strings.TrimSpace(strings.TrimLeft(line, "#*->` ")); line == "" {
+			continue
+		}
+		if isHeading {
+			if heading == "" {
+				heading = line
+			}
+			continue
+		}
+		if loc := sentenceEnd.FindStringIndex(line); loc != nil {
+			line = strings.TrimSpace(line[:loc[1]])
+		}
+		return clipRunesKeepLines(line, limit)
+	}
+	return clipRunesKeepLines(heading, limit)
+}
+
+const taskResultPrompt = "你在给用户看的后台任务卡片上写这个任务的结果。只写一句中文，不超过 25 个字，概括任务做成了什么。" +
+	"只依据给出的结果，不要编造；不要写路径、命令、代码或文件名，不要加引号或前缀。这句话只写一遍。"
+
+// condenseLocked asks the quick model for one line when a completed task's
+// summary is long or raw output (several lines, paths, code). The settled card
+// waits for it, at most the quick line's timeout; on failure it shows the
+// summary's first sentence. Caller holds m.mu.
+func (m *taskCardManager) condenseLocked(e *Engine, c *taskCard) {
+	cfg := e.streamPreview.QuickLine
+	if !cfg.Enabled || c.summary == "" || briefEnough(c.summary) {
+		return
+	}
+	c.condensing = true
+	prompt := "任务：" + clipRunes(c.desc, 200) + "\n结果：\n" + clipRunesKeepLines(c.summary, 3000)
+	go func() {
+		ctx, cancel := context.WithTimeout(e.ctx, quickLineTimeout(cfg))
+		defer cancel()
+		line, err := fetchQuickText(ctx, cfg, taskResultPrompt, []map[string]string{{"role": "user", "content": prompt}})
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		c.condensing = false
+		if err != nil {
+			slog.Info("task card: result line skipped", "error", err)
+		} else if readableLine(line) {
+			c.brief = line
+		}
+		poke(c.wake)
+	}()
 }
 
 // clipRunesKeepLines keeps s as written, cut to at most limit runes.
