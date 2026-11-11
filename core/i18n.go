@@ -226,6 +226,7 @@ const (
 	MsgTurnFailedLimit           MsgKey = "turn_failed_limit"
 	MsgRetryButton               MsgKey = "retry_button"
 	MsgRetrySent                 MsgKey = "retry_sent"
+	MsgRetryExpired              MsgKey = "retry_expired"
 	MsgTaskUntitled              MsgKey = "task_untitled"
 	MsgTaskWorking               MsgKey = "task_working"
 	MsgTaskElapsed               MsgKey = "task_elapsed"
@@ -808,6 +809,7 @@ var messages = map[MsgKey]map[Language]string{
 	MsgTurnFailedLimit:       {LangEnglish: "This didn't go through: the model usage limit has been reached", LangChinese: "这次没做成：模型用量到了上限", LangTraditionalChinese: "這次沒做成：模型用量到了上限", LangJapanese: "今回は完了できませんでした：モデルの利用上限に達しました", LangSpanish: "Esta vez no se pudo completar: se alcanzó el límite de uso del modelo"},
 	MsgRetryButton:           {LangEnglish: "Retry", LangChinese: "重试", LangTraditionalChinese: "重試", LangJapanese: "再試行", LangSpanish: "Reintentar"},
 	MsgRetrySent:             {LangEnglish: "Sent again", LangChinese: "已重新发送", LangTraditionalChinese: "已重新傳送", LangJapanese: "再送信しました", LangSpanish: "Enviado de nuevo"},
+	MsgRetryExpired:          {LangEnglish: "This button no longer works. Please send your message again.", LangChinese: "这个按钮已失效，请重新发送消息", LangTraditionalChinese: "這個按鈕已失效，請重新傳送訊息", LangJapanese: "このボタンは無効です。メッセージをもう一度送信してください", LangSpanish: "Este botón ya no funciona. Vuelve a enviar el mensaje."},
 	MsgPreviewMoved:          {LangEnglish: "↓ Moved below", LangChinese: "↓ 已移到下方", LangTraditionalChinese: "↓ 已移到下方", LangJapanese: "↓ 下に移動しました", LangSpanish: "↓ Movido abajo"},
 
 	MsgTaskUntitled:         {LangEnglish: "Background task", LangChinese: "后台任务", LangTraditionalChinese: "背景任務", LangJapanese: "バックグラウンドタスク", LangSpanish: "Tarea en segundo plano"},

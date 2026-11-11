@@ -451,11 +451,12 @@ func (e *Engine) failTurnPreview(state *interactiveState, sp *streamPreview, ses
 }
 
 // retryFailedTurn handles the failure card's retry button: the original
-// request is admitted again, once.
-func (e *Engine) retryFailedTurn(token string) {
+// request is admitted again, once. A button that no longer works (used,
+// expired, or from before a restart) answers with a notice.
+func (e *Engine) retryFailedTurn(token string) *Card {
 	t := e.failedTurns.take(strings.TrimSpace(token))
 	if t == nil {
-		return
+		return &Card{Toast: e.i18n.T(MsgRetryExpired)}
 	}
 	if fp, ok := t.platform.(FailurePreviewer); ok {
 		card := t.card
@@ -466,4 +467,5 @@ func (e *Engine) retryFailedTurn(token string) {
 	}
 	msg := t.input
 	go e.ReceiveMessage(t.platform, &msg)
+	return nil
 }

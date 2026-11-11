@@ -657,7 +657,11 @@ func (p *Platform) KeepPreviewOnFinish() bool {
 // （比如用户在回合中又发了一条），原地更新的回复就会被看漏，这时改走撤回预览再发新消息。
 func (p *Platform) KeepPreviewInPlace(ctx context.Context, previewHandle any, age time.Duration) bool {
 	h, ok := previewHandle.(*feishuPreviewHandle)
-	if !ok || h.chatID == "" || h.messageID == "" {
+	if !ok {
+		return true
+	}
+	messageID, chatID := h.ids()
+	if chatID == "" || messageID == "" {
 		return true
 	}
 	if p.keepPreviewMaxAge > 0 && age > p.keepPreviewMaxAge {
@@ -666,7 +670,7 @@ func (p *Platform) KeepPreviewInPlace(ctx context.Context, previewHandle any, ag
 	}
 	req := larkim.NewListMessageReqBuilder().
 		ContainerIdType("chat").
-		ContainerId(h.chatID).
+		ContainerId(chatID).
 		SortType("ByCreateTimeDesc").
 		PageSize(1).
 		Build()
@@ -688,7 +692,7 @@ func (p *Platform) KeepPreviewInPlace(ctx context.Context, previewHandle any, ag
 		slog.Warn(p.tag()+": final reply sent as new message", "reason", "cannot check latest message", "error", err)
 		return false
 	}
-	if latest != h.messageID {
+	if latest != messageID {
 		slog.Info(p.tag()+": final reply sent as new message", "reason", "newer messages below preview")
 		return false
 	}
@@ -1003,6 +1007,9 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 
 			select {
 			case card := <-done:
+				if card != nil && card.Toast != "" {
+					return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "warning", Content: card.Toast}}, nil
+				}
 				if card != nil {
 					return &callback.CardActionTriggerResponse{
 						Card: &callback.Card{
@@ -1014,7 +1021,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			case <-time.After(cardNavTimeout):
 				go func() {
 					card := <-done
-					if card == nil {
+					if card == nil || card.Toast != "" {
 						return
 					}
 					if refresher, ok := p.self.(core.CardRefresher); ok {
@@ -4925,6 +4932,14 @@ type feishuPreviewHandle struct {
 	sequence    int    // cardkit-v1 streaming text monotonic counter (++ before use; first call = 1)
 	status      core.CardStatus
 	lastContent string
+}
+
+// ids reads the message and chat the handle points at. MovePreview switches
+// them to the re-posted card under h.mu.
+func (h *feishuPreviewHandle) ids() (messageID, chatID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.messageID, h.chatID
 }
 
 // buildCardJSON builds a Feishu interactive card JSON string with a markdown element.

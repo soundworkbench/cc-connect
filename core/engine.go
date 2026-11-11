@@ -12590,8 +12590,7 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 	}
 
 	if prefix == "act" && cmd == "/retry" {
-		e.retryFailedTurn(args)
-		return nil
+		return e.retryFailedTurn(args)
 	}
 
 	if prefix == "act" && cmd == "/taskstop" {

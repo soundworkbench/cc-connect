@@ -167,11 +167,22 @@ func TestModelFailureSettlesCardWithRetryThatResendsOnce(t *testing.T) {
 	f.s.events <- Event{Type: EventResult, Content: "完成", Done: true}
 	f.waitIdle()
 
-	f.e.handleCardNav(c.Action, f.key)
+	if card := f.e.handleCardNav(c.Action, f.key); card == nil || card.Toast != "这个按钮已失效，请重新发送消息" || len(card.Elements) != 0 {
+		t.Fatalf("a used button must answer with a notice: %+v", card)
+	}
 	select {
 	case got := <-f.s.sent:
 		t.Fatalf("a second click resent %q", got)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// After a restart the bridge has no record of the button's request.
+func TestRetryButtonFromBeforeRestartAnswersWithNotice(t *testing.T) {
+	f := newFailureEnv(t)
+	card := f.e.handleCardNav("act:/retry 0123456789abcdef0123456789abcdef", f.key)
+	if card == nil || card.Toast != "这个按钮已失效，请重新发送消息" {
+		t.Fatalf("card=%+v", card)
 	}
 }
 

@@ -14,6 +14,9 @@ type Card struct {
 	// Compact asks the platform for a tight vertical layout (Feishu: schema 2.0
 	// with small element spacing) instead of the classic card layout.
 	Compact bool
+	// Toast, set on a card returned from a card action, asks the platform to
+	// show this short notice instead of replacing the clicked card.
+	Toast string
 }
 
 // CardHeader is the optional colored title bar of a card.
