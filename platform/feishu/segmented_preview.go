@@ -54,7 +54,6 @@ const (
 var _ core.SegmentedPreviewer = (*Platform)(nil)
 var _ core.PreviewToolRecorder = (*Platform)(nil)
 var _ core.QuickLineSetter = (*Platform)(nil)
-var _ core.QuickLineReader = (*Platform)(nil)
 
 // One turn owns the ticker and all mutations, including finalization and recall.
 type segmentedPreview struct {
@@ -107,8 +106,8 @@ type segmentedPreview struct {
 	rows      []stepRow
 	toolCalls int
 	// quickLine is the fast model's acknowledgement sentence. It shows in the running row
-	// while the agent has produced nothing, then leads the reply text as its first
-	// paragraph. A sentence that arrives after the agent started is never taken.
+	// only while the agent has produced nothing; the reply text never carries it. A
+	// sentence that arrives after the agent started is never taken.
 	quickLine    string
 	quickDropped bool
 	// draft is the adopted pendDraft; it only marks that the text so far is undecided.
@@ -299,7 +298,6 @@ func (p *Platform) SetPreviewBody(_ context.Context, handle any, text string) er
 		}
 		v.pendMu.Lock()
 		v.pend, v.pendDraft = v.routeText(text)
-		v.pend = v.withQuickLine(v.pend)
 		v.pendDirty = true
 		v.pendMu.Unlock()
 		if core.StreamTraceOn() {
@@ -323,7 +321,6 @@ func (p *Platform) SetPreviewBody(_ context.Context, handle any, text string) er
 	}
 	v.pendMu.Lock()
 	body, draft := v.routeText(text)
-	body = v.withQuickLine(body)
 	v.pendMu.Unlock()
 	v.setDraft(draft)
 	return v.setBody(body)
@@ -450,26 +447,6 @@ func (p *Platform) SetPreviewQuickLine(_ context.Context, handle any, text strin
 	}
 	v.quickLine = text
 	return nil
-}
-
-// PreviewQuickLine returns the sentence the card kept, so the final reply can lead with it.
-func (p *Platform) PreviewQuickLine(handle any) string {
-	h, ok := handle.(*feishuPreviewHandle)
-	if !ok || h.live == nil {
-		return ""
-	}
-	v := h.live
-	v.pendMu.Lock()
-	defer v.pendMu.Unlock()
-	return v.quickLine
-}
-
-// withQuickLine puts the kept sentence above reply text as its first paragraph. Caller holds pendMu.
-func (v *segmentedPreview) withQuickLine(body string) string {
-	if v.quickLine == "" || strings.TrimSpace(body) == "" {
-		return body
-	}
-	return v.quickLine + "\n\n" + body
 }
 
 func stepOneLine(text string, limit int) string {

@@ -1088,7 +1088,6 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 	// 超过单条上限（按字符计，与分块一致）时，第一块原地完成，其余块接着另发。
 	if sp.segmented != nil {
 		footer = ""
-		body = sp.withQuickLine(body)
 	}
 	if sp.segmented != nil && sp.cfg.StepList && sp.cfg.EndMode == "settle" {
 		if sp.deliverSettled(body, footer, sendFn, failureText) {
@@ -1119,24 +1118,6 @@ func (sp *streamPreview) deliverFinal(body, footer string, sendFn func(Platform,
 		}
 	}
 	return sp.deliverFinalInOrder(body, footer, sendFn, failureText, order)
-}
-
-// withQuickLine puts the card's kept quick line above the final reply as its first paragraph.
-func (sp *streamPreview) withQuickLine(body string) string {
-	r, ok := sp.segmented.(QuickLineReader)
-	if !ok || strings.TrimSpace(body) == "" {
-		return body
-	}
-	sp.mu.Lock()
-	handle := sp.previewMsgID
-	sp.mu.Unlock()
-	if handle == nil {
-		return body
-	}
-	if line := r.PreviewQuickLine(handle); line != "" {
-		return line + "\n\n" + body
-	}
-	return body
 }
 
 // deliverSettled ends a turn without recalling the card. A short turn finishes the
