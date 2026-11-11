@@ -24,9 +24,13 @@ var (
 	// before the card moves: each new message restarts the wait, and the
 	// card then moves once, under the last of them.
 	previewMoveSettle = 2500 * time.Millisecond
-	// previewMoveGap is how long a card stays where it appeared (the turn's
-	// first card, or one just re-posted) before it may move.
+	// previewMoveGap is how long the turn's card stays where it appeared
+	// before it may move.
 	previewMoveGap = 10 * time.Second
+	// previewMoveAgain is how long after a move the card may move again. A
+	// turn's card normally moves once: messages sent within this time after
+	// the move stay below it rather than chasing the card down the chat.
+	previewMoveAgain = 60 * time.Second
 )
 
 // followUser keeps the live card below a message the person just added to the
@@ -42,13 +46,12 @@ func (sp *streamPreview) followUser(sessionKey string, replyCtx any) {
 	if sp.previewMsgID == nil || sp.hidden || sp.degraded {
 		return
 	}
-	sp.followKey, sp.followCtx = sessionKey, replyCtx
-	shown := sp.lastMoveAt
-	if shown.IsZero() {
-		shown = sp.previewStartedAt
+	if !sp.lastMoveAt.IsZero() && time.Since(sp.lastMoveAt) < previewMoveAgain {
+		return
 	}
+	sp.followKey, sp.followCtx = sessionKey, replyCtx
 	at := time.Now().Add(previewMoveSettle)
-	if earliest := shown.Add(previewMoveGap); at.Before(earliest) {
+	if earliest := sp.previewStartedAt.Add(previewMoveGap); at.Before(earliest) {
 		at = earliest
 	}
 	if sp.followTimer != nil {

@@ -109,6 +109,56 @@ func TestBurstOfMessagesMovesTheCardOnceUnderTheLast(t *testing.T) {
 	s.events <- Event{Type: EventResult, Content: "好了", Done: true}
 }
 
+// The messages from the second 11-11 test at +13.7 s, +18.7 s and +25.4 s,
+// with every wait scaled down 10 times: the gaps outlast the settle wait, yet
+// the card moves only once.
+func TestCardMovesOncePerTurn(t *testing.T) {
+	p, s, _, send := newFollowEnv(t, 250*time.Millisecond, time.Second)
+	oldAgain := previewMoveAgain
+	previewMoveAgain = 6 * time.Second
+	t.Cleanup(func() { previewMoveAgain = oldAgain })
+	start := time.Now()
+	for _, m := range []struct {
+		id string
+		at time.Duration
+	}{{"2", 1370 * time.Millisecond}, {"3", 1870 * time.Millisecond}, {"4", 2540 * time.Millisecond}} {
+		time.Sleep(time.Until(start.Add(m.at)))
+		send(m.id)
+		steerOne(t, s)
+	}
+	time.Sleep(time.Until(start.Add(4 * time.Second)))
+	if got := p.moved(); len(got) != 1 || got[0] != "ctx-2" {
+		t.Fatalf("moves=%v, want one move under the first message", got)
+	}
+	s.events <- Event{Type: EventResult, Content: "好了", Done: true}
+}
+
+// Once previewMoveAgain has passed since the move, a new message moves the
+// card again.
+func TestCardMovesAgainAfterTheRepeatGap(t *testing.T) {
+	p, s, _, send := newFollowEnv(t, 20*time.Millisecond, 0)
+	oldAgain := previewMoveAgain
+	previewMoveAgain = 400 * time.Millisecond
+	t.Cleanup(func() { previewMoveAgain = oldAgain })
+	send("2")
+	steerOne(t, s)
+	waitUntil(t, "first move", func() bool { return len(p.moved()) == 1 })
+	send("3")
+	steerOne(t, s)
+	time.Sleep(200 * time.Millisecond)
+	if got := p.moved(); len(got) != 1 {
+		t.Fatalf("moved again within the repeat gap: %v", got)
+	}
+	time.Sleep(300 * time.Millisecond)
+	send("4")
+	steerOne(t, s)
+	waitUntil(t, "second move", func() bool { return len(p.moved()) == 2 })
+	if got := p.moved(); got[1] != "ctx-4" {
+		t.Fatalf("moves=%v", got)
+	}
+	s.events <- Event{Type: EventResult, Content: "好了", Done: true}
+}
+
 func TestCardStaysPutRightAfterItAppears(t *testing.T) {
 	p, s, _, send := newFollowEnv(t, 20*time.Millisecond, 400*time.Millisecond)
 	start := time.Now()
