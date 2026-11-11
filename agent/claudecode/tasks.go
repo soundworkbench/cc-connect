@@ -130,15 +130,30 @@ func (cs *claudeSession) trackTask(ev *core.TaskEvent) {
 	case core.TaskEnded:
 		if _, loaded := cs.liveTasks.LoadAndDelete(ev.TaskID); loaded {
 			cs.liveTaskCount.Add(-1)
+			cs.lastTaskEnd.Store(time.Now().UnixNano())
 		}
 	}
 }
 
-// HasBackgroundWork implements core.BackgroundWorkReporter: a task the CLI
-// started is still running, so the process must stay up, with its stdin
-// open, until the task ends.
+// taskSettleGrace is how long after its last task ended the CLI may still
+// start the turn that reports the result. It does so within milliseconds;
+// silence this long means no such turn is coming.
+var taskSettleGrace = 5 * time.Second
+
+// HasBackgroundWork implements core.BackgroundWorkReporter. Between turns the
+// CLI still works while a task it started runs, while it writes the turn it
+// started itself on a task's notification, and briefly after the last task
+// ended, before that turn begins. The process must stay up, with its stdin
+// open, through all of it.
 func (cs *claudeSession) HasBackgroundWork() bool {
-	return cs.alive.Load() && cs.liveTaskCount.Load() > 0
+	if !cs.alive.Load() {
+		return false
+	}
+	if cs.liveTaskCount.Load() > 0 || cs.cliWorking.Load() {
+		return true
+	}
+	end := cs.lastTaskEnd.Load()
+	return end != 0 && time.Since(time.Unix(0, end)) < taskSettleGrace
 }
 
 // busy reports whether the CLI is working: a turn is in flight (ours or one

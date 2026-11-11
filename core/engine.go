@@ -911,7 +911,19 @@ func (e *Engine) reapIdleWorkspaces() {
 		return
 	}
 
-	reaped := e.workspacePool.ReapIdle()
+	// A workspace whose agent still runs background work is not idle.
+	busy := make(map[string]bool)
+	e.interactiveMu.Lock()
+	for _, state := range e.interactiveStates {
+		state.mu.Lock()
+		if state.workspaceDir != "" && hasBackgroundWork(state.agentSession) {
+			busy[state.workspaceDir] = true
+		}
+		state.mu.Unlock()
+	}
+	e.interactiveMu.Unlock()
+
+	reaped := e.workspacePool.ReapIdle(busy)
 	if len(reaped) == 0 {
 		return
 	}
@@ -2627,6 +2639,21 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 	if lastActive.IsZero() || time.Since(lastActive) < e.resetOnIdle {
 		return nil, 0
 	}
+
+	// Background work still running means the session is not idle: resetting
+	// it would stop that work.
+	e.interactiveMu.Lock()
+	if st := e.interactiveStates[interactiveKey]; st != nil {
+		st.mu.Lock()
+		as := st.agentSession
+		st.mu.Unlock()
+		if hasBackgroundWork(as) {
+			e.interactiveMu.Unlock()
+			slog.Info("idle auto-reset skipped: background work still running", "session_key", msg.SessionKey)
+			return nil, 0
+		}
+	}
+	e.interactiveMu.Unlock()
 
 	slog.Info("auto-resetting idle session",
 		"session_key", msg.SessionKey,
@@ -4367,6 +4394,11 @@ func (e *Engine) closeAgentSessionWithTimeout(sessionKey string, agentSession Ag
 func (e *Engine) closeAgentSession(sessionKey string, agentSession AgentSession, platform Platform, replyCtx any) {
 	if agentSession == nil {
 		return
+	}
+	if hasBackgroundWork(agentSession) {
+		// Only an explicit stop, reset or switch, or a background-work wait
+		// that reached its limit, gets here with work still running.
+		slog.Warn("closing agent session while background work is still running", "session", sessionKey)
 	}
 	// Its background tasks die with the process; settle their cards now.
 	e.abandonTasks(agentSession)
@@ -6491,6 +6523,11 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			}
 
 			// Auto-compress after finishing a turn, before sending any queued messages.
+			// Not while background work runs: compressing drains its events.
+			if triggerAutoCompress && hasBackgroundWork(turnAgentSession) {
+				slog.Info("auto-compress: deferred, background work still running", "session", sessionKey)
+				triggerAutoCompress = false
+			}
 			if triggerAutoCompress {
 				compressor, ok := e.agent.(ContextCompressor)
 				if ok && compressor.CompressCommand() != "" {

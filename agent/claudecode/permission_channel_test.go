@@ -194,16 +194,34 @@ func TestTrackTask_CountsVisibleTasksUntilTheyEnd(t *testing.T) {
 		t.Fatal("a running task must count as background work")
 	}
 	line(taskFrame("task_notification", map[string]any{"status": "completed"}))
-	if cs.HasBackgroundWork() {
+	if cs.liveTaskCount.Load() != 0 {
 		t.Fatalf("task ended but %d still counted", cs.liveTaskCount.Load())
 	}
+	if !cs.HasBackgroundWork() {
+		t.Fatal("right after the last task ends the CLI may still start the turn that reports it")
+	}
+	// The CLI reports the task's result in a turn of its own.
 	line(map[string]any{"type": "assistant", "message": map[string]any{"role": "assistant", "content": []any{}}})
-	if !cs.busy() {
-		t.Fatal("a turn the CLI is writing must count as busy")
+	if !cs.busy() || !cs.HasBackgroundWork() {
+		t.Fatal("a turn the CLI is writing must count as busy and as background work")
 	}
 	line(map[string]any{"type": "result", "subtype": "success", "result": "ok"})
-	if cs.busy() {
-		t.Fatal("the turn's result must end busy")
+	if cs.busy() || cs.HasBackgroundWork() {
+		t.Fatal("the turn's result must end busy and background work")
+	}
+}
+
+func TestHasBackgroundWork_SettleGraceExpires(t *testing.T) {
+	old := taskSettleGrace
+	taskSettleGrace = 20 * time.Millisecond
+	defer func() { taskSettleGrace = old }()
+	cs := &claudeSession{ctx: context.Background(), events: make(chan core.Event, 16)}
+	cs.alive.Store(true)
+	cs.trackTask(&core.TaskEvent{Kind: core.TaskStarted, TaskID: "t1"})
+	cs.trackTask(&core.TaskEvent{Kind: core.TaskEnded, TaskID: "t1"})
+	time.Sleep(40 * time.Millisecond)
+	if cs.HasBackgroundWork() {
+		t.Fatal("no turn followed the task's end; the work is over")
 	}
 }
 

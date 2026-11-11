@@ -147,6 +147,9 @@ type claudeSession struct {
 	// turn's result, including turns the CLI starts on its own after a task
 	// notification. readLoop only writes it.
 	cliWorking atomic.Bool
+	// lastTaskEnd is when a tracked task last ended (UnixNano); a result
+	// clears it. readLoop only writes it.
+	lastTaskEnd atomic.Int64
 	// closing is set once Close starts: from then on a lost permission
 	// channel is the expected effect of the teardown, not a failure.
 	closing atomic.Bool
@@ -698,6 +701,7 @@ func (cs *claudeSession) handleReadLoopLine(line string) {
 	case "result":
 		// A mid-turn compaction result leaves the turn running.
 		cs.cliWorking.Store(isCompactionResult(raw))
+		cs.lastTaskEnd.Store(0)
 		cs.handleResult(raw)
 	case "command_lifecycle":
 		cs.handleCommandLifecycle(raw)
@@ -2000,7 +2004,7 @@ func (cs *claudeSession) Close() error {
 	// closed", until the process is killed. Stop such a process with stdin
 	// still open; the pipe closes with it.
 	if cs.inputFailure.Load() == nil && cs.alive.Load() && cs.busy() {
-		slog.Info("claudeSession: stopping busy process without stdin EOF",
+		slog.Warn("claudeSession: stopping busy process without stdin EOF",
 			"session", cs.CurrentSessionID(), "running_tasks", cs.liveTaskCount.Load())
 		defer cs.closeStdin()
 		return cs.terminate()

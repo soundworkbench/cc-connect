@@ -137,7 +137,9 @@ func (p *workspacePool) GetOrCreate(workspace string) *workspaceState {
 
 // ReapIdle removes and returns workspace paths that have been idle longer than idleTimeout.
 // A zero idleTimeout disables reaping entirely.
-func (p *workspacePool) ReapIdle() []string {
+// ReapIdle removes and returns the workspaces idle past the timeout. Paths in
+// keep are skipped: their agent still has work running.
+func (p *workspacePool) ReapIdle(keep map[string]bool) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.idleTimeout <= 0 {
@@ -146,7 +148,7 @@ func (p *workspacePool) ReapIdle() []string {
 	cutoff := time.Now().Add(-p.idleTimeout)
 	var reaped []string
 	for path, state := range p.states {
-		if state.HasActiveTurn() {
+		if state.HasActiveTurn() || keep[path] {
 			continue
 		}
 		if state.LastActivity().Before(cutoff) {

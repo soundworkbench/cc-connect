@@ -15348,7 +15348,7 @@ func TestReapIdle_DisabledWhenZeroTimeout(t *testing.T) {
 	ws := pool.GetOrCreate("/test/workspace")
 	ws.Touch()
 	// Even with an existing workspace, zero timeout disables reaping.
-	reaped := pool.ReapIdle()
+	reaped := pool.ReapIdle(nil)
 	if len(reaped) != 0 {
 		t.Errorf("expected no reaping with zero timeout, got %v", reaped)
 	}

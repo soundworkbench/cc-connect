@@ -65,7 +65,7 @@ func TestWorkspacePool_ReapIdle(t *testing.T) {
 	pool.GetOrCreate(normalizeWorkspacePath("/workspace/a"))
 
 	time.Sleep(100 * time.Millisecond)
-	reaped := pool.ReapIdle()
+	reaped := pool.ReapIdle(nil)
 
 	if len(reaped) != 1 || reaped[0] != normalizeWorkspacePath("/workspace/a") {
 		t.Errorf("expected [%s] reaped, got %v", normalizeWorkspacePath("/workspace/a"), reaped)
@@ -73,6 +73,20 @@ func TestWorkspacePool_ReapIdle(t *testing.T) {
 
 	if s := pool.Get(normalizeWorkspacePath("/workspace/a")); s != nil {
 		t.Error("expected workspace removed after reap")
+	}
+}
+
+func TestWorkspacePool_ReapIdle_KeepsWorkspaceWithBackgroundWork(t *testing.T) {
+	pool := newWorkspacePool(50 * time.Millisecond)
+	path := normalizeWorkspacePath("/workspace/bg")
+	pool.GetOrCreate(path)
+
+	time.Sleep(100 * time.Millisecond)
+	if reaped := pool.ReapIdle(map[string]bool{path: true}); len(reaped) != 0 {
+		t.Fatalf("workspace whose agent still runs background work was reaped: %v", reaped)
+	}
+	if reaped := pool.ReapIdle(nil); len(reaped) != 1 {
+		t.Fatalf("idle workspace not reaped once its work ended: %v", reaped)
 	}
 }
 
@@ -141,7 +155,7 @@ func TestWorkspacePool_ReapIdle_KeepsActive(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	state.Touch() // Keep it alive
 
-	reaped := pool.ReapIdle()
+	reaped := pool.ReapIdle(nil)
 	if len(reaped) != 0 {
 		t.Errorf("expected no reaping for active workspace, got %v", reaped)
 	}
@@ -157,7 +171,7 @@ func TestWorkspacePool_ReapIdle_SkipsBusyWorkspace(t *testing.T) {
 	state.BeginTurn()
 
 	time.Sleep(100 * time.Millisecond)
-	reaped := pool.ReapIdle()
+	reaped := pool.ReapIdle(nil)
 	if len(reaped) != 0 {
 		t.Fatalf("expected busy workspace to be preserved, got %v", reaped)
 	}
@@ -167,7 +181,7 @@ func TestWorkspacePool_ReapIdle_SkipsBusyWorkspace(t *testing.T) {
 
 	state.EndTurn()
 	time.Sleep(60 * time.Millisecond)
-	reaped = pool.ReapIdle()
+	reaped = pool.ReapIdle(nil)
 	if len(reaped) != 1 || reaped[0] != normalizeWorkspacePath("/workspace/busy") {
 		t.Fatalf("expected busy workspace to reap after EndTurn, got %v", reaped)
 	}

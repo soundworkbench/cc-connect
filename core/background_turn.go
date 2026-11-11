@@ -96,7 +96,16 @@ func (e *Engine) backgroundWorkLimit() time.Duration {
 	return defaultBackgroundWorkLimit
 }
 
-// awaitBackgroundWork keeps a one-shot session (a cron run) open while tasks
+// closeAfterTurn ends a one-shot session (a cron or timer run with a new
+// session per run) once its turn is over. Tasks the turn started in the
+// background keep the session open until they end or the limit passes; only
+// then is the agent closed, which stops whatever is still running.
+func (e *Engine) closeAfterTurn(key string) {
+	e.awaitBackgroundWork(key, e.backgroundWorkLimit())
+	e.cleanupInteractiveState(key)
+}
+
+// awaitBackgroundWork keeps a one-shot session (a cron or timer run) open while tasks
 // the agent started during the turn are still running. Closing it at the
 // turn's result cut those tasks off: their tool calls failed until the
 // process was killed. The unsolicited reader keeps relaying the tasks' output

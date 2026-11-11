@@ -142,7 +142,7 @@ func (e *Engine) assistantBusy(key string, session *Session) bool {
 	if st := e.interactiveStates[key]; st != nil {
 		st.mu.Lock()
 		defer st.mu.Unlock()
-		return st.pending != nil || len(st.pendingMessages) > 0 || st.backgroundTurnLease
+		return st.pending != nil || len(st.pendingMessages) > 0 || st.backgroundTurnLease || hasBackgroundWork(st.agentSession)
 	}
 	return false
 }

@@ -195,7 +195,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 			iKey = workspaceDir + ":" + iKey
 		}
 		e.processInteractiveMessageWith(targetPlatform, msg, session, agent, sessions, iKey, workspaceDir, runSessionKey, lockGen)
-		e.cleanupInteractiveState(iKey)
+		e.closeAfterTurn(iKey)
 		return nil
 	}
 
