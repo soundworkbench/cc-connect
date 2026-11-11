@@ -44,10 +44,11 @@ func (p *Platform) UpdateTaskCard(ctx context.Context, handle any, view core.Tas
 	return p.patchCardMessage(ctx, h.messageID, card)
 }
 
-// taskCardJSON lays out a task card. Live: the task name, the current step
-// with the spinner, the elapsed minutes, the latest progress, the steps panel
-// and the stop button (red, with a confirm dialog). Ended: the outcome line,
-// the summary and the steps panel.
+// taskCardJSON lays out a task card. Live: the title marking it a background
+// task, the current step with the spinner, the elapsed minutes, the latest
+// progress, a grey line saying the chat stays free, and the steps panel.
+// Ended: the outcome line, the summary and the steps panel. There is no stop
+// button: the person asks the agent to stop a task.
 func (p *Platform) taskCardJSON(v core.TaskCardView) string {
 	var els []map[string]any
 	if v.State.Live() {
@@ -64,6 +65,9 @@ func (p *Platform) taskCardJSON(v core.TaskCardView) string {
 		}
 		if v.Recent != "" {
 			els = append(els, map[string]any{"tag": "markdown", "content": escapeCardText(v.Recent)})
+		}
+		if v.Hint != "" {
+			els = append(els, map[string]any{"tag": "markdown", "content": "<font color='grey'>" + escapeCardText(v.Hint) + "</font>", "text_size": "notation"})
 		}
 	} else {
 		color := "grey"
@@ -84,11 +88,6 @@ func (p *Platform) taskCardJSON(v core.TaskCardView) string {
 			lines[i] = "· " + escapeCardText(d)
 		}
 		els = append(els, buildRichPanel(v.DetailsTitle, []map[string]any{{"tag": "markdown", "content": strings.Join(lines, "\n"), "text_size": "notation"}}))
-	}
-	if v.State == core.TaskCardRunning && v.StopAction != "" {
-		button := callbackButton(v.StopLabel, "danger", v.StopAction, v.SessionKey)
-		button["confirm"] = map[string]any{"title": plainText(v.StopConfirmTitle), "text": plainText(v.StopConfirmText)}
-		els = append(els, button)
 	}
 	summary := v.Title
 	if !v.State.Live() {

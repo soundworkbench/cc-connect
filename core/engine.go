@@ -12593,11 +12593,6 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.retryFailedTurn(args, sessionKey)
 	}
 
-	if prefix == "act" && cmd == "/taskstop" {
-		e.stopTask(args)
-		return nil
-	}
-
 	if prefix == "act" && cmd == "/model" {
 		return e.handleModelCardAction(args, sessionKey)
 	}

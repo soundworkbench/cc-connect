@@ -107,8 +107,8 @@ func TestBackgroundTaskCardOpensUpdatesAndSettles(t *testing.T) {
 	waitUntil(t, "task card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
 	sent, _ := env.p.cards()
 	v := sent[0].view
-	if v.State != TaskCardRunning || v.Title != "按客户整理 200 个文件" || v.Status != "读取文件" || v.Elapsed != "已跑不到 1 分钟" ||
-		v.Recent != "最近进展：正在读第 3 个客户的文件" || !strings.HasPrefix(v.StopAction, "act:/taskstop ") || v.SessionKey != env.key {
+	if v.State != TaskCardRunning || v.Title != "后台任务 · 正在进行：按客户整理 200 个文件" || v.Status != "读取文件" || v.Elapsed != "已跑不到 1 分钟" ||
+		v.Recent != "最近进展：正在读第 3 个客户的文件" || v.Hint != "在后台进行，不影响聊天，你可以接着跟我说话；做完我会告诉你。要停的话直接跟我说。" || v.SessionKey != env.key {
 		t.Fatalf("open view=%+v", v)
 	}
 	// Between turns the unsolicited reader carries the task events.
@@ -124,8 +124,8 @@ func TestBackgroundTaskCardOpensUpdatesAndSettles(t *testing.T) {
 	})
 	_, up := env.p.cards()
 	last := up[len(up)-1]
-	if last.handle != sent[0].handle || last.view.Status != "✓ 已完成：按客户整理 200 个文件" || last.view.Summary != "整理完成\n共 200 个文件\n分到 12 个客户" ||
-		last.view.StopAction != "" || strings.Join(last.view.Details, "|") != "读取文件|编辑文件" {
+	if last.handle != sent[0].handle || last.view.Status != "后台任务 · ✓ 已完成：按客户整理 200 个文件" || last.view.Summary != "整理完成\n共 200 个文件\n分到 12 个客户" ||
+		last.view.Hint != "" || strings.Join(last.view.Details, "|") != "读取文件|编辑文件" {
 		t.Fatalf("settled=%+v", last)
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -148,42 +148,42 @@ func TestShortAndForegroundTasksGetNoCard(t *testing.T) {
 	env.task(TaskEvent{Kind: TaskUpdated, TaskID: "fg", Background: yes()})
 	waitUntil(t, "moved task card", func() bool {
 		sent, _ := env.p.cards()
-		return len(sent) == 1 && sent[0].view.Title == "前台子任务"
+		return len(sent) == 1 && sent[0].view.Title == "后台任务 · 正在进行：前台子任务"
 	})
 }
 
-func TestTaskCardStopButtonStopsOnlyItsTask(t *testing.T) {
+// Each card follows its own task; a task stopped through the agent settles
+// only its card. No card offers a stop button.
+func TestTaskCardsSettleOneByOne(t *testing.T) {
 	env := newTaskEnv(t)
 	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "任务甲", Background: yes()})
 	env.task(TaskEvent{Kind: TaskStarted, TaskID: "b", Description: "任务乙", Background: yes()})
 	waitUntil(t, "two cards", func() bool { sent, _ := env.p.cards(); return len(sent) == 2 })
 	sent, _ := env.p.cards()
-	var action string
+	handles := map[string]any{}
 	for _, c := range sent {
-		if c.view.Title == "任务乙" {
-			action = c.view.StopAction
-		}
+		handles[c.view.Title] = c.handle
 	}
-	if card := env.e.handleCardNav(action, env.key); card != nil {
-		t.Fatalf("stop must not replace the card through the callback: %+v", card)
-	}
-	waitUntil(t, "stop request", func() bool {
-		env.s.mu.Lock()
-		defer env.s.mu.Unlock()
-		return len(env.s.stopped) == 1
-	})
-	if env.s.stopped[0] != "b" {
-		t.Fatalf("stopped %v", env.s.stopped)
-	}
-	waitUntil(t, "stopping card", func() bool {
-		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.State == TaskCardStopping && up[len(up)-1].view.StopAction == ""
-	})
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "b", Status: "stopped"})
 	waitUntil(t, "stopped card", func() bool {
 		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.Status == "已停止：任务乙"
+		return len(up) > 0 && up[len(up)-1].view.Status == "后台任务 · 已停止：任务乙"
 	})
+	_, up := env.p.cards()
+	if up[len(up)-1].handle != handles["后台任务 · 正在进行：任务乙"] {
+		t.Fatalf("stopped task settled another card: %+v", up[len(up)-1])
+	}
+	env.e.taskCards.mu.Lock()
+	open := len(env.e.taskCards.cards)
+	env.e.taskCards.mu.Unlock()
+	if open != 1 {
+		t.Fatalf("open cards=%d, want task a still running", open)
+	}
+	env.s.mu.Lock()
+	defer env.s.mu.Unlock()
+	if len(env.s.stopped) != 0 {
+		t.Fatalf("a card stopped a task: %v", env.s.stopped)
+	}
 }
 
 func TestTaskCardsEndWithTheirSession(t *testing.T) {
@@ -193,7 +193,7 @@ func TestTaskCardsEndWithTheirSession(t *testing.T) {
 	env.e.cleanupInteractiveState(env.key)
 	waitUntil(t, "interrupted card", func() bool {
 		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Status == "已中断：任务甲"
+		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Status == "后台任务 · 已中断：任务甲"
 	})
 }
 
@@ -235,11 +235,11 @@ func waitInterrupted(t *testing.T, env *taskEnv, title string) {
 	t.Helper()
 	waitUntil(t, "interrupted card", func() bool {
 		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Status == "已中断："+title
+		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Status == "后台任务 · 已中断："+title
 	})
 	_, up := env.p.cards()
-	if up[len(up)-1].view.StopAction != "" {
-		t.Fatalf("interrupted card keeps its stop button: %+v", up[len(up)-1].view)
+	if up[len(up)-1].view.Hint != "" {
+		t.Fatalf("interrupted card keeps the running hint: %+v", up[len(up)-1].view)
 	}
 	env.e.taskCards.mu.Lock()
 	defer env.e.taskCards.mu.Unlock()

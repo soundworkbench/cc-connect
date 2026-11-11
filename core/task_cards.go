@@ -33,7 +33,8 @@ type TaskEvent struct {
 }
 
 // TaskStopper is implemented by agent sessions that can stop one task
-// without ending the turn or the session.
+// without ending the turn or the session. Task cards carry no stop button:
+// the person asks the agent, which stops its own tasks.
 type TaskStopper interface {
 	StopTask(taskID string) error
 }
@@ -43,7 +44,6 @@ type TaskCardState string
 
 const (
 	TaskCardRunning     TaskCardState = "running"
-	TaskCardStopping    TaskCardState = "stopping"
 	TaskCardCompleted   TaskCardState = "completed"
 	TaskCardFailed      TaskCardState = "failed"
 	TaskCardStopped     TaskCardState = "stopped"
@@ -51,24 +51,20 @@ const (
 )
 
 // Live reports whether the task is still running on the card.
-func (s TaskCardState) Live() bool { return s == TaskCardRunning || s == TaskCardStopping }
+func (s TaskCardState) Live() bool { return s == TaskCardRunning }
 
 // TaskCardView is the whole content of a task card; every text is ready to show.
 type TaskCardView struct {
 	State        TaskCardState
-	Title        string // task description
-	Status       string // live: current step; ended: the outcome line, naming the task
+	Title        string // live: "background task · running: <task>"
+	Status       string // live: current step; ended: the outcome line, marked as a background task and naming it
 	Elapsed      string // live only, whole minutes
 	Recent       string // live only: latest progress line
+	Hint         string // live only: the task runs aside; the chat stays free
 	Summary      string // ended only: up to three lines
 	DetailsTitle string
 	Details      []string // latest steps, oldest first
-	// The stop button, shown while the task runs; StopAction empty = none.
-	StopLabel        string
-	StopConfirmTitle string
-	StopConfirmText  string
-	StopAction       string
-	SessionKey       string
+	SessionKey   string
 	// Interrupted is what the card should say if a restart cuts it off.
 	Interrupted string
 }
@@ -86,10 +82,10 @@ const (
 )
 
 type taskCard struct {
-	key, sessionKey, taskID, token string
-	agent                          AgentSession
-	platform                       TaskCardPlatform
-	replyCtx                       any
+	key, sessionKey, taskID string
+	agent                   AgentSession
+	platform                TaskCardPlatform
+	replyCtx                any
 
 	desc       string
 	background bool
@@ -103,7 +99,6 @@ type taskCard struct {
 	ended      bool
 	state      TaskCardState
 	summary    string
-	stopping   bool
 
 	scheduled bool // the open timer is set
 	opened    bool // the card is sent (or being sent); run owns updates
@@ -119,9 +114,8 @@ type taskCard struct {
 // has run for openDelay, updated in place at most every minGap, and settled
 // to the task's outcome when it ends.
 type taskCardManager struct {
-	mu      sync.Mutex
-	cards   map[string]*taskCard
-	byToken map[string]*taskCard
+	mu    sync.Mutex
+	cards map[string]*taskCard
 
 	openDelay  time.Duration // a task ending sooner gets no card
 	minGap     time.Duration // between two updates of one card
@@ -132,7 +126,6 @@ type taskCardManager struct {
 func newTaskCardManager() *taskCardManager {
 	return &taskCardManager{
 		cards:      make(map[string]*taskCard),
-		byToken:    make(map[string]*taskCard),
 		openDelay:  10 * time.Second,
 		minGap:     3 * time.Second,
 		tick:       20 * time.Second,
@@ -225,9 +218,6 @@ func (m *taskCardManager) dropLocked(c *taskCard) {
 	if m.cards[c.key] == c {
 		delete(m.cards, c.key)
 	}
-	if c.token != "" {
-		delete(m.byToken, c.token)
-	}
 }
 
 func poke(ch chan struct{}) {
@@ -255,10 +245,6 @@ func (m *taskCardManager) open(e *Engine, c *taskCard) {
 		return
 	}
 	c.opened = true
-	if token, err := randomToken(); err == nil {
-		c.token = token
-		m.byToken[token] = c
-	}
 	view := m.viewLocked(e, c)
 	m.mu.Unlock()
 
@@ -344,7 +330,7 @@ func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 	}
 	v := TaskCardView{
 		State:        TaskCardRunning,
-		Title:        title,
+		Title:        i.Tf(MsgTaskRunningTitle, title),
 		DetailsTitle: i.T(MsgTaskDetails),
 		Details:      append([]string(nil), c.details...),
 		SessionKey:   c.sessionKey,
@@ -371,10 +357,6 @@ func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 	} else {
 		v.Elapsed = i.Tf(MsgTaskElapsed, minutes)
 	}
-	if c.stopping {
-		v.State, v.Status = TaskCardStopping, i.T(MsgTaskStopping)
-		return v
-	}
 	v.Status = c.step
 	if v.Status == "" {
 		v.Status = i.T(MsgTaskWorking)
@@ -382,12 +364,7 @@ func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 	if c.recent != "" {
 		v.Recent = i.Tf(MsgTaskRecent, c.recent)
 	}
-	if _, ok := c.agent.(TaskStopper); ok && c.token != "" {
-		v.StopLabel = i.T(MsgTaskStop)
-		v.StopConfirmTitle = i.T(MsgTaskStopConfirmTitle)
-		v.StopConfirmText = i.T(MsgTaskStopConfirmText)
-		v.StopAction = "act:/taskstop " + c.token
-	}
+	v.Hint = i.T(MsgTaskHint)
 	return v
 }
 
@@ -407,35 +384,6 @@ func clipLines(s string, n, limit int) string {
 		out = string(r[:limit]) + "…"
 	}
 	return out
-}
-
-// stopTask handles the card's stop button (after the platform's confirm dialog).
-func (e *Engine) stopTask(token string) {
-	m := e.taskCards
-	m.mu.Lock()
-	c := m.byToken[strings.TrimSpace(token)]
-	if c == nil || c.ended || c.stopping {
-		m.mu.Unlock()
-		return
-	}
-	stopper, ok := c.agent.(TaskStopper)
-	if !ok {
-		m.mu.Unlock()
-		return
-	}
-	c.stopping = true
-	poke(c.wake)
-	m.mu.Unlock()
-	slog.Info("task card: stop requested", "session", c.sessionKey, "task", c.taskID)
-	go func() {
-		if err := stopper.StopTask(c.taskID); err != nil {
-			slog.Warn("task card: stop failed", "task", c.taskID, "error", err)
-			m.mu.Lock()
-			c.stopping = false
-			poke(c.wake)
-			m.mu.Unlock()
-		}
-	}()
 }
 
 // abandonTasks settles the cards of an agent session that is closing or gone:
