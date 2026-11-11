@@ -668,6 +668,21 @@ func (p *Platform) KeepPreviewInPlace(ctx context.Context, previewHandle any, ag
 		slog.Info(p.tag()+": final reply sent as new message", "reason", "long turn", "age", age.Round(time.Second))
 		return false
 	}
+	latest, err := p.latestMessageID(ctx, chatID)
+	if err != nil {
+		slog.Warn(p.tag()+": final reply sent as new message", "reason", "cannot check latest message", "error", err)
+		return false
+	}
+	if latest != messageID {
+		slog.Info(p.tag()+": final reply sent as new message", "reason", "newer messages below preview")
+		return false
+	}
+	return true
+}
+
+// latestMessageID returns the newest message of the chat. It needs one of the
+// app's message-history read permissions.
+func (p *Platform) latestMessageID(ctx context.Context, chatID string) (string, error) {
 	req := larkim.NewListMessageReqBuilder().
 		ContainerIdType("chat").
 		ContainerId(chatID).
@@ -688,15 +703,17 @@ func (p *Platform) KeepPreviewInPlace(ctx context.Context, previewHandle any, ag
 		}
 		return nil
 	})
-	if err != nil {
-		slog.Warn(p.tag()+": final reply sent as new message", "reason", "cannot check latest message", "error", err)
-		return false
+	return latest, err
+}
+
+// PreviewID implements core.PreviewIdentifier: the card's message ID.
+func (p *Platform) PreviewID(handle any) string {
+	h, ok := handle.(*feishuPreviewHandle)
+	if !ok {
+		return ""
 	}
-	if latest != messageID {
-		slog.Info(p.tag()+": final reply sent as new message", "reason", "newer messages below preview")
-		return false
-	}
-	return true
+	id, _ := h.ids()
+	return id
 }
 
 func (p *Platform) StartPreviewImmediately() bool {

@@ -159,6 +159,7 @@ type streamPreview struct {
 	notice    string // status line shown in place of the running step (see setNotice)
 
 	// Following the person's messages to the bottom of the chat (followUser).
+	followKey   string // session of the last followed message, for logs
 	followCtx   any
 	followTimer *time.Timer
 	lastMoveAt  time.Time

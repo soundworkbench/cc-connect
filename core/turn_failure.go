@@ -371,6 +371,25 @@ func (q queuedMessage) retryableInput() *Message {
 
 // failureTitle says what went wrong in one line; note carries the raw error for
 // failures that are not the model service's.
+// failureReason is a short code for logs; it carries no error text.
+func failureReason(cause error) string {
+	var mf *ModelFailure
+	switch {
+	case errors.As(cause, &mf) && mf.UsageLimited():
+		return "usage_limit"
+	case errors.As(cause, &mf) && mf.Unreachable():
+		return "model_unreachable"
+	case errors.As(cause, &mf):
+		return "model_error"
+	case errors.Is(cause, errAgentExited):
+		return "agent_exited"
+	case errors.Is(cause, errAgentIdleTimeout):
+		return "idle_timeout"
+	default:
+		return "turn_error"
+	}
+}
+
 func (e *Engine) failureTitle(cause error, display string) (title, note string) {
 	var mf *ModelFailure
 	if errors.As(cause, &mf) {
@@ -441,7 +460,7 @@ func (e *Engine) failTurnPreview(state *interactiveState, sp *streamPreview, ses
 	p, replyCtx := sp.platform, sp.replyCtx
 	sp.mu.Unlock()
 
-	StreamTrace("turn_end", map[string]any{"session": sessionKey, "outcome": "failed"})
+	cardEvent("fail_card", sessionKey, previewID(p, handle), "reason", failureReason(cause), "retry_button", token != "")
 	// Editing a card raises no notification; after a long wait the person
 	// has likely looked away, so the failure also arrives as a message.
 	if time.Since(turnStart) >= time.Minute {
@@ -453,11 +472,13 @@ func (e *Engine) failTurnPreview(state *interactiveState, sp *streamPreview, ses
 // retryFailedTurn handles the failure card's retry button: the original
 // request is admitted again, once. A button that no longer works (used,
 // expired, or from before a restart) answers with a notice.
-func (e *Engine) retryFailedTurn(token string) *Card {
+func (e *Engine) retryFailedTurn(token, sessionKey string) *Card {
 	t := e.failedTurns.take(strings.TrimSpace(token))
 	if t == nil {
+		cardEvent("retry", sessionKey, "", "reason", "button_expired")
 		return &Card{Toast: e.i18n.T(MsgRetryExpired)}
 	}
+	cardEvent("retry", sessionKey, previewID(t.platform, t.handle), "reason", "resent")
 	if fp, ok := t.platform.(FailurePreviewer); ok {
 		card := t.card
 		card.Note, card.ButtonLabel, card.Action = e.i18n.T(MsgRetrySent), "", ""

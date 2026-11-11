@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,12 +14,14 @@ type movePlatform struct {
 	failurePlatform
 	mmu   sync.Mutex
 	moves []any // reply contexts the card moved under
+	times []time.Time
 }
 
 func (p *movePlatform) MovePreview(_ context.Context, _ any, rc any) error {
 	p.mmu.Lock()
 	defer p.mmu.Unlock()
 	p.moves = append(p.moves, rc)
+	p.times = append(p.times, time.Now())
 	return nil
 }
 
@@ -37,11 +41,11 @@ func (s *steeringSession) Steer(prompt, _ string, _ []ImageAttachment, _ []FileA
 	return true, nil
 }
 
-func newFollowEnv(t *testing.T) (*movePlatform, *steeringSession, *Engine, func(id, content string)) {
+func newFollowEnv(t *testing.T, settle, gap time.Duration) (*movePlatform, *steeringSession, *Engine, func(id string)) {
 	t.Helper()
-	old := previewMoveGap
-	previewMoveGap = 150 * time.Millisecond
-	t.Cleanup(func() { previewMoveGap = old })
+	oldSettle, oldGap := previewMoveSettle, previewMoveGap
+	previewMoveSettle, previewMoveGap = settle, gap
+	t.Cleanup(func() { previewMoveSettle, previewMoveGap = oldSettle, oldGap })
 	p := &movePlatform{failurePlatform: failurePlatform{cujSegmentedPlatform: cujSegmentedPlatform{stubPlatformEngine: stubPlatformEngine{n: "segmented"}}}}
 	s := &steeringSession{queuedLifecycleSession: &queuedLifecycleSession{cujAgentSession: newCUJAgentSession(), sent: make(chan string, 4)}, steered: make(chan string, 8)}
 	e := NewEngine("segmented", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
@@ -49,10 +53,10 @@ func newFollowEnv(t *testing.T) (*movePlatform, *steeringSession, *Engine, func(
 	cfg.Segmented, cfg.StepList = true, true
 	e.SetStreamPreviewCfg(cfg)
 	t.Cleanup(func() { _ = e.Stop() })
-	send := func(id, content string) {
-		e.ReceiveMessage(p, &Message{SessionKey: "segmented:user", Platform: p.Name(), MessageID: id, UserID: "user", Content: content, ReplyCtx: "ctx-" + id, UserMessageTimeMs: time.Now().UnixMilli()})
+	send := func(id string) {
+		e.ReceiveMessage(p, &Message{SessionKey: "segmented:user", Platform: p.Name(), MessageID: id, UserID: "user", Content: "消息 " + id, ReplyCtx: "ctx-" + id})
 	}
-	send("1", "写一份周报")
+	send("1")
 	select {
 	case <-s.sent:
 	case <-time.After(3 * time.Second):
@@ -61,38 +65,69 @@ func newFollowEnv(t *testing.T) (*movePlatform, *steeringSession, *Engine, func(
 	return p, s, e, send
 }
 
-func TestBurstOfMessagesMovesTheCardOnceBelowTheLast(t *testing.T) {
-	p, s, _, send := newFollowEnv(t)
-	send("2", "加上下周计划")
-	send("3", "用表格")
-	for i := 0; i < 2; i++ {
-		select {
-		case <-s.steered:
-		case <-time.After(3 * time.Second):
-			t.Fatal("message not steered into the turn")
+func steerOne(t *testing.T, s *steeringSession) time.Time {
+	t.Helper()
+	select {
+	case <-s.steered:
+		return time.Now()
+	case <-time.After(3 * time.Second):
+		t.Fatal("message not steered into the turn")
+	}
+	return time.Time{}
+}
+
+// The burst from the 11-11 test: three messages 1.3 s and 1.6 s apart, with
+// the production wait. The card moves once, after the burst, under the last.
+func TestBurstOfMessagesMovesTheCardOnceUnderTheLast(t *testing.T) {
+	p, s, _, send := newFollowEnv(t, 2500*time.Millisecond, 0)
+	send("2")
+	steerOne(t, s)
+	time.Sleep(1300 * time.Millisecond)
+	send("3")
+	steerOne(t, s)
+	time.Sleep(1600 * time.Millisecond)
+	if got := p.moved(); len(got) != 0 {
+		t.Fatalf("moved during the burst: %v", got)
+	}
+	send("4")
+	last := steerOne(t, s)
+	for deadline := time.Now().Add(8 * time.Second); len(p.moved()) == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("card never moved")
 		}
 	}
-	waitUntil(t, "card move", func() bool { return len(p.moved()) == 1 })
-	time.Sleep(3 * previewMoveGap)
-	if got := p.moved(); len(got) != 1 || got[0] != "ctx-3" {
+	p.mmu.Lock()
+	at := p.times[0]
+	p.mmu.Unlock()
+	if at.Sub(last) < 2*time.Second {
+		t.Fatalf("moved %v after the last message, before the burst settled", at.Sub(last))
+	}
+	time.Sleep(time.Second)
+	if got := p.moved(); len(got) != 1 || got[0] != "ctx-4" {
 		t.Fatalf("moves=%v, want one move under the last message", got)
 	}
+	s.events <- Event{Type: EventResult, Content: "好了", Done: true}
+}
 
-	// Later messages move it again, never sooner than the gap.
+func TestCardStaysPutRightAfterItAppears(t *testing.T) {
+	p, s, _, send := newFollowEnv(t, 20*time.Millisecond, 400*time.Millisecond)
 	start := time.Now()
-	send("4", "再加一节风险")
-	<-s.steered
-	waitUntil(t, "second move", func() bool { return len(p.moved()) == 2 })
-	if got := p.moved(); got[1] != "ctx-4" || time.Since(start) > 2*time.Second {
-		t.Fatalf("moves=%v", got)
+	send("2")
+	steerOne(t, s)
+	waitUntil(t, "card move", func() bool { return len(p.moved()) == 1 })
+	p.mmu.Lock()
+	at := p.times[0]
+	p.mmu.Unlock()
+	if at.Sub(start) < 300*time.Millisecond {
+		t.Fatalf("moved %v after the card appeared", at.Sub(start))
 	}
 	s.events <- Event{Type: EventResult, Content: "好了", Done: true}
 }
 
 func TestFinishedTurnDoesNotMoveItsCard(t *testing.T) {
-	p, s, e, send := newFollowEnv(t)
-	send("2", "补一句")
-	<-s.steered
+	p, s, e, send := newFollowEnv(t, 100*time.Millisecond, 0)
+	send("2")
+	steerOne(t, s)
 	s.events <- Event{Type: EventResult, Content: "好了", Done: true}
 	deadline := time.Now().Add(3 * time.Second)
 	for e.sessions.GetOrCreateActive("segmented:user").Busy() {
@@ -101,29 +136,27 @@ func TestFinishedTurnDoesNotMoveItsCard(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	time.Sleep(2 * previewMoveGap)
+	time.Sleep(300 * time.Millisecond)
 	if got := p.moved(); len(got) != 0 {
 		t.Fatalf("a finished card moved: %v", got)
 	}
 }
 
-func TestFollowWaitsForTheGapAfterTheCardStarts(t *testing.T) {
-	old := previewMoveGap
-	previewMoveGap = 80 * time.Millisecond
-	t.Cleanup(func() { previewMoveGap = old })
-	p := &movePlatform{failurePlatform: failurePlatform{cujSegmentedPlatform: cujSegmentedPlatform{stubPlatformEngine: stubPlatformEngine{n: "segmented"}}}}
-	cfg := DefaultStreamPreviewCfg()
-	cfg.Segmented = true
-	sp := newStreamPreview(cfg, p, "ctx", context.Background(), nil)
-	start := time.Now()
-	sp.previewMsgID, sp.previewStartedAt = 0, start
-	sp.followUser("ctx-a")
-	sp.followUser("ctx-b")
-	waitUntil(t, "move", func() bool { return len(p.moved()) == 1 })
-	if elapsed := time.Since(start); elapsed < previewMoveGap {
-		t.Fatalf("moved %v after the card started, before the gap", elapsed)
+func TestCardEventsReachTheTrace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trace.jsonl")
+	if err := SetStreamTraceFile(path); err != nil {
+		t.Fatal(err)
 	}
-	if got := p.moved(); got[0] != "ctx-b" {
-		t.Fatalf("moves=%v", got)
+	t.Cleanup(func() { _ = SetStreamTraceFile("") })
+	cardEvent("card_move", "feishu:oc:u", "om_new", "from", "om_old", "reason", "user_message_below")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := string(data)
+	for _, want := range []string{`"card_move"`, `"session":"feishu:oc:u"`, `"card":"om_new"`, `"from":"om_old"`, `"reason":"user_message_below"`} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("trace lacks %s: %s", want, line)
+		}
 	}
 }

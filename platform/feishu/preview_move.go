@@ -9,6 +9,7 @@ import (
 )
 
 var _ core.PreviewMover = (*Platform)(nil)
+var _ core.PreviewIdentifier = (*Platform)(nil)
 
 // MovePreview re-posts the live card as a new message at the bottom of the
 // chat, replying to rc, and folds the old card into one grey line. The new card
@@ -19,6 +20,17 @@ func (p *Platform) MovePreview(ctx context.Context, handle any, rc any) error {
 	h, ok := handle.(*feishuPreviewHandle)
 	if !ok || h.live == nil || h.cardID == "" {
 		return core.ErrNotSupported
+	}
+	// A card that is still the newest message needs no move. When the
+	// history cannot be read the card moves anyway.
+	if messageID, chatID := h.ids(); chatID != "" {
+		latest, err := p.latestMessageID(ctx, chatID)
+		switch {
+		case err != nil:
+			slog.Info(p.tag()+": cannot check whether the card is the latest message; moving it", "card", messageID, "error", err)
+		case latest == messageID:
+			return core.ErrPreviewIsLatest
+		}
 	}
 	v := h.live
 	v.mu.Lock()

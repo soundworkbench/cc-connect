@@ -273,7 +273,7 @@ func (m *taskCardManager) open(e *Engine, c *taskCard) {
 	c.handle = handle
 	m.maybeSummarizeLocked(e, c)
 	m.mu.Unlock()
-	StreamTrace("task_card", map[string]any{"op": "open", "session": c.sessionKey, "task": c.taskID})
+	cardEvent("task_card_open", c.sessionKey, taskCardID(c), "task", c.taskID, "reason", "background_over_open_delay")
 	go m.run(e, c)
 }
 
@@ -308,11 +308,18 @@ func (m *taskCardManager) run(e *Engine, c *taskCard) {
 			m.mu.Lock()
 			m.dropLocked(c)
 			m.mu.Unlock()
-			StreamTrace("task_card", map[string]any{"op": "end", "session": c.sessionKey, "task": c.taskID, "state": string(view.State)})
+			cardEvent("task_card_end", c.sessionKey, taskCardID(c), "task", c.taskID, "reason", string(view.State))
 			return
 		}
-		StreamTrace("task_card", map[string]any{"op": "update", "session": c.sessionKey, "task": c.taskID})
+		cardEvent("task_card_update", c.sessionKey, taskCardID(c), "task", c.taskID, "reason", string(view.State))
 	}
+}
+
+func taskCardID(c *taskCard) string {
+	if id, ok := c.platform.(PreviewIdentifier); ok && c.handle != nil {
+		return id.PreviewID(c.handle)
+	}
+	return ""
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {

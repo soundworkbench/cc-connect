@@ -2,9 +2,12 @@ package feishu
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 func TestMovePreviewRepostsBelowAndFoldsOldCard(t *testing.T) {
@@ -18,15 +21,18 @@ func TestMovePreviewRepostsBelowAndFoldsOldCard(t *testing.T) {
 	h.sequence = 7
 	h.live.mu.Unlock()
 	before := len(f.read())
+	f.mu.Lock()
+	f.latest = "om_user3" // the person's message sits below the card
+	f.mu.Unlock()
 
 	if err := p.MovePreview(context.Background(), h, replyContext{chatID: "oc", messageID: "om_user3"}); err != nil {
 		t.Fatal(err)
 	}
 	calls := f.read()[before:]
-	if len(calls) != 4 {
+	if len(calls) != 5 || calls[0].method != "GET" {
 		t.Fatalf("calls=%+v", calls)
 	}
-	create, reply, settings, fold := calls[0], calls[1], calls[2], calls[3]
+	create, reply, settings, fold := calls[1], calls[2], calls[3], calls[4]
 	if create.method != "POST" || !strings.HasSuffix(create.path, "/cardkit/v1/cards") {
 		t.Fatalf("create=%+v", create)
 	}
@@ -58,5 +64,18 @@ func TestMovePreviewRepostsBelowAndFoldsOldCard(t *testing.T) {
 	last := f.read()[len(f.read())-1]
 	if last.body["sequence"] != float64(1) {
 		t.Fatalf("new card sequence restarts at 1: %+v", last)
+	}
+}
+
+func TestMovePreviewSkipsTheLatestCard(t *testing.T) {
+	f, p := newPreviewFixture(t)
+	h := startStepPreview(t, p)
+	before := len(f.read()) // fixture: the latest message is the card itself
+	err := p.MovePreview(context.Background(), h, replyContext{chatID: "oc", messageID: "om_user3"})
+	if !errors.Is(err, core.ErrPreviewIsLatest) {
+		t.Fatalf("err=%v", err)
+	}
+	if calls := f.read()[before:]; len(calls) != 1 || calls[0].method != "GET" {
+		t.Fatalf("a card already at the bottom was touched: %+v", calls)
 	}
 }
