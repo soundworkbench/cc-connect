@@ -36,7 +36,7 @@ func TestTaskFramesBecomeTaskEvents(t *testing.T) {
 	if started.Kind != core.TaskStarted || started.TaskID != "b1" || started.Description != "整理 200 个文件" || started.Background == nil || !*started.Background || started.Step != "运行命令" {
 		t.Errorf("started=%+v", started)
 	}
-	if progress.Kind != core.TaskProgress || progress.Step != "联网搜索" || progress.Summary != "在比较三家供应商" || progress.Elapsed != 65*time.Second {
+	if progress.Kind != core.TaskProgress || progress.Description != "" || progress.Step != "查资料" || progress.Summary != "在比较三家供应商" || progress.Elapsed != 65*time.Second {
 		t.Errorf("progress=%+v", progress)
 	}
 	if updated.Kind != core.TaskUpdated || updated.Background == nil || !*updated.Background {
@@ -47,6 +47,35 @@ func TestTaskFramesBecomeTaskEvents(t *testing.T) {
 	}
 	if !ambient.Hidden {
 		t.Errorf("ambient task not hidden: %+v", ambient)
+	}
+}
+
+// A task_progress description says what the task is doing now; the task's
+// name stays the one from task_started (the 11-11 self-test card read
+// "✓ 已完成：Running 删除临时目录").
+func TestTaskProgressDescriptionIsTheStep(t *testing.T) {
+	cases := []struct {
+		name, frame, step string
+	}{
+		{"command description", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"Running 删除临时目录","last_tool_name":"Bash","usage":{"duration_ms":1000}}`, "删除临时目录"},
+		{"own wording", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"读取八份纪要正文","last_tool_name":"Read"}`, "读取八份纪要正文"},
+		{"command without description", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"Running grep -rn '会议' notes/","last_tool_name":"Bash"}`, "运行命令"},
+		{"English activity", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"Reading main.go","last_tool_name":"Read"}`, "读取文件"},
+		{"summary only", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"正在比对纪要","summary":"正在比对纪要"}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := progressSession()
+			cs.handleReadLoopLine(tc.frame)
+			events := drainProgressEvents(cs)
+			if len(events) != 1 || events[0].Task == nil {
+				t.Fatalf("events=%+v", events)
+			}
+			ev := events[0].Task
+			if ev.Description != "" || ev.Step != tc.step {
+				t.Fatalf("description=%q step=%q, want no description and step %q", ev.Description, ev.Step, tc.step)
+			}
+		})
 	}
 }
 
