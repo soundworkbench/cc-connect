@@ -440,6 +440,10 @@ func (a *Agent) configuredModels() []core.ModelOption {
 	return core.GetProviderModels(a.providers, a.activeIdx)
 }
 
+// ConfiguredModels returns the provider's configured model list without any
+// network lookup, for mapping a model id to its display alias.
+func (a *Agent) ConfiguredModels() []core.ModelOption { return a.configuredModels() }
+
 func (a *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if models := a.configuredModels(); len(models) > 0 {
 		return models

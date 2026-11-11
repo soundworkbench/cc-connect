@@ -3,6 +3,7 @@ package core
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolveModelAlias_CaseInsensitive(t *testing.T) {
@@ -133,5 +134,70 @@ func TestModelDisplayName_FallsBackToName(t *testing.T) {
 		if got := modelDisplayName(models, in); got != want {
 			t.Fatalf("modelDisplayName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// aliasFooterAgent is an agent whose configured model list carries aliases.
+type aliasFooterAgent struct {
+	stubFooterAgent
+	models []ModelOption
+}
+
+func (a *aliasFooterAgent) ConfiguredModels() []ModelOption { return a.models }
+
+func newAliasFooterAgent() *aliasFooterAgent {
+	return &aliasFooterAgent{
+		stubFooterAgent: stubFooterAgent{model: "claude-opus-5-5", effort: "xhigh", workDir: "/tmp/ws"},
+		models:          claudeAliasAgent().models,
+	}
+}
+
+func TestReplyFooter_ShowsAliasNotModelID(t *testing.T) {
+	e := newLegacyFooterEngine()
+	e.i18n = NewI18n(LangEnglish)
+	got := e.buildReplyFooter(newAliasFooterAgent(), nil, "/tmp/ws", "100% left")
+	assertAliasText(t, "reply footer", got, "Claude Opus 5.5 · xhigh")
+}
+
+func TestStatusLineFooter_ShowsAliasNotModelID(t *testing.T) {
+	session := &controllableAgentSession{
+		model:   "claude-fable-5-2",
+		workDir: "/tmp/ws",
+		contextUsage: &ContextUsage{
+			InputTokens: 1, OutputTokens: 168, CacheCreationInputTokens: 971,
+			CachedInputTokens: 40800, ContextWindow: 1_000_000, UsedTokens: 41772,
+		},
+	}
+	e := newClaudeFooterEngine()
+	e.i18n = NewI18n(LangEnglish)
+	agent := newAliasFooterAgent()
+	assertAliasText(t, "status line", e.buildClaudeStatusLineFooter(agent, session, "/tmp/ws"), "Claude Fable 5.2 · ")
+	assertAliasText(t, "rich card footer", e.composeRichStatusFooter(false, time.Now(), agent, session, "/tmp/ws"), "Claude Fable 5.2 · ")
+}
+
+func TestFooter_UnaliasedModelKeepsID(t *testing.T) {
+	e := newLegacyFooterEngine()
+	e.i18n = NewI18n(LangEnglish)
+	agent := newAliasFooterAgent()
+	agent.model = "haiku"
+	if got := e.buildReplyFooter(agent, nil, "/tmp/ws", "100% left"); !strings.Contains(got, "haiku · xhigh") {
+		t.Fatalf("footer = %q, want the id for a model without an alias", got)
+	}
+}
+
+func TestModelSwitchNotice_ShowsAliasKeepsCommandID(t *testing.T) {
+	agent := newAliasFooterAgent()
+	e := NewEngine("test", agent, nil, "", LangEnglish)
+	ms := &ModelSwitch{From: "claude-opus-5-5", To: "claude-fable-5-2", Category: "cyber", SessionWide: true}
+	got := e.modelSwitchNotice(ms)
+	for _, w := range []string{"`Claude Opus 5.5`'s safeguards", "`Claude Fable 5.2` is answering", "`/model claude-opus-5-5`"} {
+		if !strings.Contains(got, w) {
+			t.Fatalf("notice missing %q:\n%s", w, got)
+		}
+	}
+	ms.SessionWide = false
+	got = e.modelSwitchNotice(ms)
+	if strings.Contains(got, "claude-") || strings.Contains(got, "EXTRA") {
+		t.Fatalf("per-turn notice shows a raw id or stray argument:\n%s", got)
 	}
 }

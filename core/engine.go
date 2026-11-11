@@ -4880,7 +4880,20 @@ func (e *Engine) modelSwitchNotice(ms *ModelSwitch) string {
 	if ms.SessionWide {
 		key = MsgModelSwitchSession
 	}
-	return e.i18n.Tf(key, ms.From, category, ms.To)
+	return e.i18n.Tf(key, e.footerModelName(e.agent, ms.From), category, e.footerModelName(e.agent, ms.To), ms.From)
+}
+
+// footerModelName maps a model id to its configured alias for display in reply
+// footers and notices. It reads only the agent's configured list (no network,
+// no config re-read) and returns the id when no alias is set.
+func (e *Engine) footerModelName(agent Agent, name string) string {
+	if name == "" {
+		return name
+	}
+	if cm, ok := agent.(interface{ ConfiguredModels() []ModelOption }); ok {
+		return modelDisplayName(cm.ConfiguredModels(), name)
+	}
+	return name
 }
 
 // relayModelSwitch tells the user that the agent moved to another model on its
@@ -7801,7 +7814,7 @@ func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDi
 			parts = append(parts, contextLeft)
 			hasStatus = true
 		}
-		if model := replyFooterModel(session, agent); model != "" {
+		if model := e.footerModelName(agent, replyFooterModel(session, agent)); model != "" {
 			parts = append(parts, model)
 			hasStatus = true
 		}
@@ -7859,7 +7872,7 @@ func (e *Engine) composeRichStatusFooter(streaming bool, turnStart time.Time, ag
 	// Line 2: model + effort + token usage detail + ctx %
 	if e.showContextIndicator {
 		usage := replyFooterSessionContextUsage(session)
-		model := replyFooterModel(session, agent)
+		model := e.footerModelName(agent, replyFooterModel(session, agent))
 		effort := replyFooterReasoningEffort(session, agent)
 		if line := buildClaudeStatusLineFooter(model, effort, usage); line != "" {
 			lines = append(lines, line)
@@ -8271,10 +8284,9 @@ func (e *Engine) buildClaudeStatusLineFooter(agent Agent, session AgentSession, 
 		//   <model id> · [effort:X ·] out N · in N cw N cr N · ctx N%
 		// `·` separates major segments; tokens-in tier (in/cw/cr) groups under
 		// one segment because cw/cr are just cache-tiered variants of input.
-		// Raw model id is preserved (e.g. "claude-opus-4-7[1m]") for diagnostic
-		// clarity over a prettified display name.
+		// The model shows its configured alias when there is one, else its id.
 		var line1Parts []string
-		if model := strings.TrimSpace(replyFooterModel(session, agent)); model != "" {
+		if model := strings.TrimSpace(e.footerModelName(agent, replyFooterModel(session, agent))); model != "" {
 			line1Parts = append(line1Parts, model)
 		}
 		if effort := strings.TrimSpace(replyFooterReasoningEffort(session, agent)); effort != "" {
