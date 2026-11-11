@@ -22,9 +22,10 @@ type taskCardCall struct {
 // taskCardPlatform records task cards; each SendTaskCard returns a new handle.
 type taskCardPlatform struct {
 	failurePlatform
-	tmu     sync.Mutex
-	sent    []taskCardCall
-	updates []taskCardCall
+	tmu      sync.Mutex
+	sent     []taskCardCall
+	updates  []taskCardCall
+	onUpdate func()
 }
 
 func (p *taskCardPlatform) SendTaskCard(_ context.Context, _ any, v TaskCardView) (any, error) {
@@ -39,6 +40,9 @@ func (p *taskCardPlatform) UpdateTaskCard(_ context.Context, h any, v TaskCardVi
 	p.tmu.Lock()
 	defer p.tmu.Unlock()
 	p.updates = append(p.updates, taskCardCall{h, v})
+	if p.onUpdate != nil {
+		p.onUpdate()
+	}
 	return nil
 }
 
@@ -354,5 +358,76 @@ func TestCollapseRepeat(t *testing.T) {
 		if got := collapseRepeat(in); got != want {
 			t.Errorf("collapseRepeat(%q)=%q, want %q", in, got, want)
 		}
+	}
+}
+
+// A task that adds no step (a subagent writing, not calling tools) still
+// changes its card about every idleBeat, never faster than minGap. In the 11-11
+// test a card stayed the same for 47 s.
+func TestIdleTaskCardShowsItIsAlive(t *testing.T) {
+	env := newTaskEnv(t)
+	env.e.taskCards.idleBeat = 150 * time.Millisecond
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理纪要", Background: yes(), Step: "写清单"})
+	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	waitUntil(t, "three idle beats", func() bool { _, up := env.p.cards(); return len(up) >= 3 })
+	sent, up := env.p.cards()
+	if up[0].view.Status != "仍在进行：写清单" || up[1].view.Status != "写清单" || up[2].view.Status != "仍在进行：写清单" {
+		t.Fatalf("idle statuses: %q %q %q", up[0].view.Status, up[1].view.Status, up[2].view.Status)
+	}
+	prev := sent[0].view
+	for _, u := range up {
+		if sameTaskView(u.view, prev) {
+			t.Fatalf("idle update changed nothing: %+v", u.view)
+		}
+		prev = u.view
+	}
+	// A new step shows as it is.
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "核对负责人"})
+	waitUntil(t, "new step", func() bool {
+		_, up := env.p.cards()
+		return up[len(up)-1].view.Status == "核对负责人"
+	})
+}
+
+// Updates of a busy card stay at least minGap apart, idle beats included.
+func TestTaskCardUpdatesKeepMinGap(t *testing.T) {
+	env := newTaskEnv(t)
+	env.e.taskCards.minGap = 80 * time.Millisecond
+	env.e.taskCards.idleBeat = 100 * time.Millisecond
+	var mu sync.Mutex
+	var at []time.Time
+	env.p.onUpdate = func() { mu.Lock(); at = append(at, time.Now()); mu.Unlock() }
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理纪要", Background: yes()})
+	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	for i := 0; i < 20; i++ {
+		env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: fmt.Sprintf("第 %d 步", i)})
+		time.Sleep(15 * time.Millisecond)
+	}
+	time.Sleep(400 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(at) < 3 {
+		t.Fatalf("updates=%d", len(at))
+	}
+	for i := 1; i < len(at); i++ {
+		if gap := at[i].Sub(at[i-1]); gap < 70*time.Millisecond {
+			t.Fatalf("updates %d and %d %v apart, want at least minGap", i-1, i, gap)
+		}
+	}
+}
+
+// When the card is idle the quick model may write a line even without a new
+// step.
+func TestIdleTaskCardAsksTheQuickModel(t *testing.T) {
+	env := newTaskEnv(t)
+	calls := quickTaskServer(t, env, func(n int) string { return fmt.Sprintf("正在写第%d部分", n) })
+	env.e.taskCards.idleBeat = 150 * time.Millisecond
+	env.e.taskCards.summaryGap = 0
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "写报告", Background: yes()})
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "写报告正文"})
+	waitUntil(t, "first quick line", func() bool { return lastRecent(env) == "最近进展：正在写第1部分" })
+	waitUntil(t, "idle quick line", func() bool { return lastRecent(env) == "最近进展：正在写第2部分" })
+	if n := len(calls()); n < 2 {
+		t.Fatalf("quick calls=%d", n)
 	}
 }

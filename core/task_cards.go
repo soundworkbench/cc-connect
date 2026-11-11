@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +94,7 @@ type taskCard struct {
 	start      time.Time
 	step       string
 	recent     string
+	still      bool      // the step line says the task is still on the same step
 	cliAt      time.Time // when the agent last wrote recent; zero = never
 	details    []string
 	steps      int // step changes seen, including those rotated out of details
@@ -119,7 +121,8 @@ type taskCardManager struct {
 
 	openDelay  time.Duration // a task ending sooner gets no card
 	minGap     time.Duration // between two updates of one card
-	tick       time.Duration // how often the elapsed minutes are checked
+	tick       time.Duration // how often a card is checked for changes
+	idleBeat   time.Duration // a card unchanged this long shows a sign that the task is alive
 	summaryGap time.Duration // between two quick-model progress lines
 	cliStale   time.Duration // an agent progress line older than this lets the quick model write
 }
@@ -129,7 +132,8 @@ func newTaskCardManager() *taskCardManager {
 		cards:      make(map[string]*taskCard),
 		openDelay:  10 * time.Second,
 		minGap:     3 * time.Second,
-		tick:       20 * time.Second,
+		tick:       5 * time.Second,
+		idleBeat:   25 * time.Second,
 		summaryGap: 30 * time.Second,
 		cliStale:   60 * time.Second,
 	}
@@ -173,7 +177,7 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 		c.hidden = true
 	}
 	if ev.Step != "" && ev.Step != c.step {
-		c.step = ev.Step
+		c.step, c.still = ev.Step, false
 		c.steps++
 		c.details = append(c.details, ev.Step)
 		if len(c.details) > taskCardDetailRows {
@@ -205,7 +209,7 @@ func (m *taskCardManager) scheduleLocked(e *Engine, c *taskCard) {
 	switch {
 	case c.opened:
 		poke(c.wake)
-		m.maybeSummarizeLocked(e, c)
+		m.maybeSummarizeLocked(e, c, false)
 	case c.ended:
 		m.dropLocked(c)
 	case c.hidden:
@@ -259,18 +263,21 @@ func (m *taskCardManager) open(e *Engine, c *taskCard) {
 		return
 	}
 	c.handle = handle
-	m.maybeSummarizeLocked(e, c)
+	m.maybeSummarizeLocked(e, c, false)
 	m.mu.Unlock()
 	cardEvent("task_card_open", c.sessionKey, taskCardID(c), "task", c.taskID, "reason", "background_over_open_delay")
-	go m.run(e, c)
+	go m.run(e, c, view)
 }
 
 // run owns a card's updates after it opened: changes are merged so the card
-// is written at most every minGap, and the elapsed minutes stay current.
-func (m *taskCardManager) run(e *Engine, c *taskCard) {
+// is written at most every minGap, and the elapsed minutes stay current. A
+// card that has not changed for idleBeat (a subagent writing, not calling
+// tools) gets a sign of life: the quick model's next progress line when it
+// can write one, and the step line flips to "still on: <step>" and back.
+func (m *taskCardManager) run(e *Engine, c *taskCard, shown TaskCardView) {
 	tick := time.NewTicker(m.tick)
 	defer tick.Stop()
-	shownMinute := taskMinutes(c.start)
+	changed := time.Now()
 	for {
 		if !sleepCtx(e.ctx, m.minGap) {
 			return
@@ -278,20 +285,25 @@ func (m *taskCardManager) run(e *Engine, c *taskCard) {
 		select {
 		case <-c.wake:
 		case <-tick.C:
-			if taskMinutes(c.start) == shownMinute {
-				continue
-			}
 		case <-e.ctx.Done():
 			return
 		}
 		m.mu.Lock()
 		view := m.viewLocked(e, c)
+		if !c.ended && sameTaskView(view, shown) && time.Since(changed) >= m.idleBeat {
+			c.still = !c.still
+			m.maybeSummarizeLocked(e, c, true)
+			view = m.viewLocked(e, c)
+		}
 		final := c.ended
 		m.mu.Unlock()
-		shownMinute = taskMinutes(c.start)
+		if !final && sameTaskView(view, shown) {
+			continue
+		}
 		if err := c.platform.UpdateTaskCard(e.ctx, c.handle, view); err != nil {
 			slog.Warn("task card: update failed", "task", c.taskID, "error", err)
 		}
+		shown, changed = view, time.Now()
 		if final {
 			m.mu.Lock()
 			m.dropLocked(c)
@@ -319,6 +331,11 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+func sameTaskView(a, b TaskCardView) bool {
+	return a.State == b.State && a.Title == b.Title && a.Status == b.Status && a.Elapsed == b.Elapsed &&
+		a.Recent == b.Recent && a.Summary == b.Summary && slices.Equal(a.Details, b.Details)
 }
 
 func taskMinutes(start time.Time) int { return int(time.Since(start) / time.Minute) }
@@ -360,7 +377,12 @@ func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 		v.Elapsed = i.Tf(MsgTaskElapsed, minutes)
 	}
 	v.Status = c.step
-	if v.Status == "" {
+	if c.still {
+		if v.Status == "" {
+			v.Status = title
+		}
+		v.Status = i.Tf(MsgTaskStill, v.Status)
+	} else if v.Status == "" {
 		v.Status = i.T(MsgTaskWorking)
 	}
 	if c.recent != "" {
@@ -412,13 +434,13 @@ const taskSummaryPrompt = "你在给用户看的后台任务卡片上写一行�
 
 // maybeSummarizeLocked asks the quick model for a progress line when the
 // agent's own line is missing or has not changed for cliStale: at most every
-// summaryGap, and only after new steps. A failure leaves the line as it was.
-// Caller holds m.mu.
-func (m *taskCardManager) maybeSummarizeLocked(e *Engine, c *taskCard) {
+// summaryGap, and only after new steps unless the card has been idle. A
+// failure leaves the line as it was. Caller holds m.mu.
+func (m *taskCardManager) maybeSummarizeLocked(e *Engine, c *taskCard, idle bool) {
 	cfg := e.streamPreview.QuickLine
 	if !cfg.Enabled || c.ended || c.summarizing || c.handle == nil ||
 		time.Since(c.cliAt) < m.cliStale ||
-		c.steps == 0 || c.steps == c.summarizedRows ||
+		c.steps == 0 || (!idle && c.steps == c.summarizedRows) ||
 		time.Since(c.lastSummaryAt) < m.summaryGap {
 		return
 	}
@@ -427,6 +449,9 @@ func (m *taskCardManager) maybeSummarizeLocked(e *Engine, c *taskCard) {
 	c.lastSummaryAt = asked
 	c.summarizedRows = c.steps
 	prompt := "任务：" + clipRunes(c.desc, 200) + "\n最近的步骤：\n- " + strings.Join(c.details, "\n- ")
+	if idle {
+		prompt += "\n（最近一段时间没有新步骤，任务还在做最后这一步。）"
+	}
 	if c.recent != "" {
 		prompt += "\n上一句进展：" + c.recent + "\n不要重复上一句。"
 	}
