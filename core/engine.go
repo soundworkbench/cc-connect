@@ -3419,8 +3419,8 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	turnStart := time.Now()
 
-	// With no turn running, a short progress question or a thank-you may be
-	// answered without the agent (triage.go). Messages queued meanwhile are
+	// With no turn running but background tasks or a queue, a short progress
+	// question or a thank-you may be answered without the agent (triage.go). Messages queued meanwhile are
 	// picked up as after any turn.
 	if e.triageIdleMessage(p, msg, session, sessions, interactiveKey) {
 		session.Unlock(lockGen)

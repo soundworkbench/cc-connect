@@ -49,6 +49,7 @@ type triageEnv struct {
 	key   string
 	label atomic.Value // what the quick model answers
 	fail  atomic.Bool
+	delay atomic.Int64 // how long the quick model takes, in ns
 	calls atomic.Int32
 	n     int
 }
@@ -67,6 +68,7 @@ func newTriageEnv(t *testing.T) *triageEnv {
 			return
 		}
 		env.calls.Add(1)
+		time.Sleep(time.Duration(env.delay.Load()))
 		if env.fail.Load() {
 			http.Error(w, "down", http.StatusBadGateway)
 			return
@@ -126,9 +128,40 @@ func (env *triageEnv) firstTurn(reply string) {
 	env.finishTurn(reply)
 }
 
-func TestThanksWhileIdleOnlyGetsAnEmoji(t *testing.T) {
+// backgroundTask starts a background task card for the session.
+func (env *triageEnv) backgroundTask(id, desc, step string) *interactiveState {
+	env.t.Helper()
+	env.e.interactiveMu.Lock()
+	state := env.e.interactiveStates[env.key]
+	env.e.interactiveMu.Unlock()
+	b := true
+	env.e.handleTaskEvent(state, env.key, &TaskEvent{Kind: TaskStarted, TaskID: id, Description: desc, Background: &b})
+	env.e.handleTaskEvent(state, env.key, &TaskEvent{Kind: TaskProgress, TaskID: id, Step: step})
+	return state
+}
+
+// A fully idle chat never waits on the quick model.
+func TestIdleChatSkipsTheQuickModel(t *testing.T) {
 	env := newTriageEnv(t)
 	env.firstTurn("整理好了。")
+	env.label.Store("GREETING")
+	calls := env.calls.Load()
+	for _, content := range []string{"查一下日志", "谢谢", "好了吗"} {
+		env.send(content)
+		if !env.reachesAgent() {
+			t.Fatalf("%q in an idle chat did not reach the agent", content)
+		}
+		env.finishTurn("好")
+	}
+	if env.calls.Load() != calls || len(env.p.reacted()) != 0 {
+		t.Fatalf("idle chat was triaged: calls=%d reactions=%v", env.calls.Load()-calls, env.p.reacted())
+	}
+}
+
+func TestThanksDuringABackgroundTaskOnlyGetsAnEmoji(t *testing.T) {
+	env := newTriageEnv(t)
+	env.firstTurn("已在后台整理。")
+	env.backgroundTask("t1", "按客户整理 200 个文件", "读取文件")
 	env.label.Store("GREETING")
 	before := len(env.p.stubPlatformEngine.getSent())
 	env.send("谢谢")
@@ -155,6 +188,7 @@ func TestThanksWhileIdleOnlyGetsAnEmoji(t *testing.T) {
 func TestShortAnswersToAPendingQuestionAreNeverSwallowed(t *testing.T) {
 	env := newTriageEnv(t)
 	env.firstTurn("做成表格还是文档？")
+	env.backgroundTask("t1", "按客户整理 200 个文件", "读取文件")
 	env.label.Store("GREETING")
 	calls := env.calls.Load()
 	for _, answer := range []string{"好的", "可以"} {
@@ -190,17 +224,15 @@ func TestShortAnswersToAPendingQuestionAreNeverSwallowed(t *testing.T) {
 		t.Fatal("answer with a pending decision card was swallowed")
 	}
 	env.finishTurn("好")
+	if env.calls.Load() != calls || len(env.p.reacted()) != 0 {
+		t.Fatalf("triaged with a pending decision card: calls=%d reactions=%v", env.calls.Load()-calls, env.p.reacted())
+	}
 }
 
 func TestProgressQuestionAnsweredFromBridgeState(t *testing.T) {
 	env := newTriageEnv(t)
 	env.firstTurn("已在后台整理。")
-	env.e.interactiveMu.Lock()
-	state := env.e.interactiveStates[env.key]
-	env.e.interactiveMu.Unlock()
-	b := true
-	env.e.handleTaskEvent(state, env.key, &TaskEvent{Kind: TaskStarted, TaskID: "t1", Description: "按客户整理 200 个文件", Background: &b})
-	env.e.handleTaskEvent(state, env.key, &TaskEvent{Kind: TaskProgress, TaskID: "t1", Step: "读取文件"})
+	state := env.backgroundTask("t1", "按客户整理 200 个文件", "读取文件")
 	env.label.Store("PROGRESS")
 	env.send("好了吗")
 	if env.reachesAgent() {
@@ -215,19 +247,24 @@ func TestProgressQuestionAnsweredFromBridgeState(t *testing.T) {
 	if len(h) != 2 || h[0].Role != "user" || h[0].Content != "好了吗" || h[1].Role != "assistant" || h[1].Content != answer {
 		t.Fatalf("history=%+v", h)
 	}
-	// With nothing running the same question goes to the agent.
+	// With nothing running the same question goes straight to the agent.
 	env.e.abandonTasks(state.agentSession)
 	time.Sleep(50 * time.Millisecond)
+	calls := env.calls.Load()
 	env.send("在忙什么")
 	if !env.reachesAgent() {
 		t.Fatal("progress question with nothing running was swallowed")
+	}
+	if env.calls.Load() != calls {
+		t.Fatal("the quick model was asked with nothing running")
 	}
 	env.finishTurn("没在忙")
 }
 
 func TestClassifierFailureGoesToTheAgent(t *testing.T) {
 	env := newTriageEnv(t)
-	env.firstTurn("好了。")
+	env.firstTurn("已在后台整理。")
+	env.backgroundTask("t1", "按客户整理 200 个文件", "读取文件")
 	env.fail.Store(true)
 	env.send("谢谢")
 	if !env.reachesAgent() {
@@ -236,6 +273,27 @@ func TestClassifierFailureGoesToTheAgent(t *testing.T) {
 	env.finishTurn("不客气")
 }
 
+func TestSlowClassifierGivesUpAfterTheCap(t *testing.T) {
+	env := newTriageEnv(t)
+	env.firstTurn("已在后台整理。")
+	env.backgroundTask("t1", "按客户整理 200 个文件", "读取文件")
+	env.label.Store("GREETING")
+	env.delay.Store(int64(3 * time.Second))
+	start := time.Now()
+	env.send("谢谢")
+	select {
+	case <-env.s.sent:
+	case <-time.After(2500 * time.Millisecond):
+		t.Fatal("a slow classification held the message")
+	}
+	if waited := time.Since(start); waited < triageMaxTimeout {
+		t.Fatalf("gave up after %v, before the %v cap", waited, triageMaxTimeout)
+	}
+	if len(env.p.reacted()) != 0 {
+		t.Fatalf("reactions=%v", env.p.reacted())
+	}
+	env.finishTurn("不客气")
+}
 func TestNoTriageWhileATurnRuns(t *testing.T) {
 	env := newTriageEnv(t)
 	env.send("写一份周报")

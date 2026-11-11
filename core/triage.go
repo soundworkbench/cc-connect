@@ -8,19 +8,19 @@ import (
 	"unicode/utf8"
 )
 
-// Front-desk triage: while no turn runs, the quick model sorts a short
-// message once. A question about progress, asked while background tasks or
-// queued messages exist, is answered from the bridge's own state; pure small
-// talk or thanks, with nothing pending or running, gets an emoji. Everything
-// else, and every failure, goes to the agent as before. A pending question
-// always goes to the agent: "好的" or "可以" may be its answer.
+// Front-desk triage: while no turn runs but background tasks or queued
+// messages exist, the quick model sorts a short message once. A question
+// about progress is answered from the bridge's own state; pure small talk or
+// thanks gets an emoji. A fully idle chat skips the quick model, so a short
+// command never waits on it. Everything else, and every failure, goes to the
+// agent as before. A pending question always goes to the agent: "好的" or
+// "可以" may be its answer.
 
 const (
-	triageMaxRunes      = 60 // longer messages are never triaged
-	triageGreetingRunes = 20 // small talk is short; longer idle messages skip the quick model
-	triageMaxTimeout    = 3 * time.Second
-	triageReaction      = "THUMBSUP"
-	triageQuestionTail  = 200 // runes of the last reply searched for a question mark
+	triageMaxRunes     = 60 // longer messages are never triaged
+	triageMaxTimeout   = 1500 * time.Millisecond
+	triageReaction     = "THUMBSUP"
+	triageQuestionTail = 200 // runes of the last reply searched for a question mark
 )
 
 type triageClass string
@@ -65,14 +65,11 @@ func (e *Engine) triageIdleMessage(p Platform, msg *Message, session *Session, s
 		return false
 	}
 	view := e.triageView(msg, session, interactiveKey)
+	if !view.busy() {
+		return false // nothing to wait for: the agent answers at once
+	}
 	if view.pendingQuestion != "" {
 		triageLog(interactiveKey, triageOther, "pending_question_"+view.pendingQuestion)
-		return false
-	}
-	if !view.busy() && utf8.RuneCountInString(content) > triageGreetingRunes {
-		return false // neither a progress answer nor small talk can apply
-	}
-	if _, ok := p.(MessageReactor); !ok && !view.busy() {
 		return false
 	}
 	class, err := e.classifyIdleMessage(cfg, content)
@@ -81,7 +78,7 @@ func (e *Engine) triageIdleMessage(p Platform, msg *Message, session *Session, s
 		triageLog(interactiveKey, triageOther, "classifier_failed")
 		slog.Info("card: triage classifier failed", "session", interactiveKey, "error", err)
 		return false
-	case class == triageProgress && view.busy():
+	case class == triageProgress:
 		answer := e.progressAnswer(view)
 		if err := e.sendWithError(p, msg.ReplyCtx, answer); err != nil {
 			triageLog(interactiveKey, triageOther, "answer_send_failed")
@@ -92,8 +89,12 @@ func (e *Engine) triageIdleMessage(p Platform, msg *Message, session *Session, s
 		sessions.Save()
 		triageLog(interactiveKey, triageProgress, "answered_from_bridge_state")
 		return true
-	case class == triageGreeting && !view.busy():
-		reactor, _ := p.(MessageReactor)
+	case class == triageGreeting:
+		reactor, ok := p.(MessageReactor)
+		if !ok {
+			triageLog(interactiveKey, triageOther, "greeting_no_reactions")
+			return false
+		}
 		if err := reactor.AddReaction(e.ctx, msg.ReplyCtx, triageReaction); err != nil {
 			triageLog(interactiveKey, triageOther, "reaction_failed")
 			return false
@@ -102,10 +103,6 @@ func (e *Engine) triageIdleMessage(p Platform, msg *Message, session *Session, s
 		sessions.Save()
 		triageLog(interactiveKey, triageGreeting, "reaction_only")
 		return true
-	case class == triageProgress:
-		triageLog(interactiveKey, triageOther, "progress_question_nothing_running")
-	case class == triageGreeting:
-		triageLog(interactiveKey, triageOther, "greeting_while_busy")
 	default:
 		triageLog(interactiveKey, triageOther, "classified_other")
 	}
