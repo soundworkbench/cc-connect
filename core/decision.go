@@ -76,6 +76,10 @@ type Decision struct {
 	ResolvedAt time.Time `json:"resolved_at,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	Delivered  bool      `json:"delivered"` // the answer was handed to the session
+	// Form, when set, makes this a form card (see form.go): Question is its
+	// title, Options is empty, and Values holds what was submitted.
+	Form   *FormSpec    `json:"form,omitempty"`
+	Values []FormAnswer `json:"values,omitempty"`
 }
 
 func (d *Decision) validate() error {
@@ -119,6 +123,9 @@ func (d *Decision) usesForm() bool {
 
 // inboundText is the message the session receives once the decision is resolved.
 func (d *Decision) inboundText() string {
+	if d.Form != nil {
+		return formInboundText(d)
+	}
 	if d.State == decisionExpired {
 		return fmt.Sprintf("【到期默认】%s：%s（到期未回复，按推荐处理）", d.Question, d.ChosenLabel())
 	}
@@ -309,6 +316,9 @@ func decisionClock(t time.Time) string {
 }
 
 func buildDecisionCard(d *Decision) *Card {
+	if d.Form != nil {
+		return formCard(d)
+	}
 	switch d.State {
 	case decisionAnswered:
 		cb := NewCard().Title("✅ 已决定："+d.ChosenLabel(), "green")
@@ -423,6 +433,11 @@ func (e *Engine) SendDecisionCard(req DecisionRequest) (string, error) {
 		d.Deadline = d.CreatedAt.Add(time.Duration(mins) * time.Minute)
 	}
 
+	return e.postDecision(d)
+}
+
+// postDecision sends a decision or form card and stores it.
+func (e *Engine) postDecision(d *Decision) (string, error) {
 	if d.SessionKey == "" {
 		return "", errors.New("session_key is required")
 	}

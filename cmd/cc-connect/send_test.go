@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -346,5 +347,24 @@ func TestBuildSendPayload_JSONRoundTrip(t *testing.T) {
 	}
 	if len(decoded.Files) != 1 || string(decoded.Files[0].Data) != "doc" {
 		t.Fatalf("decoded files = %#v", decoded.Files)
+	}
+}
+
+func TestCardFilePayloadFillsProjectAndSession(t *testing.T) {
+	t.Setenv("CC_PROJECT", "env-project")
+	t.Setenv("CC_SESSION_KEY", "env-session")
+	out, err := cardFilePayload([]byte(`{"title":"周报参数","fields":[{"label":"开始日期","type":"date"}],"project":"file-project"}`), "", "flag-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["project"] != "file-project" || obj["session_key"] != "flag-session" || obj["title"] != "周报参数" || obj["fields"] == nil {
+		t.Fatalf("payload=%s", out)
+	}
+	if _, err := cardFilePayload([]byte(`[1]`), "", ""); err == nil {
+		t.Fatal("a non-object was accepted")
 	}
 }

@@ -97,6 +97,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/assistant/rotate", s.handleAssistantRotate)
 	s.mux.HandleFunc("/send", s.handleSend)
 	s.mux.HandleFunc("/decision", s.handleDecision)
+	s.mux.HandleFunc("/form", s.handleForm)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
@@ -322,6 +323,38 @@ func (s *APIServer) handleDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, err := engine.SendDecisionCard(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	apiJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
+}
+
+func (s *APIServer) handleForm(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req FormRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.mu.RLock()
+	var engine *Engine
+	if req.Project != "" {
+		engine = s.engines[req.Project]
+	} else if len(s.engines) == 1 {
+		for _, e := range s.engines {
+			engine = e
+		}
+	}
+	s.mu.RUnlock()
+	if engine == nil {
+		http.Error(w, "project not found (set --project or CC_PROJECT)", http.StatusBadRequest)
+		return
+	}
+	id, err := engine.SendFormCard(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

@@ -20,8 +20,8 @@ import (
 
 func runSend(args []string) {
 	for _, a := range args {
-		if a == "--decision" {
-			runSendDecision(args)
+		if a == "--decision" || a == "--form" {
+			runSendCardFile(args, a)
 			return
 		}
 	}
@@ -72,13 +72,18 @@ func runSend(args []string) {
 	fmt.Println("Message sent successfully.")
 }
 
-// runSendDecision posts a decision card described by a JSON file:
+// runSendCardFile posts a decision or form card described by a JSON file:
 //
 //	cc-connect send --decision card.json
+//	cc-connect send --form form.json
 //
 // The call returns as soon as the card is sent; the answer arrives later as a
 // normal message in the same session.
-func runSendDecision(args []string) {
+func runSendCardFile(args []string, flag string) {
+	endpoint, done := "/decision", "Decision card sent."
+	if flag == "--form" {
+		endpoint, done = "/form", "Form card sent."
+	}
 	var file, project, sessionKey, dataDir string
 	for i := 0; i < len(args); i++ {
 		next := func() string {
@@ -90,7 +95,7 @@ func runSendDecision(args []string) {
 			return args[i]
 		}
 		switch args[i] {
-		case "--decision":
+		case flag:
 			file = next()
 		case "--project", "-p":
 			project = next()
@@ -105,22 +110,11 @@ func runSendDecision(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	var req core.DecisionRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid decision JSON: %v\n", err)
+	payload, err := cardFilePayload(raw, project, sessionKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid %s JSON: %v\n", strings.TrimPrefix(flag, "--"), err)
 		os.Exit(1)
 	}
-	if project != "" {
-		req.Project = project
-	} else if req.Project == "" {
-		req.Project = strings.TrimSpace(os.Getenv("CC_PROJECT"))
-	}
-	if sessionKey != "" {
-		req.SessionKey = sessionKey
-	} else if req.SessionKey == "" {
-		req.SessionKey = strings.TrimSpace(os.Getenv("CC_SESSION_KEY"))
-	}
-	payload, _ := json.Marshal(req)
 
 	sockPath := resolveSocketPath(dataDir)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
@@ -132,7 +126,7 @@ func runSendDecision(args []string) {
 			return net.Dial("unix", sockPath)
 		},
 	}}
-	resp, err := client.Post("http://unix/decision", "application/json", bytes.NewReader(payload))
+	resp, err := client.Post("http://unix"+endpoint, "application/json", bytes.NewReader(payload))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to connect: %v\n", err)
 		os.Exit(1)
@@ -143,7 +137,31 @@ func runSendDecision(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(body)))
 		os.Exit(1)
 	}
-	fmt.Println("Decision card sent.")
+	fmt.Println(done)
+}
+
+// cardFilePayload fills project and session_key into a card JSON object:
+// the flag wins, then the file's own value, then CC_PROJECT / CC_SESSION_KEY.
+func cardFilePayload(raw []byte, project, sessionKey string) ([]byte, error) {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	if obj == nil {
+		return nil, errors.New("expected a JSON object")
+	}
+	set := func(key, flagValue, env string) {
+		if flagValue != "" {
+			obj[key] = flagValue
+		} else if v, _ := obj[key].(string); v == "" {
+			if e := strings.TrimSpace(os.Getenv(env)); e != "" {
+				obj[key] = e
+			}
+		}
+	}
+	set("project", project, "CC_PROJECT")
+	set("session_key", sessionKey, "CC_SESSION_KEY")
+	return json.Marshal(obj)
 }
 
 var errSendUsage = errors.New("show send usage")
@@ -454,6 +472,7 @@ func printSendUsage() {
        cc-connect send [options] --tts <text>
        cc-connect send [options] --react <emoji>
        cc-connect send [options] --decision <card.json>
+       cc-connect send [options] --form <form.json>
        echo "msg" | cc-connect send [options] --stdin
 
 Send a message, attachment, or synthesized voice message to an active cc-connect session.
@@ -464,7 +483,8 @@ Options:
       --work-dir <path>    Alias for --cwd
       --tts <text>         Synthesize text and send it as a voice/audio message
       --react <emoji>      Add an emoji reaction to the message that started this turn (Feishu emoji type, e.g. OK, THUMBSUP, DONE)
-      --decision <file>    Send a decision card (JSON: question, options[recommended first], note, no_default, deadline_minutes); the answer comes back as a message
+      --decision <file>    Send a decision card (JSON: question, options[recommended first], note, no_default, deadline_minutes, danger, multi); the answer comes back as a message
+      --form <file>        Send a form card (JSON: title, note, submit, fields[label, type input|date|select|multi_select, options, placeholder, required]); the values come back as one message
       --image <path>       Send an image attachment (repeatable)
       --file <path>        Send a file attachment (repeatable)
       --audio <path>       Send an audio attachment (repeatable)
