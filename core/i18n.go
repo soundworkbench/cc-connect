@@ -220,6 +220,7 @@ const (
 	MsgPreviewUsageLimitWait     MsgKey = "preview_usage_limit_wait"
 	MsgPreviewWaitingModel       MsgKey = "preview_waiting_model"
 	MsgPreviewInterrupted        MsgKey = "preview_interrupted"
+	MsgPreviewMoved              MsgKey = "preview_moved"
 	MsgTurnFailed                MsgKey = "turn_failed"
 	MsgTurnFailedModel           MsgKey = "turn_failed_model"
 	MsgTurnFailedLimit           MsgKey = "turn_failed_limit"
@@ -807,6 +808,7 @@ var messages = map[MsgKey]map[Language]string{
 	MsgTurnFailedLimit:       {LangEnglish: "This didn't go through: the model usage limit has been reached", LangChinese: "这次没做成：模型用量到了上限", LangTraditionalChinese: "這次沒做成：模型用量到了上限", LangJapanese: "今回は完了できませんでした：モデルの利用上限に達しました", LangSpanish: "Esta vez no se pudo completar: se alcanzó el límite de uso del modelo"},
 	MsgRetryButton:           {LangEnglish: "Retry", LangChinese: "重试", LangTraditionalChinese: "重試", LangJapanese: "再試行", LangSpanish: "Reintentar"},
 	MsgRetrySent:             {LangEnglish: "Sent again", LangChinese: "已重新发送", LangTraditionalChinese: "已重新傳送", LangJapanese: "再送信しました", LangSpanish: "Enviado de nuevo"},
+	MsgPreviewMoved:          {LangEnglish: "↓ Moved below", LangChinese: "↓ 已移到下方", LangTraditionalChinese: "↓ 已移到下方", LangJapanese: "↓ 下に移動しました", LangSpanish: "↓ Movido abajo"},
 
 	MsgTaskUntitled:         {LangEnglish: "Background task", LangChinese: "后台任务", LangTraditionalChinese: "背景任務", LangJapanese: "バックグラウンドタスク", LangSpanish: "Tarea en segundo plano"},
 	MsgTaskWorking:          {LangEnglish: "Working", LangChinese: "进行中", LangTraditionalChinese: "進行中", LangJapanese: "実行中", LangSpanish: "En curso"},

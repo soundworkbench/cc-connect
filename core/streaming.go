@@ -157,6 +157,11 @@ type streamPreview struct {
 	hidden    bool
 	segmented SegmentedPreviewer
 	notice    string // status line shown in place of the running step (see setNotice)
+
+	// Following the person's messages to the bottom of the chat (followUser).
+	followCtx   any
+	followTimer *time.Timer
+	lastMoveAt  time.Time
 }
 
 // ToolStepKind identifies the kind of progress row shown in rich cards.

@@ -64,6 +64,9 @@ func (e *Engine) trySteerMessageLocked(state *interactiveState, p Platform, msg 
 			}
 		} else {
 			e.steerReaction(p, msg.ReplyCtx, receipt)
+			if sp := state.activePreview; sp != nil {
+				sp.followUser(msg.ReplyCtx)
+			}
 		}
 
 		return true
