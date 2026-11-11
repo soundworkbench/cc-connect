@@ -41,6 +41,31 @@
 - CLI 自己发起的回合（例如后台任务通知）会在它回放我们的消息之前产生结果，这个结果不会结束我们的回合。只有这样的较早结果以静默结束时才被丢弃。
 - Codex：在 Agent 选项中设置 `backend = "app_server"`；消息通过 `turn/steer` 并入回合。
 
+### 私聊重启补收（飞书 / Lark）
+
+飞书平台 options 的 `p2p_catchup` 默认是 `true`：
+
+```toml
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "cli_xxx"
+app_secret = "xxx"
+p2p_catchup = true
+```
+
+重启后的 10 分钟内旧私聊会正常处理；群聊仍丢弃启动前的旧消息。消息编号在 `data_dir/feishu/p2p-<hash>.json` 中持久去重，文件按应用、域名和项目隔离，以同目录临时文件和原子重命名更新。最多保留 10,000 个编号，11 分钟后淘汰；私聊类型记录也最多保留 10,000 个，超限淘汰最久未活跃的记录。状态不含凭据或消息正文。
+
+WebSocket 真正连上后，按项目已有会话记录（包括多工作区记录）补拉上次心跳之后、最多最近 10 分钟的私聊用户消息。只补拉曾经由接收事件确认是私聊的会话，不扫描远端会话列表，不补拉群聊或机器人消息。启动期间的新私聊暂存，与历史消息按时间排序后经过原有消息处理流程，避免新消息提前推进迟到消息过滤的时间水位。心跳每 15 秒原子更新；恢复完成前保留旧心跳。
+
+首次启用时尚无心跳和私聊类型记录，只建立基线，之后的重启开始补收。第一次启用前已存在的会话，需要先收到一次私聊事件才会成为补拉对象。设 `p2p_catchup = false` 可恢复原来的启动时间过滤规则，并关闭补拉和此状态文件的更新。Webhook 模式不主动补拉。
+
+历史接口使用应用身份，需要 `im:message`、`im:message:readonly`、`im:message.history:readonly` 中任意一项。缺权时仅记录一行 Warn 并跳过本次补拉，正常连接和实时消息处理继续工作。`cc-connect feishu new` 使用飞书服务端 `PersonalAgent` 模板，源码没有显式 scope 列表，因此无法仅凭源码确认每个个人机器人的实际授权；本改动不修改创建流程。如果模板没有上述权限，需要 Jason 批准后增加 `im:message:readonly`。
+
+去重在消息交给处理流程前落盘，以避免重推造成重复回答；落盘后、处理完成前崩溃仍可能丢失该条消息。这不是对 Agent 回复的事务保证。
+
+本地验证：`CPUS=4 soundworkbench/check-p2p-catchup.sh` 会先证明旧提交 `4a245e70` 丢失私聊，再运行当前补收测试；只使用 Docker 和模拟 API。
+
 ### 队列
 
 - 排队消息写入 `data_dir/queues/`，重启后恢复（`core/queue_store.go`）。`/stop` 只结束当前回合并保留队列；`/new` 丢弃队列，并列出被丢弃的内容。见 [docs/queued-messages.md](../docs/queued-messages.md)。

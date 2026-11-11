@@ -380,14 +380,21 @@ func main() {
 
 		providerWiring := wireAgentProviders(agent, proj.Agent)
 
+		workDir, _ := proj.Agent.Options["work_dir"].(string)
+		projectState := core.NewProjectStateStore(projectStatePath(cfg.DataDir, proj.Name))
+		effectiveWorkDir := applyProjectStateOverrideForMode(proj.Name, agent, workDir, projectState, proj.Mode == "multi-workspace")
+		startInitialRefreshIfReady(agent, providerWiring)
+		sessionFile := sessionStorePath(cfg.DataDir, proj.Name, effectiveWorkDir)
+
 		var platforms []core.Platform
 		for _, pc := range proj.Platforms {
-			opts := make(map[string]any, len(pc.Options)+2)
+			opts := make(map[string]any, len(pc.Options)+3)
 			for k, v := range pc.Options {
 				opts[k] = v
 			}
 			opts["cc_data_dir"] = cfg.DataDir
 			opts["cc_project"] = proj.Name
+			opts["cc_session_store"] = sessionFile
 			p, err := core.CreatePlatform(pc.Type, opts)
 			if err != nil {
 				slog.Error("failed to create platform", "project", proj.Name, "type", pc.Type, "error", err)
@@ -395,12 +402,6 @@ func main() {
 			}
 			platforms = append(platforms, p)
 		}
-
-		workDir, _ := proj.Agent.Options["work_dir"].(string)
-		projectState := core.NewProjectStateStore(projectStatePath(cfg.DataDir, proj.Name))
-		effectiveWorkDir := applyProjectStateOverrideForMode(proj.Name, agent, workDir, projectState, proj.Mode == "multi-workspace")
-		startInitialRefreshIfReady(agent, providerWiring)
-		sessionFile := sessionStorePath(cfg.DataDir, proj.Name, effectiveWorkDir)
 
 		// Parse language setting
 		var lang core.Language

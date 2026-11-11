@@ -1118,6 +1118,7 @@ app_secret = "your-feishu-app-secret"
 # p2p_thread_isolation = false  # Isolate P2P reply threads (thread_id required); ordinary messages and quote replies keep their existing session. P2P thread replies stay in-thread even with reply_to_trigger = false.
 # thread_isolation = false  # If true, group messages use Feishu reply threads as session boundaries (one thread/root = one agent session and, in multi-workspace mode, one workspace binding)
 #                           # 设为 true 时，群聊按飞书话题/根消息隔离会话；multi-workspace 模式下每个话题也独立绑定 workspace
+# p2p_catchup = true           # Recover recent private messages after restart; persist dedup IDs
 # Share non-mentioned group messages as context with the next bot-triggered turn.
 # Messages themselves do not trigger a reply.
 # group_chat_history_share = false

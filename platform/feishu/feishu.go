@@ -173,6 +173,9 @@ type Platform struct {
 	handler          core.MessageHandler
 	cardNavHandler   core.CardNavigationHandler
 	cancel           context.CancelFunc
+	catchup          *p2pCatchup
+	catchupCancel    context.CancelFunc
+	catchupDone      chan struct{}
 	dedup            *core.MessageDedup
 	botOpenID        string
 	// groupFilterDegraded is true when bot open_id discovery failed at startup
@@ -586,6 +589,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		resourceChunkSize:          resourceChunkSize,
 		resourceMaxBytes:           defaultResourceMaxBytes,
 	}
+	base.configureP2PCatchup(opts)
 	if !useInteractiveCard {
 		base.self = base
 		return base, nil
@@ -739,6 +743,9 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	group, isPrimary := registerSharedWS(p)
 	p.sharedGroup = group
 	p.isWSPrimary = isPrimary
+	if !p.shouldUseWebhookMode() {
+		p.startP2PCatchup(group.ready)
+	}
 
 	// Secondary platforms skip connection creation — the primary's connection
 	// fans out events to all platforms in the shared group.
@@ -826,6 +833,9 @@ func (p *Platform) startWebSocketMode() error {
 		larkws.WithEventHandler(p.eventHandler),
 		larkws.WithLogLevel(larkcore.LogLevelInfo),
 		larkws.WithLogger(&sanitizingLogger{inner: larkcore.NewEventLogger()}),
+	}
+	if p.sharedGroup != nil {
+		wsOpts = append(wsOpts, larkws.WithOnReady(p.sharedGroup.markReady), larkws.WithOnReconnected(p.sharedGroup.markReady))
 	}
 	if p.domain != lark.FeishuBaseUrl {
 		wsOpts = append(wsOpts, larkws.WithDomain(p.domain))
@@ -1863,6 +1873,14 @@ func (p *Platform) isGroupHistoryNewCommand(msgType, content string, mentions []
 }
 
 func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+	if p.catchup != nil && p.catchup.bufferLiveMessage(event) {
+		return nil
+	}
+	return p.handleMessageEvent(ctx, event, false)
+}
+
+// Recovery dispatches synchronously to preserve historical message order.
+func (p *Platform) handleMessageEvent(ctx context.Context, event *larkim.P2MessageReceiveV1, synchronous bool) error {
 	msg := event.Event.Message
 	sender := event.Event.Sender
 
@@ -1898,11 +1916,12 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		return nil
 	}
 
+	chatType := stringValue(msg.ChatType)
 	var createTimeMs int64
 	if msg.CreateTime != nil {
 		if ms, err := strconv.ParseInt(*msg.CreateTime, 10, 64); err == nil {
 			msgTime := time.Unix(ms/1000, (ms%1000)*int64(time.Millisecond))
-			if core.IsOldMessage(msgTime) {
+			if core.IsOldMessage(msgTime) && (chatType != "p2p" || p.catchup == nil || time.Since(msgTime) > p2pCatchupWindow) {
 				slog.Debug(p.tag()+": ignoring old message after restart", "create_time", *msg.CreateTime)
 				return nil
 			}
@@ -1910,10 +1929,6 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		}
 	}
 
-	chatType := ""
-	if msg.ChatType != nil {
-		chatType = *msg.ChatType
-	}
 	mentionCount := len(msg.Mentions)
 	slog.Debug(p.tag()+": inbound message",
 		"message_id", messageID,
@@ -2018,6 +2033,17 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 		return nil
 	}
 
+	if chatType == "p2p" && p.catchup != nil {
+		duplicate, err := p.catchup.claim(messageID, chatID, time.Now())
+		if err != nil {
+			slog.Warn(p.tag()+": persist p2p message ID failed; skipping message", "error", err)
+			return nil
+		}
+		if duplicate {
+			return nil
+		}
+	}
+
 	// Capture content before going async — the SDK may reuse the event object.
 	content := ""
 	if msg.Content != nil {
@@ -2059,7 +2085,11 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// blocked by IO-heavy operations (image/audio download, handler HTTP calls).
 	// The dedup and old-message checks above remain synchronous to guarantee
 	// correctness before spawning the goroutine.
-	go p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryCtx)
+	if synchronous {
+		p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryCtx)
+	} else {
+		go p.dispatchMessageWithHistory(ctx, msgType, content, mentions, messageID, sessionKey, userID, chatID, rctx, parentID, createTimeMs, groupHistoryCtx)
+	}
 
 	return nil
 }
@@ -5784,6 +5814,7 @@ func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle,
 }
 
 func (p *Platform) Stop() error {
+	p.stopP2PCatchup()
 	// Issue #1618: stop the background supervisor that retries the
 	// bot-info API when startup discovery fails. Without this the
 	// goroutine could outlive the platform and leak into the next

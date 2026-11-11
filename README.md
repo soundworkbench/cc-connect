@@ -2,6 +2,8 @@
 
 这是 [chenhg5/cc-connect](https://github.com/chenhg5/cc-connect) 的分叉。cc-connect 把 Claude Code、Codex 等编码 Agent 接到聊天应用。本分叉基于上游 v1.5.0 版本，加了一组补丁，主要改进飞书（Feishu/Lark）：流式进度卡、并入进行中回合的消息、消息队列，以及定时和自动触发的回合。它编译为单个可执行文件，已在多个长期运行的 Agent 上日常使用。
 
+飞书私聊重启补收默认开启：`[projects.platforms.options] p2p_catchup = true`。补收最近 10 分钟内未处理的旧私聊，持久去重；群聊维持原有规则。配置示例、权限、首次启用条件与限制见 [私聊重启补收](soundworkbench/README.md#私聊重启补收飞书--lark)。
+
 安装方法和上游自带的功能，见[上游 README](https://github.com/chenhg5/cc-connect#readme)。
 
 ## 飞书中的表现

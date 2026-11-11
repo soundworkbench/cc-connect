@@ -12,6 +12,8 @@ import (
 // receives every message and can apply its own allow_chat / allow_from filters.
 type sharedWSGroup struct {
 	mu        sync.RWMutex
+	ready     chan struct{} // closed after the first successful WebSocket connection
+	readyOnce sync.Once
 	platforms []*Platform
 }
 
@@ -34,7 +36,7 @@ func registerSharedWS(p *Platform) (group *sharedWSGroup, isPrimary bool) {
 
 	g, exists := sharedWSGroups[key]
 	if !exists {
-		g = &sharedWSGroup{}
+		g = &sharedWSGroup{ready: make(chan struct{})}
 		sharedWSGroups[key] = g
 	}
 	g.mu.Lock()
@@ -81,4 +83,9 @@ func (g *sharedWSGroup) allPlatforms() []*Platform {
 	result := make([]*Platform, len(g.platforms))
 	copy(result, g.platforms)
 	return result
+}
+
+// markReady is also used when initial connection attempts failed before recovery.
+func (g *sharedWSGroup) markReady() {
+	g.readyOnce.Do(func() { close(g.ready) })
 }
