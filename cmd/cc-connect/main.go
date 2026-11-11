@@ -282,7 +282,7 @@ func main() {
 	}
 
 	if rootOpts.showVersion {
-		fmt.Printf("cc-connect %s\ncommit:  %s\nbuilt:   %s\n", version, commit, buildTime)
+		fmt.Printf("cc-connect %s\n", version)
 		return
 	}
 

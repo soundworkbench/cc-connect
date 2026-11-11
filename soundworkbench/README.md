@@ -1,6 +1,6 @@
 # soundworkbench/cc-connect：改动与维护
 
-本分叉把补丁放在上游 cc-connect 发布版 `v1.5.0` 之上，位于 `local` 分支。`main` 跟随上游，不含这些改动。可执行文件只从 `local` 构建。查看全部提交：`git log v1.5.0..local`。
+本分叉把补丁放在上游 cc-connect 发布版 `v1.5.2-beta.1` 之上，位于 `local` 分支。`main` 跟随上游，不含这些改动。发布产物只从已推送到 `origin/local` 的提交构建。查看全部提交：`git log v1.5.2-beta.1..local`。
 
 建立这个分叉，是因为多个编码 Agent 全天在飞书中在线。这种用法需要更安静的进度显示、能并入进行中回合的消息、持久的队列，以及不会刷屏的定时回合。
 
@@ -180,29 +180,68 @@ git push --force-with-lease origin local
 
 提交信息沿用上游格式：`<type>(<area>): <改动做了什么>`，正文写问题和方法。
 
+## 版本规则
+
+版本号的唯一来源是 `local` 分支的 `soundworkbench/VERSION`，文件中只有一行 `vX.Y.Z`。版本和代码在同一个提交中修改：
+
+- 修缺陷、调默认值：加 Z。
+- 新功能或新配置键：加 Y，Z 归零。
+- 配置键改名、删除或行为不兼容：加 X，Y、Z 归零。
+
+第一个新版本是 `v2.0.0`，沿用旧发布 `v1.5.2-beta.1-sw.167-sw.14`（`c36b64db`）的运行逻辑，仅更新构建发布流程和 `--version` 输出。上游基线、分叉提交号和相对上一发布的改动写在 Release 说明中，不再拼进版本号。
+
 ## 构建
 
 ```sh
 soundworkbench/build.sh            # build local
-soundworkbench/build.sh <commit>   # build a given commit
+soundworkbench/build.sh <commit>   # build a given snapshot
 ```
 
-脚本的步骤：
+脚本用 `git archive` 取出目标快照的源码和 VERSION，不读取工作树中的未提交改动。先在 `golang:1.25` Docker 容器中测试 `./agent/claudecode/ ./agent/codex/ ./agent/opencode/ ./core/ ./platform/feishu/ ./config/ ./cmd/cc-connect/`，失败时以退出码 3 停止，再构建。容器和 Go 并行度默认均限制为 4 核。
 
-1. 用 `git archive` 取出该提交的源码，所以未提交的改动不会被构建。
-2. 在 `golang:1.25` 容器中运行涉及的包的测试：`./agent/claudecode/ ./agent/codex/ ./agent/opencode/ ./core/ ./platform/feishu/ ./config/ ./cmd/cc-connect/`。失败时以退出码 3 停止。
-3. 用标签 `no_web,goolm` 和 `CGO_ENABLED=0` 在 `dist/` 下构建一个可执行文件，并打印它的 sha256 和版本。
+构建标签为 `no_web,goolm`，`CGO_ENABLED=0`。不含 Web 管理界面；要包含它，先按上游 `Makefile` 构建 `web/`。
 
 | 项目 | 格式 | 示例 |
 |---|---|---|
-| 版本（`cc-connect --version`） | `<上游版本>-sw.<n>` | `v1.5.0-sw.73` |
-| 文件名 | `cc-connect-<版本>-<os>-<arch>` | `cc-connect-v1.5.0-sw.73-linux-amd64` |
+| `cc-connect --version` 的完整输出 | `cc-connect <VERSION>` | `cc-connect v2.0.0` |
+| 文件名 | `cc-connect-<VERSION>-<os>-<arch>` | `cc-connect-v2.0.0-linux-amd64` |
 
-上游版本取自 `git describe --tags --match 'v*'`，即该提交之下最近的上游标签，所以请先运行 `git fetch upstream --tags`。`<n>` 是从该标签到被构建提交的提交数。提交 SHA 也会被记录（`--version`）。
+环境变量：`GOOS`、`GOARCH`（默认 linux/amd64）、`CPUS`（正整数，默认 4）、`GO_IMAGE`（默认 `golang:1.25`）、`OUT`（默认 `dist`）、`SKIP_TESTS=1`（仅本地重建已测试快照）。发布脚本强制测试，不接受跳过。
 
-环境变量：`GOOS`、`GOARCH`（默认 linux/amd64）、`CPUS`（默认 4）、`GO_IMAGE`（默认 `golang:1.25`）、`OUT`（默认 `dist`）、`SKIP_TESTS=1`（只构建，用于重建已测试过的提交）。
+## 发布
 
-不含 Web 管理界面（`no_web`）。要包含它，先按上游 `Makefile` 构建 `web/`。
+唯一的现行发布入口是 `soundworkbench/release.sh`。`soundworkbench/tools/` 的旧发布/安装脚本为历史副本，不再使用；`/srv/xiaoman/research/` 下的旧入口由维护人另行删除。新入口不安装二进制、不修改配置、不重启服务。
+
+前提：Git、Docker、sha256sum、jq、已授权的 gh CLI；工作树干净，origin 指向 `soundworkbench/cc-connect`，目标提交已推送到 `origin/local`，本地及远端均没有同名版本标签，也没有同名 Release。脚本每次都重新 fetch `origin/local`，不依赖过期的跟踪分支。
+
+```sh
+# 改代码和 soundworkbench/VERSION，验证后提交在 local 分支。
+python3 -B -m unittest discover -s soundworkbench -p '*_test.py' -v
+CPUS=4 soundworkbench/build.sh
+
+# 提交后、尚未推送时，仅用于准备的完整演练：
+CPUS=4 soundworkbench/release.sh --dry-run --allow-unpushed
+
+# 维护人确认后推送；推送本身不创建 Release。
+git push origin local
+CPUS=4 soundworkbench/release.sh --dry-run
+
+# 正式发布；默认 HEAD，也可传当前检出提交的 SHA。
+CPUS=4 soundworkbench/release.sh
+```
+
+`--dry-run` 做远端检查、测试、linux-amd64 构建、二进制版本核对和 SHA-256 校验，生成说明和本地构建回执，但不创建任何标签或 Release。`--allow-unpushed` 只能与 `--dry-run` 一起使用，只绕过“提交已在 origin/local”检查，并打印警告；正式发布没有这个例外。
+
+脚本按发布时间选择最新的非草稿 Release（含预发布，与公司的 Bridge bump 一致），核实其标签为当前提交的祖先，使用两者之间的提交列表生成改动说明。Release 说明还包含上游基线 `v1.5.2-beta.1`、完整分叉提交号、比较链接及校验命令。`dist/<VERSION>-receipt.json` 记录版本、提交、基线、上一发布、构建标签、时间和 sha256；`dist/<VERSION>-notes.md` 保存将提交给 GitHub 的说明，可在 dry-run 后审阅。
+
+正式发布通过 `gh release create <VERSION> --target <SHA> --title <VERSION> --notes-file ...` 创建标签和 Release，只上传两个资产：
+
+- `cc-connect-<VERSION>-linux-amd64`
+- `cc-connect-<VERSION>-linux-amd64.sha256`
+
+校验文件仅含文件基本名，下载到同一目录后用 `sha256sum -c cc-connect-<VERSION>-linux-amd64.sha256` 校验。公司仓库 `soundworkbench/workpartner` 的 `tools/bridge-bump.py` 据此查找 Linux amd64 资产。
+
+发布成功后脚本再次读取 GitHub，核对 Release 的标签、标题与 VERSION 一致，且资产恰为上述两个名字。标签已存在时拒绝重发；如果创建或上传中途失败，先人工检查 GitHub 状态再处理，不自动覆盖。安装到 `releases/<VERSION>`、同步 lock 和升级各助理由独立部署流程负责。
 
 ## 部署与回滚
 

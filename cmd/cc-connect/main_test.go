@@ -60,6 +60,33 @@ func TestProjectStatePath(t *testing.T) {
 	}
 }
 
+func TestVersionFlag_PrintsOnlyVersion(t *testing.T) {
+	// Keep dev to avoid starting the background update checker in this test.
+	oldArgs, oldVersion, oldStdout := os.Args, version, os.Stdout
+	t.Cleanup(func() { os.Args, version, os.Stdout = oldArgs, oldVersion, oldStdout })
+	t.Setenv("CC_LOG_FILE", "")
+	os.Args = []string{"cc-connect", "--version"}
+	version = "dev"
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	os.Stdout = w
+	main()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = oldStdout
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != "cc-connect dev\n" {
+		t.Fatalf("--version = %q, want exactly one version line", out)
+	}
+}
+
 func TestResolveResetOnIdle(t *testing.T) {
 	intPtr := func(v int) *int { return &v }
 
