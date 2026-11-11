@@ -6724,7 +6724,8 @@ channelClosed:
 	state.eventsNeedResync = true
 	state.mu.Unlock()
 	defer e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent process exited"))
-	if len(textParts) == 0 && (automated || muteScheduledNotices || !e.failTurnPreview(state, sp, sessionKey, errAgentExited, errAgentExited.Error(), turnStart)) {
+	// After /stop the process exits on purpose; that is no failure to report.
+	if len(textParts) == 0 && (automated || muteScheduledNotices || state.isStopped() || !e.failTurnPreview(state, sp, sessionKey, errAgentExited, errAgentExited.Error(), turnStart)) {
 		sp.discard()
 	}
 	defer e.cleanupInteractiveState(sessionKey, state)
