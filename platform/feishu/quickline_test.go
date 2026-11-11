@@ -75,7 +75,8 @@ func runQuickTurn(t *testing.T, gw *quickGateway, enabled bool, timeoutMs int, d
 	e.SetDisplayConfig(core.DisplayCfg{Mode: "quiet", ThinkingMessages: true, HideAgentFooter: true})
 	t.Cleanup(func() { _ = e.Stop() })
 	rc := replyContext{chatID: "oc", messageID: "om_in"}
-	e.ReceiveMessage(p, &core.Message{SessionKey: "feishu:oc:u", Platform: "feishu", MessageID: "om_in", UserID: "u", Content: "查一下昨晚洞察中心的发布记录", ReplyCtx: rc})
+	// Long enough that the idle triage leaves it alone.
+	e.ReceiveMessage(p, &core.Message{SessionKey: "feishu:oc:u", Platform: "feishu", MessageID: "om_in", UserID: "u", Content: "查一下昨晚洞察中心的发布记录，看看有没有失败的任务", ReplyCtx: rc})
 	select {
 	case <-s.sent:
 	case <-time.After(3 * time.Second):

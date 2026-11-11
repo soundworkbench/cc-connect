@@ -239,6 +239,10 @@ const (
 	MsgTaskInterrupted           MsgKey = "task_interrupted"
 	MsgTaskRunningTitle          MsgKey = "task_running_title"
 	MsgTaskHint                  MsgKey = "task_hint"
+	MsgTriageTask                MsgKey = "triage_task"
+	MsgTriageMoreTasks           MsgKey = "triage_more_tasks"
+	MsgTriageSeeCards            MsgKey = "triage_see_cards"
+	MsgTriageQueued              MsgKey = "triage_queued"
 	MsgPreviewFooter             MsgKey = "preview_footer"
 	MsgStarting                  MsgKey = "starting"
 	MsgThinking                  MsgKey = "thinking"
@@ -822,6 +826,10 @@ var messages = map[MsgKey]map[Language]string{
 	MsgTaskInterrupted:  {LangEnglish: "Background task · Interrupted: %s", LangChinese: "后台任务 · 已中断：%s", LangTraditionalChinese: "背景任務 · 已中斷：%s", LangJapanese: "バックグラウンドタスク · 中断されました：%s", LangSpanish: "Tarea en segundo plano · Interrumpida: %s"},
 	MsgTaskRunningTitle: {LangEnglish: "Background task · Running: %s", LangChinese: "后台任务 · 正在进行：%s", LangTraditionalChinese: "背景任務 · 正在進行：%s", LangJapanese: "バックグラウンドタスク · 実行中：%s", LangSpanish: "Tarea en segundo plano · En curso: %s"},
 	MsgTaskHint:         {LangEnglish: "Running in the background, so the chat stays free: keep talking to me, and I'll tell you when it's done. To stop it, just tell me.", LangChinese: "在后台进行，不影响聊天，你可以接着跟我说话；做完我会告诉你。要停的话直接跟我说。", LangTraditionalChinese: "在背景進行，不影響聊天，你可以接著跟我說話；做完我會告訴你。要停的話直接跟我說。", LangJapanese: "バックグラウンドで実行中なので、チャットはそのまま続けられます。終わったらお知らせします。止めたいときはそう言ってください。", LangSpanish: "Se ejecuta en segundo plano, así que puedes seguir hablando conmigo; te aviso cuando termine. Si quieres detenerla, dímelo."},
+	MsgTriageTask:       {LangEnglish: "Background task \"%s\" is still running (%s), now on: %s.", LangChinese: "后台任务「%s」还在进行（%s），现在在：%s。", LangTraditionalChinese: "背景任務「%s」還在進行（%s），現在在：%s。", LangJapanese: "バックグラウンドタスク「%s」は実行中です（%s）。現在：%s。", LangSpanish: "La tarea en segundo plano «%s» sigue en curso (%s), ahora: %s."},
+	MsgTriageMoreTasks:  {LangEnglish: "%d more background tasks are running.", LangChinese: "另外还有 %d 个后台任务在跑。", LangTraditionalChinese: "另外還有 %d 個背景任務在跑。", LangJapanese: "ほかに %d 件のバックグラウンドタスクが実行中です。", LangSpanish: "Hay %d tareas más en segundo plano."},
+	MsgTriageSeeCards:   {LangEnglish: "Its card above shows the progress; I'll tell you when it's done.", LangChinese: "进展看上面的任务卡，做完我会告诉你。", LangTraditionalChinese: "進展看上面的任務卡，做完我會告訴你。", LangJapanese: "進捗は上のタスクカードで確認できます。終わったらお知らせします。", LangSpanish: "El avance está en su tarjeta de arriba; te aviso cuando termine."},
+	MsgTriageQueued:     {LangEnglish: "%d more messages are waiting; I'll take them in order.", LangChinese: "还有 %d 条消息排着队，我会按顺序处理。", LangTraditionalChinese: "還有 %d 條訊息排著隊，我會按順序處理。", LangJapanese: "ほかに %d 件のメッセージが待っています。順番に対応します。", LangSpanish: "Hay %d mensajes más en espera; los atenderé en orden."},
 	MsgStarting: {
 		LangEnglish:            "⏳ Processing...",
 		LangChinese:            "⏳ 处理中...",

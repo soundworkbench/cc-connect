@@ -3419,6 +3419,29 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	turnStart := time.Now()
 
+	// With no turn running, a short progress question or a thank-you may be
+	// answered without the agent (triage.go). Messages queued meanwhile are
+	// picked up as after any turn.
+	if e.triageIdleMessage(p, msg, session, sessions, interactiveKey) {
+		session.Unlock(lockGen)
+		unlocked = true
+		e.interactiveMu.Lock()
+		state := e.interactiveStates[interactiveKey]
+		e.interactiveMu.Unlock()
+		queued := false
+		if state != nil {
+			state.mu.Lock()
+			queued = len(state.pendingMessages) > 0
+			state.mu.Unlock()
+		}
+		if g, ok := session.TryLock(); ok {
+			if !queued || !e.launchAcceptedWork(func() { e.drainOrphanedQueue(session, sessions, interactiveKey, agent, workspaceDir, g) }) {
+				session.Unlock(g)
+			}
+		}
+		return
+	}
+
 	// Start the typing indicator if the platform supports it. The reaction call
 	// runs beside the card start so neither waits on the other.
 	// Ownership is transferred to processInteractiveEvents which manages
