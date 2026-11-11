@@ -9764,8 +9764,8 @@ func TestHandleCardNav_ModelUsesWorkspaceContext(t *testing.T) {
 	if card == nil {
 		t.Fatal("expected immediate result card")
 	}
-	if text := card.RenderText(); !strings.Contains(text, "gpt-4.1") {
-		t.Fatalf("result card = %q, want switched workspace model", text)
+	if text := card.RenderText(); !strings.Contains(text, "Model switched to `gpt`.") {
+		t.Fatalf("result card = %q, want switched workspace model shown by alias", text)
 	}
 
 	if wsAgent.model != "gpt-4.1" {

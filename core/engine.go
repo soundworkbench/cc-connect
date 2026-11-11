@@ -757,6 +757,7 @@ type deleteModeState struct {
 type modelSwitchState struct {
 	phase  string
 	target string
+	label  string // user-facing name of target
 	result string
 }
 
@@ -10053,7 +10054,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 			if current == "" {
 				sb.WriteString(e.i18n.T(MsgModelDefault))
 			} else {
-				sb.WriteString(e.i18n.Tf(MsgModelCurrent, current))
+				sb.WriteString(e.i18n.Tf(MsgModelCurrent, modelDisplayName(models, current)))
 				sb.WriteString("\n")
 			}
 			sb.WriteString("\n")
@@ -10067,7 +10068,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 				}
 				var line string
 				if m.Alias != "" {
-					line = fmt.Sprintf("%s%d. %s - %s\n", marker, i+1, m.Alias, m.Name)
+					line = fmt.Sprintf("%s%d. %s\n", marker, i+1, m.Alias)
 				} else {
 					desc := m.Desc
 					if desc != "" {
@@ -10109,10 +10110,11 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	}
 
 	target := strings.TrimSpace(targetInput)
+	var models []ModelOption
 	if modelSwitchNeedsLookup(target) {
 		fetchCtx, cancel := context.WithTimeout(e.ctx, 10*time.Second)
 		defer cancel()
-		models := switcher.AvailableModels(fetchCtx)
+		models = switcher.AvailableModels(fetchCtx)
 		target = resolveModelSwitchTarget(target, models)
 	}
 
@@ -10129,7 +10131,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 	// natively without replaying history (no extra token cost).
 	sessions.Save()
 
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, target))
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgModelChanged, modelDisplayName(models, target)))
 }
 
 // resolveModelAlias resolves a user-supplied string to a model name.
@@ -10142,6 +10144,18 @@ func resolveModelAlias(models []ModelOption, input string) string {
 		}
 	}
 	return input
+}
+
+// modelDisplayName returns the alias configured for name, or name itself when
+// the list has no alias for it. Switch values and the CLI --model flag keep
+// using the raw name; only user-facing text goes through this.
+func modelDisplayName(models []ModelOption, name string) string {
+	for _, m := range models {
+		if m.Alias != "" && m.Name == name {
+			return m.Alias
+		}
+	}
+	return name
 }
 
 func resolveModelSwitchTarget(input string, models []ModelOption) string {
@@ -12629,9 +12643,10 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 		return e.renderModelCard(sessionKey)
 	}
 	target = strings.TrimSpace(target)
+	var models []ModelOption
 	if modelSwitchNeedsLookup(target) {
 		fetchCtx, cancel := context.WithTimeout(e.ctx, 3*time.Second)
-		models := switcher.AvailableModels(fetchCtx)
+		models = switcher.AvailableModels(fetchCtx)
 		target = resolveModelSwitchTarget(target, models)
 		cancel()
 	}
@@ -12646,7 +12661,7 @@ func (e *Engine) handleModelCardAction(args, sessionKey string) *Card {
 		sessions.Save()
 	}
 
-	return e.renderModelSwitchResultCard(resolved, err)
+	return e.renderModelSwitchResultCard(modelDisplayName(models, resolved), err)
 }
 
 func (e *Engine) persistWorkspaceModelOverride(interactiveKey, sessionKey string, agent Agent, model string) {
@@ -12709,8 +12724,9 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			return
 		}
 		target = strings.TrimSpace(target)
+		var models []ModelOption
 		if modelSwitchNeedsLookup(target) {
-			models := switcher.AvailableModels(fetchCtx)
+			models = switcher.AvailableModels(fetchCtx)
 			target = resolveModelSwitchTarget(target, models)
 		}
 		cancel()
@@ -12723,9 +12739,9 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 		e.interactiveMu.Unlock()
 		state.mu.Lock()
-		state.modelSwitch = &modelSwitchState{phase: "switching", target: target}
+		state.modelSwitch = &modelSwitchState{phase: "switching", target: target, label: modelDisplayName(models, target)}
 		state.mu.Unlock()
-		go e.performModelSwitchAsync(sessionKey, state, agent, sessions, target)
+		go e.performModelSwitchAsync(sessionKey, state, agent, sessions, target, models)
 
 	case "/reasoning":
 		if args == "" {
@@ -13257,7 +13273,7 @@ func (e *Engine) pushDeleteModeResultCard(sessionKey string) {
 	e.sendWithCard(targetPlatform, rctx, card)
 }
 
-func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveState, agent Agent, sessions *SessionManager, target string) {
+func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveState, agent Agent, sessions *SessionManager, target string, models []ModelOption) {
 	resolved, err := e.switchModelOnAgent(agent, target, agent == e.agent)
 	if err == nil {
 		interactiveKey := e.interactiveKeyForSessionKey(sessionKey)
@@ -13265,16 +13281,18 @@ func (e *Engine) performModelSwitchAsync(sessionKey string, state *interactiveSt
 		sessions.Save()
 	}
 
-	resultCard := e.renderModelSwitchResultCard(resolved, err)
+	shown := modelDisplayName(models, resolved)
+	resultCard := e.renderModelSwitchResultCard(shown, err)
 	if state != nil {
 		state.mu.Lock()
 		if state.modelSwitch != nil {
 			state.modelSwitch.phase = "result"
 			state.modelSwitch.target = resolved
+			state.modelSwitch.label = shown
 			if err != nil {
 				state.modelSwitch.result = e.i18n.Tf(MsgModelCardSwitchFailed, err)
 			} else {
-				state.modelSwitch.result = e.i18n.Tf(MsgModelCardSwitched, resolved)
+				state.modelSwitch.result = e.i18n.Tf(MsgModelCardSwitched, shown)
 			}
 		}
 		state.mu.Unlock()
@@ -13485,7 +13503,11 @@ func (e *Engine) renderLangCard() *Card {
 
 func (e *Engine) renderModelCard(sessionKey string) *Card {
 	if ms := e.getModelSwitchState(sessionKey); ms != nil && ms.phase == "switching" {
-		return e.renderModelSwitchingCard(ms.target)
+		label := ms.label
+		if label == "" {
+			label = ms.target
+		}
+		return e.renderModelSwitchingCard(label)
 	}
 
 	agent := e.agent
@@ -13507,7 +13529,7 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 	if current == "" {
 		sb.WriteString(e.i18n.T(MsgModelDefault))
 	} else {
-		sb.WriteString(e.i18n.Tf(MsgModelCurrent, current))
+		sb.WriteString(e.i18n.Tf(MsgModelCurrent, modelDisplayName(models, current)))
 	}
 
 	var opts []CardSelectOption
@@ -13515,7 +13537,7 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 	for i, m := range models {
 		label := m.Name
 		if m.Alias != "" {
-			label = m.Alias + " - " + m.Name
+			label = m.Alias
 		} else if m.Desc != "" {
 			label += " — " + m.Desc
 		}
