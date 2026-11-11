@@ -257,7 +257,11 @@ func TestStopCommandSettlesTaskCards(t *testing.T) {
 	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "任务甲", Background: yes()})
 	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
 	env.e.ReceiveMessage(env.p, &Message{SessionKey: env.key, Platform: env.p.Name(), MessageID: "stop", UserID: "user", Content: "/stop", ReplyCtx: "ctx"})
-	waitInterrupted(t, env, "任务甲")
+	// The person asked for the stop: the card says stopped, not interrupted.
+	waitUntil(t, "stopped card", func() bool {
+		_, up := env.p.cards()
+		return len(up) > 0 && up[len(up)-1].view.State == TaskCardStopped && up[len(up)-1].view.Status == "后台任务 · 已停止：任务甲"
+	})
 }
 
 func TestIdleReclaimSettlesTaskCards(t *testing.T) {
@@ -429,5 +433,56 @@ func TestIdleTaskCardAsksTheQuickModel(t *testing.T) {
 	waitUntil(t, "idle quick line", func() bool { return lastRecent(env) == "最近进展：正在写第2部分" })
 	if n := len(calls()); n < 2 {
 		t.Fatalf("quick calls=%d", n)
+	}
+}
+
+// settledView ends the foreground turn, so the engine stops at once, and
+// returns the task card's settled view.
+func settledView(t *testing.T, env *taskEnv) TaskCardView {
+	t.Helper()
+	env.s.events <- Event{Type: EventResult, Content: "好了", Done: true}
+	waitUntil(t, "settled card", func() bool {
+		_, up := env.p.cards()
+		return len(up) > 0 && !up[len(up)-1].view.State.Live()
+	})
+	_, up := env.p.cards()
+	return up[len(up)-1].view
+}
+
+// A failed task's card carries a short Chinese line; the CLI's English error
+// goes to the details panel as written.
+func TestFailedTaskCardShowsAChineseLine(t *testing.T) {
+	for _, tc := range []struct{ summary, line string }{
+		{"Background command \"清理临时目录\" failed with exit code 2", "命令出错结束（退出码 2），原始信息在“详情”里。"},
+		{"Agent \"整理纪要\" failed: API Error: 500", "出错结束，原始信息在“详情”里。"},
+		{"没找到这一周的纪要", "没找到这一周的纪要"},
+	} {
+		env := newTaskEnv(t)
+		env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "清理", Background: yes()})
+		waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+		env.task(TaskEvent{Kind: TaskEnded, TaskID: "a", Status: "failed", Summary: tc.summary})
+		v := settledView(t, env)
+		if v.State != TaskCardFailed || v.Summary != tc.line {
+			t.Fatalf("%q: state=%s summary=%q, want %q", tc.summary, v.State, v.Summary, tc.line)
+		}
+		if tc.line == tc.summary {
+			if v.Full != "" {
+				t.Fatalf("readable summary also copied to details: %+v", v)
+			}
+		} else if v.FullTitle != "原文" || v.Full != tc.summary {
+			t.Fatalf("%q: details full=%q title=%q", tc.summary, v.Full, v.FullTitle)
+		}
+	}
+}
+
+// A stopped task's card is grey and drops the CLI's English text.
+func TestStoppedTaskCardHidesTheRawText(t *testing.T) {
+	env := newTaskEnv(t)
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "搜索会议", Background: yes()})
+	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	env.task(TaskEvent{Kind: TaskEnded, TaskID: "a", Status: "stopped", Summary: "Background command \"搜索会议\" failed with exit code 144"})
+	v := settledView(t, env)
+	if v.State != TaskCardStopped || v.Status != "后台任务 · 已停止：搜索会议" || v.Summary != "" || !strings.Contains(v.Full, "exit code 144") {
+		t.Fatalf("stopped=%+v", v)
 	}
 }

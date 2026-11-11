@@ -3,10 +3,13 @@ package core
 import (
 	"context"
 	"log/slog"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // TaskEventKind is the step of a task's life an EventTask reports.
@@ -65,6 +68,8 @@ type TaskCardView struct {
 	Summary      string // ended only: up to three lines
 	DetailsTitle string
 	Details      []string // latest steps, oldest first
+	FullTitle    string   // ended only: names Full inside the details panel
+	Full         string   // ended only: the agent's own text, as is, inside the details panel
 	SessionKey   string
 	// Interrupted is what the card should say if a restart cuts it off.
 	Interrupted string
@@ -357,17 +362,24 @@ func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 	}
 	if c.ended {
 		v.State = c.state
+		v.Summary = clipLines(c.summary, 3, 300)
 		switch c.state {
 		case TaskCardFailed:
 			v.Status = i.Tf(MsgTaskFailed, title)
+			v.Summary = failureLine(i, c.summary)
 		case TaskCardStopped:
 			v.Status = i.Tf(MsgTaskStopped, title)
+			if !readableLine(c.summary) {
+				v.Summary = ""
+			}
 		case TaskCardInterrupted:
 			v.Status = i.Tf(MsgTaskInterrupted, title)
 		default:
 			v.Status = i.Tf(MsgTaskCompleted, title)
 		}
-		v.Summary = clipLines(c.summary, 3, 300)
+		if c.summary != "" && v.Summary != c.summary {
+			v.FullTitle, v.Full = i.T(MsgTaskFullText), clipRunesKeepLines(c.summary, taskCardFullRunes)
+		}
 		return v
 	}
 	minutes := taskMinutes(c.start)
@@ -392,6 +404,55 @@ func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 	return v
 }
 
+const taskCardFullRunes = 1500
+
+var (
+	exitCodeRe = regexp.MustCompile(`exit code (\d+)`)
+	pathRe     = regexp.MustCompile(`(?:^|[^\p{Han}\d])/[A-Za-z0-9_.~-]`)
+)
+
+// failureLine is the card's one Chinese line for a failed task. The agent's
+// own text shows only when it already reads as such a line; raw errors (the
+// CLI's "Background command ... failed with exit code 1") go to the details.
+func failureLine(i *I18n, summary string) string {
+	if readableLine(summary) {
+		return summary
+	}
+	if m := exitCodeRe.FindStringSubmatch(summary); m != nil {
+		return i.Tf(MsgTaskFailedExit, m[1])
+	}
+	return i.T(MsgTaskFailedGeneric)
+}
+
+// readableLine reports whether s can sit on the card as written: one short
+// Chinese line, with no paths or code in it. A line that is mostly English
+// ("Background command "清理" failed with exit code 1") is not.
+func readableLine(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.ContainsAny(s, "\n`{}\\") || utf8.RuneCountInString(s) > 80 || pathRe.MatchString(s) {
+		return false
+	}
+	han, latin := 0, 0
+	for _, r := range s {
+		switch {
+		case unicode.Is(unicode.Han, r):
+			han++
+		case r < 128 && unicode.IsLetter(r):
+			latin++
+		}
+	}
+	return han > 0 && latin <= 3*han
+}
+
+// clipRunesKeepLines keeps s as written, cut to at most limit runes.
+func clipRunesKeepLines(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > limit {
+		return string(r[:limit]) + "…"
+	}
+	return s
+}
+
 // clipLines keeps the first n non-empty lines and at most limit runes.
 func clipLines(s string, n, limit int) string {
 	var lines []string
@@ -414,6 +475,26 @@ func clipLines(s string, n, limit int) string {
 // its tasks go with it. Every close path (/stop, /new, /switch, idle reclaim,
 // queue reset, a turn's process exit) calls it through closeAgentSession.
 func (e *Engine) abandonTasks(agent AgentSession) {
+	e.settleTasks(agent, TaskCardInterrupted)
+}
+
+// stopTasksOf settles the cards of the agent session behind interactiveKey as
+// stopped: /stop ends the agent process, and its background tasks with it,
+// because the person asked for it.
+func (e *Engine) stopTasksOf(interactiveKey string) {
+	e.interactiveMu.Lock()
+	state := e.interactiveStates[interactiveKey]
+	e.interactiveMu.Unlock()
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	agent := state.agentSession
+	state.mu.Unlock()
+	e.settleTasks(agent, TaskCardStopped)
+}
+
+func (e *Engine) settleTasks(agent AgentSession, end TaskCardState) {
 	if agent == nil {
 		return
 	}
@@ -424,7 +505,7 @@ func (e *Engine) abandonTasks(agent AgentSession) {
 		if c.agent != agent || c.ended {
 			continue
 		}
-		c.ended, c.state = true, TaskCardInterrupted
+		c.ended, c.state = true, end
 		m.scheduleLocked(e, c)
 	}
 }

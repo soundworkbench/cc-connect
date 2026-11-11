@@ -10603,6 +10603,7 @@ func (e *Engine) cmdStop(p Platform, msg *Message) {
 	// triggers the recycling loop from issue #830.
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 	stopAndReply := func(key string) bool {
+		e.stopTasksOf(key)
 		preview := e.detachInteractivePreview(key)
 		if !e.stopInteractiveSessionPreservingQueue(key) {
 			return false
@@ -12992,6 +12993,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 		}
 
 	case "/stop":
+		e.stopTasksOf(interactiveKey)
 		e.stopInteractiveSessionPreservingQueue(interactiveKey)
 
 	case "/heartbeat":
