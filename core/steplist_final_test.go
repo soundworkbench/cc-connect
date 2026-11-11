@@ -168,6 +168,8 @@ type settlePlatform struct {
 	finished  []string
 	collapsed int
 	delay     time.Duration
+	// sentAtCollapse is how many messages had been sent when the card collapsed.
+	sentAtCollapse int
 }
 
 func (p *settlePlatform) AddPreviewTool(ctx context.Context, id any, text string) error {
@@ -183,7 +185,9 @@ func (p *settlePlatform) FinishSegmentedPreview(ctx context.Context, id any, tex
 }
 
 func (p *settlePlatform) CollapsePreview(context.Context, any) error {
+	sent := len(p.stubPlatformEngine.getSent())
 	p.mu2.Lock()
+	p.sentAtCollapse = sent
 	defer p.mu2.Unlock()
 	p.collapsed++
 	return nil
@@ -212,8 +216,8 @@ func TestSettleShortTurnFinishesInCard(t *testing.T) {
 	}
 }
 
-// A long turn collapses the card to its steps and sends the reply as a new message
-// (which notifies the reader); the card is never recalled.
+// A long turn sends the reply as a new message (which notifies the reader) and only
+// then collapses the card to its steps; the card is never recalled.
 func TestSettleLongTurnCollapsesCardAndSendsNewMessage(t *testing.T) {
 	p := settleTurn(t, 10*time.Millisecond, 1)
 	p.mu2.Lock()
@@ -224,5 +228,8 @@ func TestSettleLongTurnCollapsesCardAndSendsNewMessage(t *testing.T) {
 	all := p.stubPlatformEngine.getSent()
 	if len(all) != 2 || all[1] != "answer" {
 		t.Fatalf("want the card plus one new reply, got %q", all)
+	}
+	if p.sentAtCollapse != 2 {
+		t.Fatalf("card collapsed after %d messages, want it after the reply", p.sentAtCollapse)
 	}
 }

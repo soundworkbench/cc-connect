@@ -1140,9 +1140,10 @@ func (sp *streamPreview) withQuickLine(body string) string {
 }
 
 // deliverSettled ends a turn without recalling the card. A short turn finishes the
-// reply inside the card. A long turn collapses the card to its step summary and
-// sends the reply as a new message, which is what notifies the reader. It reports
-// false, leaving the card untouched, when the platform cannot do this.
+// reply inside the card. A long turn sends the reply as a new message, which is what
+// notifies the reader, and then collapses the card to its step summary, so the reply
+// is not held up by the card update. It reports false, leaving the card untouched,
+// when the platform cannot do this.
 func (sp *streamPreview) deliverSettled(body, footer string, sendFn func(Platform, any, string) error, failureText string) bool {
 	sp.mu.Lock()
 	handle, started := sp.previewMsgID, sp.previewStartedAt
@@ -1162,15 +1163,20 @@ func (sp *streamPreview) deliverSettled(body, footer string, sendFn func(Platfor
 	if !ok {
 		return false
 	}
-	if err := c.CollapsePreview(sp.ctx, handle); err != nil {
-		slog.Warn("final response: collapse card failed", "error", err)
-		return false
-	}
 	sp.mu.Lock()
 	sp.previewMsgID = nil
 	sp.degraded = true
 	sp.mu.Unlock()
-	return sp.deliverFinalInOrder(body, footer, sendFn, failureText, FinalReplySendFirst)
+	delivered := sp.deliverFinalInOrder(body, footer, sendFn, failureText, FinalReplySendFirst)
+	if err := c.CollapsePreview(sp.ctx, handle); err != nil {
+		slog.Warn("final response: collapse card failed; recalling it", "error", err)
+		if cleaner, ok := sp.platform.(PreviewCleaner); ok {
+			if err := cleaner.DeletePreviewMessage(sp.ctx, handle); err != nil {
+				slog.Warn("final response: recall after failed collapse failed", "error", err)
+			}
+		}
+	}
+	return delivered
 }
 
 // settleInPlace turns the preview card into the final reply; the chunks that do
