@@ -93,7 +93,7 @@ type taskCard struct {
 	start      time.Time
 	step       string
 	recent     string
-	cliRecent  bool // recent came from the agent, not from the quick model
+	cliAt      time.Time // when the agent last wrote recent; zero = never
 	details    []string
 	steps      int // step changes seen, including those rotated out of details
 	ended      bool
@@ -121,6 +121,7 @@ type taskCardManager struct {
 	minGap     time.Duration // between two updates of one card
 	tick       time.Duration // how often the elapsed minutes are checked
 	summaryGap time.Duration // between two quick-model progress lines
+	cliStale   time.Duration // an agent progress line older than this lets the quick model write
 }
 
 func newTaskCardManager() *taskCardManager {
@@ -130,6 +131,7 @@ func newTaskCardManager() *taskCardManager {
 		minGap:     3 * time.Second,
 		tick:       20 * time.Second,
 		summaryGap: 30 * time.Second,
+		cliStale:   60 * time.Second,
 	}
 }
 
@@ -181,7 +183,7 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 	switch ev.Kind {
 	case TaskProgress:
 		if ev.Summary != "" {
-			c.recent, c.cliRecent = ev.Summary, true
+			c.recent, c.cliAt = ev.Summary, time.Now()
 		}
 	case TaskEnded:
 		c.ended = true
@@ -406,22 +408,28 @@ func (e *Engine) abandonTasks(agent AgentSession) {
 }
 
 const taskSummaryPrompt = "你在给用户看的后台任务卡片上写一行进展。只写一句中文，不超过 25 个字，说明这个任务现在在做什么。" +
-	"只依据给出的步骤，不要编造结果、数量或进度百分比，不要加引号或前缀。"
+	"只依据给出的步骤，不要编造结果、数量或进度百分比，不要加引号或前缀。这句话只写一遍。"
 
-// maybeSummarizeLocked asks the quick model for a progress line when the agent
-// gives none: at most every summaryGap, and only after new steps. A failure
-// leaves the line as it was. Caller holds m.mu.
+// maybeSummarizeLocked asks the quick model for a progress line when the
+// agent's own line is missing or has not changed for cliStale: at most every
+// summaryGap, and only after new steps. A failure leaves the line as it was.
+// Caller holds m.mu.
 func (m *taskCardManager) maybeSummarizeLocked(e *Engine, c *taskCard) {
 	cfg := e.streamPreview.QuickLine
-	if !cfg.Enabled || c.cliRecent || c.ended || c.summarizing || c.handle == nil ||
+	if !cfg.Enabled || c.ended || c.summarizing || c.handle == nil ||
+		time.Since(c.cliAt) < m.cliStale ||
 		c.steps == 0 || c.steps == c.summarizedRows ||
 		time.Since(c.lastSummaryAt) < m.summaryGap {
 		return
 	}
 	c.summarizing = true
-	c.lastSummaryAt = time.Now()
+	asked := time.Now()
+	c.lastSummaryAt = asked
 	c.summarizedRows = c.steps
 	prompt := "任务：" + clipRunes(c.desc, 200) + "\n最近的步骤：\n- " + strings.Join(c.details, "\n- ")
+	if c.recent != "" {
+		prompt += "\n上一句进展：" + c.recent + "\n不要重复上一句。"
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(e.ctx, quickLineTimeout(cfg))
 		defer cancel()
@@ -433,7 +441,8 @@ func (m *taskCardManager) maybeSummarizeLocked(e *Engine, c *taskCard) {
 			slog.Info("task card: progress line skipped", "error", err)
 			return
 		}
-		if !c.cliRecent && !c.ended {
+		// The agent's own line wins if it arrived while the quick model wrote.
+		if !c.ended && !c.cliAt.After(asked) && line != c.recent {
 			c.recent = line
 			poke(c.wake)
 		}
