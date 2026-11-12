@@ -69,36 +69,75 @@ func TestOneTaskCardDropsAnOutcomeThatRepeatsTheName(t *testing.T) {
 	}
 }
 
-// 11-12 20:10–20:40: a subagent ran 29 minutes. Its first card settled when
-// the agent reported it done; the agent then reported the same task again
-// three times, and each time the bridge counted from that moment, so the
-// last card read "用时不到 1 分钟". A task reported again keeps its first start.
-func TestTaskReportedAgainKeepsItsFirstStart(t *testing.T) {
+// 11-12 20:10–20:40: a subagent ran 29 minutes. Its card settled when the
+// agent reported it done; the agent then reported the same task again three
+// times, and each time the bridge opened a new card counting from that moment,
+// so the last one read "用时不到 1 分钟". A task reported again after it ended
+// opens no card and does not count as running; a new result only replaces the
+// outcome on its row of the original card.
+func TestTaskReportedAgainAfterItEnded(t *testing.T) {
 	env := newTaskEnv(t)
 	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a1", Description: "统计文档目录", Background: yes()})
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "b1", Description: "整理纪要", Background: yes()})
 	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "a1", Status: "completed", Summary: "目录统计好了"})
-	waitUntil(t, "first card settled", func() bool { h, c := env.heldTasks(); return h == 0 && c == 0 })
-	// Pretend the first report was 28 minutes ago.
-	m := env.e.taskCards
-	m.mu.Lock()
-	m.started[env.key+"\x00a1"] = time.Now().Add(-28 * time.Minute)
-	m.mu.Unlock()
+	waitUntil(t, "row ended", func() bool { return lastView(env).Title == "后台任务：进行中 1/2" })
 
+	// Reported again while its card is live: the row stays as it ended.
 	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a1", Description: "统计文档目录", Background: yes()})
-	waitUntil(t, "second card", func() bool { sent, _ := env.p.cards(); return len(sent) == 2 })
-	if sent, _ := env.p.cards(); sent[1].view.Line != "28 分钟" {
-		t.Fatalf("second card opens with %q", sent[1].view.Line)
-	}
-	env.task(TaskEvent{Kind: TaskEnded, TaskID: "a1", Status: "completed", Summary: "目录统计好了，共 52 个"})
-	sent, _ := env.p.cards()
-	waitUntil(t, "second card settled", func() bool {
-		_, up := env.p.cards()
-		last := up[len(up)-1]
-		return last.handle == sent[1].handle && !last.view.State.Live()
-	})
-	if v := lastView(env); v.Line != "目录统计好了，共 52 个 · 用时 28 分钟" {
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a1", Step: "再列一遍目录"})
+	env.task(TaskEvent{Kind: TaskEnded, TaskID: "b1", Status: "completed", Summary: "8 场会的要点"})
+	waitUntil(t, "card settled", func() bool { h, c := env.heldTasks(); return h == 0 && c == 0 })
+	if v := lastView(env); v.State != TaskCardCompleted || rowTexts(v) != "✓ 统计文档目录 · 目录统计好了 · 用时不到 1 分钟\n✓ 整理纪要 · 8 场会的要点 · 用时不到 1 分钟" {
 		t.Fatalf("settled=%+v", v)
+	}
+
+	// Reported again after its card settled: no new card, not running.
+	_, before := env.p.cards()
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a1", Description: "统计文档目录", Background: yes()})
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a1", Step: "再列一遍目录", Summary: "在核对子目录"})
+	time.Sleep(300 * time.Millisecond)
+	if sent, up := env.p.cards(); len(sent) != 1 || len(up) != len(before) {
+		t.Fatalf("reported again: cards=%d updates=%d, want 1 and %d", len(sent), len(up), len(before))
+	}
+	if h, c := env.heldTasks(); h != 0 || c != 0 {
+		t.Fatalf("held tasks=%d cards=%d", h, c)
+	}
+	if title, rows := env.e.taskCards.progressRows(env.e.i18n, env.key); title != "" || rows != nil {
+		t.Fatalf("progress rows=%q %q", title, rows)
+	}
+
+	// The same end again changes nothing; a new result updates the row only.
+	env.task(TaskEvent{Kind: TaskEnded, TaskID: "a1", Status: "completed", Summary: "目录统计好了"})
+	time.Sleep(200 * time.Millisecond)
+	if _, up := env.p.cards(); len(up) != len(before) {
+		t.Fatalf("same result rewrote the card: %+v", up[len(before):])
+	}
+	env.task(TaskEvent{Kind: TaskEnded, TaskID: "a1", Status: "completed", Summary: "共 52 个目录、318 个文件"})
+	waitUntil(t, "row updated", func() bool { _, up := env.p.cards(); return len(up) == len(before)+1 })
+	sent, up := env.p.cards()
+	if last := up[len(up)-1]; last.handle != sent[0].handle || last.view.State != TaskCardCompleted ||
+		rowTexts(last.view) != "✓ 统计文档目录 · 共 52 个目录、318 个文件 · 用时不到 1 分钟\n✓ 整理纪要 · 8 场会的要点 · 用时不到 1 分钟" {
+		t.Fatalf("updated=%+v", last)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("cards=%d, want 1", len(sent))
+	}
+}
+
+// An ended task with no card (it ended before the open delay) stays without
+// one when reported again.
+func TestShortTaskReportedAgainGetsNoCard(t *testing.T) {
+	env := newTaskEnv(t)
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "q", Description: "很快的命令", Background: yes()})
+	env.task(TaskEvent{Kind: TaskEnded, TaskID: "q", Status: "completed"})
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "q", Description: "很快的命令", Background: yes()})
+	time.Sleep(300 * time.Millisecond)
+	if sent, _ := env.p.cards(); len(sent) != 0 {
+		t.Fatalf("cards=%+v", sent)
+	}
+	if h, _ := env.heldTasks(); h != 0 {
+		t.Fatalf("held tasks=%d", h)
 	}
 }
 

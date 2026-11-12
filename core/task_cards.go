@@ -183,7 +183,7 @@ func (c *taskCard) condensing() bool {
 type taskCardManager struct {
 	mu       sync.Mutex
 	tasks    map[string]*cardTask // by session and task ID
-	started  map[string]time.Time // real start of every task seen lately, by session and task ID; outlives the task's record
+	past     map[string]*cardTask // tasks ended within taskMemory, by session and task ID; outlives m.tasks
 	open     map[string]*taskCard // the live card of each session
 	seq      uint64
 	inflight *inflightStore // background tasks in progress, for resume after restart
@@ -199,7 +199,7 @@ type taskCardManager struct {
 func newTaskCardManager() *taskCardManager {
 	return &taskCardManager{
 		tasks:      make(map[string]*cardTask),
-		started:    make(map[string]time.Time),
+		past:       make(map[string]*cardTask),
 		open:       make(map[string]*taskCard),
 		openDelay:  10 * time.Second,
 		minGap:     3 * time.Second,
@@ -227,6 +227,13 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 	key := sessionKey + "\x00" + ev.TaskID
 	t := m.tasks[key]
 	if t == nil {
+		t = m.past[key]
+	}
+	if t != nil && t.ended {
+		m.reportedAgainLocked(e, t, ev)
+		return
+	}
+	if t == nil {
 		if ev.Kind == TaskEnded {
 			return
 		}
@@ -238,20 +245,12 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 		now := time.Now()
 		t = &cardTask{key: key, sessionKey: sessionKey, taskID: ev.TaskID, seq: m.seq, agent: agent, platform: tp, replyCtx: replyCtx,
 			start: now.Add(-ev.Elapsed), startKnown: ev.Kind == TaskStarted, showAt: now.Add(-ev.Elapsed).Add(m.openDelay), state: TaskCardRunning}
-		// The agent can report a task again after its card settled (a subagent
-		// it sends more work to keeps its ID): it keeps its first start.
-		if first, ok := m.started[key]; ok {
-			t.start, t.startKnown = first, true
-		}
 		m.tasks[key] = t
 	}
 	if ev.Elapsed > 0 {
 		if at := time.Now().Add(-ev.Elapsed); !t.startKnown || at.Before(t.start) {
 			t.start, t.startKnown = at, true
 		}
-	}
-	if t.startKnown {
-		m.rememberStartLocked(key, t.start)
 	}
 	if ev.Description != "" {
 		t.desc = ev.Description
@@ -280,38 +279,67 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 			break
 		}
 		t.ended, t.endedAt = true, time.Now()
-		t.summary = ev.Summary
-		switch ev.Status {
-		case "failed":
-			t.state = TaskCardFailed
-		case "stopped", "killed":
-			t.state = TaskCardStopped
-		default:
-			t.state = TaskCardCompleted
-			if t.card != nil {
-				m.condenseLocked(e, t)
-			}
+		t.summary, t.state = ev.Summary, taskEndState(ev.Status)
+		if t.state == TaskCardCompleted && t.card != nil {
+			m.condenseLocked(e, t)
 		}
 	}
 	m.scheduleLocked(e, t)
 }
 
-// taskStartMemory is how long a task's start is kept after its record is gone.
-const taskStartMemory = 24 * time.Hour
+func taskEndState(status string) TaskCardState {
+	switch status {
+	case "failed":
+		return TaskCardFailed
+	case "stopped", "killed":
+		return TaskCardStopped
+	}
+	return TaskCardCompleted
+}
 
-// rememberStartLocked keeps a task's real start for when the agent reports the
-// task again. Caller holds m.mu.
-func (m *taskCardManager) rememberStartLocked(key string, start time.Time) {
-	if old, ok := m.started[key]; ok && !start.Before(old) {
+// reportedAgainLocked handles an event for a task that has already ended. The
+// agent can report such a task again (a subagent it sends more work to keeps
+// its ID, 11-12): it opens no card and does not count as running. Only a new
+// result on a later end report replaces the outcome on the task's row of its
+// original card. Caller holds m.mu.
+func (m *taskCardManager) reportedAgainLocked(e *Engine, t *cardTask, ev *TaskEvent) {
+	state := taskEndState(ev.Status)
+	if ev.Kind != TaskEnded || t.card == nil || (ev.Summary == "" || ev.Summary == t.summary) && state == t.state {
 		return
 	}
-	for k, at := range m.started {
-		if time.Since(at) > taskStartMemory {
-			delete(m.started, k)
-		}
+	if ev.Summary != "" {
+		t.summary = ev.Summary
 	}
-	m.started[key] = start
+	t.state, t.brief = state, ""
+	if state == TaskCardCompleted {
+		m.condenseLocked(e, t)
+	}
+	if !t.condensing {
+		m.refreshLocked(e, t.card)
+	}
 }
+
+// refreshLocked shows a change on a card: a live card's own loop picks it up;
+// a settled one is written once more. Caller holds m.mu.
+func (m *taskCardManager) refreshLocked(e *Engine, c *taskCard) {
+	if m.open[c.sessionKey] == c {
+		poke(c.wake)
+		return
+	}
+	if c.handle == nil {
+		return
+	}
+	view := m.viewLocked(e, c)
+	go func() {
+		if err := c.platform.UpdateTaskCard(e.ctx, c.handle, view); err != nil {
+			slog.Warn("task card: update failed", "card", taskCardID(c), "error", err)
+		}
+		cardEvent("task_card_update", c.sessionKey, taskCardID(c), "reason", "reported_again")
+	}()
+}
+
+// taskMemory is how long an ended task is remembered after its record is gone.
+const taskMemory = 24 * time.Hour
 
 // scheduleLocked moves a task along after any change. Caller holds m.mu.
 func (m *taskCardManager) scheduleLocked(e *Engine, t *cardTask) {
@@ -333,10 +361,20 @@ func (m *taskCardManager) scheduleLocked(e *Engine, t *cardTask) {
 }
 
 func (m *taskCardManager) dropLocked(t *cardTask) {
-	if m.tasks[t.key] == t {
-		delete(m.tasks, t.key)
-		m.inflight.taskEnd(t.sessionKey, t.taskID)
+	if m.tasks[t.key] != t {
+		return
 	}
+	delete(m.tasks, t.key)
+	m.inflight.taskEnd(t.sessionKey, t.taskID)
+	if !t.ended {
+		return
+	}
+	for k, o := range m.past {
+		if time.Since(o.endedAt) > taskMemory {
+			delete(m.past, k)
+		}
+	}
+	m.past[t.key] = t
 }
 
 func poke(ch chan struct{}) {
@@ -876,7 +914,7 @@ const taskResultPrompt = "你在给用户看的后台任务卡片上写这个任
 // summary's first sentence. Caller holds m.mu.
 func (m *taskCardManager) condenseLocked(e *Engine, c *cardTask) {
 	cfg := e.streamPreview.QuickLine
-	if !cfg.Enabled || c.summary == "" || briefEnough(c.summary) {
+	if !cfg.Enabled || c.summary == "" || briefEnough(c.summary) || cliDoneRe.MatchString(c.summary) {
 		return
 	}
 	c.condensing = true
@@ -893,7 +931,7 @@ func (m *taskCardManager) condenseLocked(e *Engine, c *cardTask) {
 		} else if readableLine(line) {
 			c.brief = line
 		}
-		poke(c.card.wake)
+		m.refreshLocked(e, c.card)
 	}()
 }
 
