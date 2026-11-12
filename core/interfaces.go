@@ -47,6 +47,12 @@ type Platform interface {
 // ErrNotSupported indicates a platform doesn't support a particular operation.
 var ErrNotSupported = errors.New("operation not supported by this platform")
 
+// I18nReceiver is implemented by platforms that send text of their own, not
+// in reply to a message. The engine hands them its I18n before Start.
+type I18nReceiver interface {
+	SetI18n(*I18n)
+}
+
 // ReplyContextReconstructor is an optional interface for platforms that can
 // recreate a reply context from a session key. This is needed for cron jobs
 // to send messages to users without an incoming message.

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -177,6 +178,9 @@ type Platform struct {
 	liveCards        *liveCardStore // cards with a spinner, rewritten if a restart cuts them off
 	catchupCancel    context.CancelFunc
 	catchupDone      chan struct{}
+	welcome          *welcomer          // first-run welcome to the owner; nil when not due
+	welcomeCancel    context.CancelFunc // stops the welcome schedule
+	i18n             atomic.Pointer[core.I18n]
 	dedup            *core.MessageDedup
 	botOpenID        string
 	// groupFilterDegraded is true when bot open_id discovery failed at startup
@@ -591,6 +595,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		resourceMaxBytes:           defaultResourceMaxBytes,
 	}
 	base.configureP2PCatchup(opts)
+	base.configureWelcome(opts)
 	base.configureLiveCards(opts)
 	if !useInteractiveCard {
 		base.self = base
@@ -770,6 +775,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	if !p.shouldUseWebhookMode() {
 		p.startP2PCatchup(group.ready)
 	}
+	p.startWelcome()
 
 	// Secondary platforms skip connection creation — the primary's connection
 	// fans out events to all platforms in the shared group.
@@ -5887,6 +5893,7 @@ func (p *Platform) updateCardEntity(ctx context.Context, h *feishuPreviewHandle,
 
 func (p *Platform) Stop() error {
 	p.stopP2PCatchup()
+	p.stopWelcome()
 	// Issue #1618: stop the background supervisor that retries the
 	// bot-info API when startup discovery fails. Without this the
 	// goroutine could outlive the platform and leak into the next

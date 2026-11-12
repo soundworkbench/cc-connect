@@ -283,6 +283,7 @@ const (
 	MsgError                     MsgKey = "error"
 	MsgPromptNotDelivered        MsgKey = "prompt_not_delivered"
 	MsgPermissionChannelRetrying MsgKey = "permission_channel_retrying"
+	MsgFirstRunWelcome           MsgKey = "first_run_welcome"
 	MsgPermissionChannelLost     MsgKey = "permission_channel_lost"
 	MsgPermissionChannelResume   MsgKey = "permission_channel_resume"
 	MsgAgentTurnFailed           MsgKey = "agent_turn_failed"
@@ -1047,6 +1048,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "最終訊息傳送失敗，已保留進度資訊。",
 		LangJapanese:           "最終メッセージの送信に失敗しました。進捗を保持しました。",
 		LangSpanish:            "No se pudo enviar el mensaje final. Se conservó el progreso.",
+	},
+	MsgFirstRunWelcome: {
+		LangEnglish:            "Hi, I'm your work partner 👋\nJust tell me here whenever you need something, for example:\n· What meetings do I have today?\n· Turn this file into a few key points\n· Draft an email to a customer for me\nBigger jobs run in the background, so you can keep chatting with me. Why not say something to try it out?",
+		LangChinese:            "你好，我是你的工作伙伴 👋\n有事直接在这里跟我说，比如：\n· 帮我看看今天有什么会\n· 把这份文件整理成几条要点\n· 帮我写一封给客户的邮件\n大一点的活我会放到后台慢慢做，你可以接着跟我聊。先随便说一句试试？",
+		LangTraditionalChinese: "你好，我是你的工作夥伴 👋\n有事直接在這裡跟我說，比如：\n· 幫我看看今天有什麼會\n· 把這份文件整理成幾條重點\n· 幫我寫一封給客戶的郵件\n大一點的工作我會放到背景慢慢做，你可以繼續跟我聊。先隨便說一句試試？",
+		LangJapanese:           "こんにちは、あなたの仕事のパートナーです 👋\n用事があれば、ここで気軽に話しかけてください。たとえば：\n· 今日の会議を確認して\n· このファイルを要点にまとめて\n· お客様へのメールを書いて\n大きめの作業はバックグラウンドで進めるので、そのまま話し続けて大丈夫です。まずは何か一言どうぞ。",
+		LangSpanish:            "Hola, soy tu compañero de trabajo 👋\nCuando necesites algo, dímelo aquí. Por ejemplo:\n· ¿Qué reuniones tengo hoy?\n· Resume este archivo en unos puntos clave\n· Escríbeme un correo para un cliente\nLas tareas más grandes las hago en segundo plano, así que puedes seguir hablando conmigo. ¿Por qué no me escribes algo para probar?",
 	},
 	MsgPermissionChannelRetrying: {
 		LangEnglish:            "The tool approval channel dropped. Reconnected; continuing where it stopped.",

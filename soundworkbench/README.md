@@ -115,6 +115,25 @@ WebSocket 真正连上后，按项目已有会话记录（包括多工作区记�
 
 本地验证：`CPUS=4 soundworkbench/check-p2p-catchup.sh` 会先证明旧提交 `4a245e70` 丢失私聊，再运行当前补收测试；只使用 Docker 和模拟 API。
 
+### 首次欢迎语（飞书 / Lark）
+
+从没聊过天的机器人，主动给它唯一的主人发一条私聊欢迎语（`platform/feishu/welcome.go`）。默认开启，不需要新配置。
+
+- 主人：`allow_from` 里唯一的 `ou_` 开头的 open_id。`allow_from` 为空、为 `*` 或有多个人时不发，日志记 `welcome: skipped reason=no_owner | multiple_owners | owner_not_open_id`。
+- 只在“从没聊过”时发：项目会话记录（包括多工作区记录）里没有任何带历史的会话，私聊补收也没有私聊记录。
+- 只发一次：标记文件 `data_dir/feishu/welcome-sent`，发送前先以独占方式创建，同一个 `data_dir` 下的多个项目也只发一次。
+- 时间：北京时间周一到周五 09:30–19:30。窗口内启动时 1 分钟后发；窗口外排到下一个工作日 09:30，再加 0–20 分钟随机延迟。发送前再查一次是否已经聊过。不考虑法定节假日。
+- 失败：记 WARN，删掉标记，下一个窗口重试；连同重启一共最多 3 次（次数记在 `data_dir/feishu/welcome-attempts`），第 3 次失败后保留标记不再发。
+- 日志：`welcome: scheduled`、`welcome: sent`、`welcome: skipped reason=...`（还有 `already_sent`、`attempts_exhausted`、`has_conversation`、`records_unreadable`），不记 open_id。
+- 文字：默认按项目语言（`language`）取内置文案，有简体、繁体、英、日、西五种；没有引擎语言时飞书用简体、Lark 用英文。`welcome_message` 可改成自己的文字；`welcome = false` 关闭。
+
+```toml
+[projects.platforms.options]
+allow_from = "ou_xxx"
+# welcome = false
+# welcome_message = "你好，有事直接跟我说。"
+```
+
 ### 队列
 
 - 排队消息写入 `data_dir/queues/`，重启后恢复（`core/queue_store.go`）。`/stop` 只结束当前回合并保留队列；`/new` 丢弃队列，并列出被丢弃的内容。见 [docs/queued-messages.md](../docs/queued-messages.md)。
@@ -237,6 +256,7 @@ WebSocket 真正连上后，按项目已有会话记录（包括多工作区记�
 | Claude Code 选项 | `stream_partial_text` (false)、`first_write_timeout` (`"60s"`)、`config_dirs` | 见上文 |
 | Codex 选项 | `backend` (`"exec"`)、`background_wakeup`、`background_wakeup_max_turns`、`background_wakeup_timeout_mins` | 回合并入和后台唤醒 |
 | 飞书选项 | `keep_preview_on_finish` (false)、`keep_preview_max_secs` (120)、`p2p_thread_isolation` (false)、`final_reply_order`、`merge_progress_into_final`、`merge_progress_min_chars`、`merge_progress_tables` | 见上文 |
+| | `welcome` (true)、`welcome_message` (空，用内置文案) | 首次欢迎语（见上文） |
 
 `config.example.toml` 为主要配置项提供了注释。
 
