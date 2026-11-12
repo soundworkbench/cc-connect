@@ -31,7 +31,7 @@ const (
 	resumeStartDelay     = 20 * time.Second
 	inflightBeat         = time.Minute
 	inflightRequestRunes = 60
-	inflightMaxTasks     = 5
+	inflightMaxTasks     = 10
 	// resumeMarker opens every resume prompt, so a resume turn that is itself
 	// cut off is recognised and not resumed again.
 	resumeMarker = "【重启续做】"
@@ -265,11 +265,15 @@ func (e *Engine) interruptedItems(rec *inflightSession) []string {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	if len(names) > inflightMaxTasks {
+	more := len(names) - inflightMaxTasks
+	if more > 0 {
 		names = names[:inflightMaxTasks]
 	}
 	for _, name := range names {
 		items = append(items, e.i18n.Tf(MsgResumeItemTask, name))
+	}
+	if more > 0 {
+		items = append(items, e.i18n.Tf(MsgResumeItemMoreTasks, more))
 	}
 	return items
 }

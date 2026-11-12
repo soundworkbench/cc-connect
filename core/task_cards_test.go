@@ -112,7 +112,7 @@ func TestBackgroundTaskCardOpensUpdatesAndSettles(t *testing.T) {
 	sent, _ := env.p.cards()
 	v := sent[0].view
 	// The step holds the line; the latest progress waits for an idle card.
-	if v.State != TaskCardRunning || v.Title != "后台任务：按客户整理 200 个文件" || v.Label != "进行中" || v.Line != "读取文件 · 不到 1 分钟" || v.SessionKey != env.key {
+	if v.State != TaskCardRunning || v.Title != "后台任务：按客户整理 200 个文件" || v.Label != "进行中" || v.Line != "读取文件 · 不到 1 分钟" || v.SessionKey != env.key || len(v.Rows) != 0 {
 		t.Fatalf("open view=%+v", v)
 	}
 	// Between turns the unsolicited reader carries the task events.
@@ -128,7 +128,7 @@ func TestBackgroundTaskCardOpensUpdatesAndSettles(t *testing.T) {
 	})
 	_, up := env.p.cards()
 	last := up[len(up)-1]
-	if last.handle != sent[0].handle || last.view.Title != "后台任务：按客户整理 200 个文件" || last.view.Label != "已完成" || last.view.Line != "整理完成 · 用时不到 1 分钟" ||
+	if last.handle != sent[0].handle || last.view.Title != "后台任务：按客户整理 200 个文件" || last.view.Label != "已完成" || last.view.Line != "整理完成 · 用时不到 1 分钟" || len(last.view.Rows) != 0 ||
 		last.view.Full != "整理完成\n共 200 个文件\n分到 12 个客户\n多余的一行" || strings.Join(last.view.Details, "|") != "读取文件|编辑文件" {
 		t.Fatalf("settled=%+v", last)
 	}
@@ -156,32 +156,23 @@ func TestShortAndForegroundTasksGetNoCard(t *testing.T) {
 	})
 }
 
-// Each card follows its own task; a task stopped through the agent settles
-// only its card. No card offers a stop button.
-func TestTaskCardsSettleOneByOne(t *testing.T) {
+// Tasks of one session share a card; a task stopped through the agent
+// settles only its row. No card offers a stop button.
+func TestTaskCardRowsSettleOneByOne(t *testing.T) {
 	env := newTaskEnv(t)
 	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "任务甲", Background: yes()})
 	env.task(TaskEvent{Kind: TaskStarted, TaskID: "b", Description: "任务乙", Background: yes()})
-	waitUntil(t, "two cards", func() bool { sent, _ := env.p.cards(); return len(sent) == 2 })
-	sent, _ := env.p.cards()
-	handles := map[string]any{}
-	for _, c := range sent {
-		handles[c.view.Title] = c.handle
-	}
+	waitUntil(t, "one card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "b", Status: "stopped"})
-	waitUntil(t, "stopped card", func() bool {
-		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.Label == "已停止" && up[len(up)-1].view.Line == "用时不到 1 分钟"
+	waitUntil(t, "stopped row", func() bool {
+		v := lastView(env)
+		return len(v.Rows) == 2 && v.Rows[1].Text == "■ 任务乙 · 用时不到 1 分钟"
 	})
-	_, up := env.p.cards()
-	if up[len(up)-1].handle != handles["后台任务：任务乙"] {
-		t.Fatalf("stopped task settled another card: %+v", up[len(up)-1])
+	if v := lastView(env); v.State != TaskCardRunning || v.Label != "进行中 1/2" || v.Rows[0].Text != "◐ 任务甲 · 不到 1 分钟" {
+		t.Fatalf("card after one stop: %+v", v)
 	}
-	env.e.taskCards.mu.Lock()
-	open := len(env.e.taskCards.cards)
-	env.e.taskCards.mu.Unlock()
-	if open != 1 {
-		t.Fatalf("open cards=%d, want task a still running", open)
+	if sent, _ := env.p.cards(); len(sent) != 1 {
+		t.Fatalf("cards=%d, want one", len(sent))
 	}
 	env.s.mu.Lock()
 	defer env.s.mu.Unlock()
@@ -259,7 +250,7 @@ func TestTaskCardShowsOnlyTheTimeUntilThereIsARealStep(t *testing.T) {
 	})
 
 	// No step at all: the time alone, not "进行中".
-	if got := liveStep(&taskCard{}); got != "" {
+	if got := liveStep(&cardTask{}); got != "" {
 		t.Fatalf("liveStep with nothing = %q", got)
 	}
 }
@@ -276,8 +267,8 @@ func waitInterrupted(t *testing.T, env *taskEnv, title string) {
 	}
 	env.e.taskCards.mu.Lock()
 	defer env.e.taskCards.mu.Unlock()
-	if len(env.e.taskCards.cards) != 0 {
-		t.Fatalf("interrupted card still holds a slot: %d", len(env.e.taskCards.cards))
+	if len(env.e.taskCards.tasks) != 0 || len(env.e.taskCards.open) != 0 {
+		t.Fatalf("interrupted card still held: tasks=%d cards=%d", len(env.e.taskCards.tasks), len(env.e.taskCards.open))
 	}
 }
 

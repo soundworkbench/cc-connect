@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -61,21 +62,36 @@ func (s TaskCardState) Live() bool { return s == TaskCardRunning }
 // TaskCardView is the whole content of a task card; every text is ready to show.
 type TaskCardView struct {
 	State        TaskCardState
-	Title        string // the task's name
+	Title        string // one task: "Background task: <name>"; several: "Background tasks: <n>"
 	Label        string // the state in a word: running, done, failed, stopped, interrupted
-	Line         string // live: "<current step> · <elapsed>"; ended: "<outcome> · took <elapsed>"
-	Summary      string // ended only: the outcome part of Line
+	Line         string // one task — live: "<current step> · <elapsed>"; ended: "<outcome> · took <elapsed>"
+	Summary      string // one task, ended only: the outcome part of Line
 	DetailsTitle string
-	Details      []string // latest steps, oldest first
-	FullTitle    string   // ended only: names Full inside the details panel
-	Full         string   // ended only: the agent's own text, as is, inside the details panel
-	SessionKey   string
+	Details      []string // one task: latest steps, oldest first
+	FullTitle    string   // one task, ended only: names Full inside the details panel
+	Full         string   // one task, ended only: the agent's own text, as is, inside the details panel
+	// Rows lists the tasks of a card holding two or more, in the order they
+	// joined it; empty for a card of one task, which uses Line and Details.
+	Rows []TaskCardRow
+	More string // rows kept off the body: "N more under Details"; "" = every row is on the body
+	// SessionKey names the chat session the card belongs to.
+	SessionKey string
 	// Interrupted is what the card should say if a restart cuts it off.
 	Interrupted string
 }
 
+// TaskCardRow is one task on a card of several tasks.
+type TaskCardRow struct {
+	State     TaskCardState
+	Text      string // "<mark> <name> · <step or outcome> · <time>"
+	Shown     bool   // on the card's body; otherwise only in the details panel
+	Details   []string
+	FullTitle string // failed only: names Full
+	Full      string // failed only: the raw error, cut short
+}
+
 // TaskCardPlatform is implemented by platforms that can show one updatable
-// card per background task.
+// card of background tasks per session.
 type TaskCardPlatform interface {
 	SendTaskCard(ctx context.Context, replyCtx any, view TaskCardView) (any, error)
 	UpdateTaskCard(ctx context.Context, handle any, view TaskCardView) error
@@ -83,11 +99,20 @@ type TaskCardPlatform interface {
 
 const (
 	taskCardDetailRows = 10
-	taskCardMaxOpen    = 3 // per session
+	taskCardRowsShown  = 8   // rows on the body of a card of several tasks
+	taskRowSteps       = 5   // steps per task in the details of a card of several tasks
+	taskRowNameRunes   = 24  // a task's name on its row
+	taskRowTextRunes   = 30  // a row's step or outcome
+	taskRowFullRunes   = 300 // a failed row's raw error in the details
+	// taskOpenTogether: tasks due to show within this time of a card opening
+	// join it at once, so a batch started together appears together.
+	taskOpenTogether = time.Second
 )
 
-type taskCard struct {
+// cardTask is one background task the bridge follows.
+type cardTask struct {
 	key, sessionKey, taskID string
+	seq                     uint64 // order of first sight; rows follow it
 	agent                   AgentSession
 	platform                TaskCardPlatform
 	replyCtx                any
@@ -110,35 +135,66 @@ type taskCard struct {
 	brief      string // completed: the quick model's one line for a long or raw summary
 	condensing bool   // the quick model is writing brief; the settled card waits for it
 
-	scheduled bool // the open timer is set
-	opened    bool // the card is sent (or being sent); run owns updates
-	handle    any
-	wake      chan struct{}
+	scheduled bool      // the show timer is set
+	card      *taskCard // the card showing the task; nil until it shows
 
 	summarizing    bool
 	lastSummaryAt  time.Time
 	summarizedRows int
 }
 
-// taskCardManager keeps one card per background task: opened once the task
-// has run for openDelay, updated in place at most every minGap, and settled
-// to the task's outcome when it ends.
+// taskCard is the one live card of a session's background tasks. Tasks join
+// it while any of its tasks runs; once all have ended it settles, and the
+// next task opens a new card.
+type taskCard struct {
+	sessionKey string
+	platform   TaskCardPlatform
+	replyCtx   any
+	tasks      []*cardTask // in the order they joined
+	handle     any
+	wake       chan struct{}
+}
+
+func (c *taskCard) allEnded() bool {
+	for _, t := range c.tasks {
+		if !t.ended {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *taskCard) condensing() bool {
+	for _, t := range c.tasks {
+		if t.condensing {
+			return true
+		}
+	}
+	return false
+}
+
+// taskCardManager follows background tasks and keeps one card per session
+// for them: opened once a task has run for openDelay, updated in place at
+// most every minGap, and settled when all of its tasks have ended.
 type taskCardManager struct {
 	mu       sync.Mutex
-	cards    map[string]*taskCard
+	tasks    map[string]*cardTask // by session and task ID
+	open     map[string]*taskCard // the live card of each session
+	seq      uint64
 	inflight *inflightStore // background tasks in progress, for resume after restart
 
-	openDelay  time.Duration // a task ending sooner gets no card
+	openDelay  time.Duration // a task ending sooner shows on no card
 	minGap     time.Duration // between two updates of one card
 	tick       time.Duration // how often a card is checked for changes
-	idleBeat   time.Duration // a card unchanged this long shows a sign that the task is alive
-	summaryGap time.Duration // between two quick-model progress lines
+	idleBeat   time.Duration // a card unchanged this long shows a sign that its tasks are alive
+	summaryGap time.Duration // between two quick-model progress lines of one task
 	cliStale   time.Duration // an agent progress line older than this lets the quick model write
 }
 
 func newTaskCardManager() *taskCardManager {
 	return &taskCardManager{
-		cards:      make(map[string]*taskCard),
+		tasks:      make(map[string]*cardTask),
+		open:       make(map[string]*taskCard),
 		openDelay:  10 * time.Second,
 		minGap:     3 * time.Second,
 		tick:       5 * time.Second,
@@ -163,8 +219,8 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := sessionKey + "\x00" + ev.TaskID
-	c := m.cards[key]
-	if c == nil {
+	t := m.tasks[key]
+	if t == nil {
 		if ev.Kind == TaskEnded {
 			return
 		}
@@ -172,70 +228,77 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 		if !ok {
 			return
 		}
-		c = &taskCard{key: key, sessionKey: sessionKey, taskID: ev.TaskID, agent: agent, platform: tp, replyCtx: replyCtx,
-			start: time.Now().Add(-ev.Elapsed), state: TaskCardRunning, wake: make(chan struct{}, 1)}
-		m.cards[key] = c
+		m.seq++
+		t = &cardTask{key: key, sessionKey: sessionKey, taskID: ev.TaskID, seq: m.seq, agent: agent, platform: tp, replyCtx: replyCtx,
+			start: time.Now().Add(-ev.Elapsed), state: TaskCardRunning}
+		m.tasks[key] = t
 	}
 	if ev.Description != "" {
-		c.desc = ev.Description
+		t.desc = ev.Description
 	}
 	if ev.Background != nil {
-		c.background = *ev.Background
+		t.background = *ev.Background
 	}
 	if ev.Hidden {
-		c.hidden = true
+		t.hidden = true
 	}
-	if ev.Step != "" && ev.Step != c.step {
-		c.step, c.still, c.generic = ev.Step, false, ev.StepGeneric
-		c.steps++
-		c.details = append(c.details, ev.Step)
-		if len(c.details) > taskCardDetailRows {
-			c.details = c.details[len(c.details)-taskCardDetailRows:]
+	if ev.Step != "" && ev.Step != t.step {
+		t.step, t.still, t.generic = ev.Step, false, ev.StepGeneric
+		t.steps++
+		t.details = append(t.details, ev.Step)
+		if len(t.details) > taskCardDetailRows {
+			t.details = t.details[len(t.details)-taskCardDetailRows:]
 		}
 	}
 	switch ev.Kind {
 	case TaskProgress:
 		if ev.Summary != "" {
-			c.recent, c.cliAt = ev.Summary, time.Now()
+			t.recent, t.cliAt = ev.Summary, time.Now()
 		}
 	case TaskEnded:
-		c.ended, c.endedAt = true, time.Now()
-		c.summary = ev.Summary
+		if t.ended {
+			break
+		}
+		t.ended, t.endedAt = true, time.Now()
+		t.summary = ev.Summary
 		switch ev.Status {
 		case "failed":
-			c.state = TaskCardFailed
+			t.state = TaskCardFailed
 		case "stopped", "killed":
-			c.state = TaskCardStopped
+			t.state = TaskCardStopped
 		default:
-			c.state = TaskCardCompleted
-			if c.opened {
-				m.condenseLocked(e, c)
+			t.state = TaskCardCompleted
+			if t.card != nil {
+				m.condenseLocked(e, t)
 			}
 		}
 	}
-	m.scheduleLocked(e, c)
+	m.scheduleLocked(e, t)
 }
 
-// scheduleLocked moves a card along after any change. Caller holds m.mu.
-func (m *taskCardManager) scheduleLocked(e *Engine, c *taskCard) {
+// scheduleLocked moves a task along after any change. Caller holds m.mu.
+func (m *taskCardManager) scheduleLocked(e *Engine, t *cardTask) {
 	switch {
-	case c.opened:
-		poke(c.wake)
-		m.maybeSummarizeLocked(e, c, false)
-	case c.ended:
-		m.dropLocked(c)
-	case c.hidden:
-		// Kept until it ends, so later frames without the flag do not open a card.
-	case c.background && !c.scheduled:
-		c.scheduled = true
-		time.AfterFunc(max(0, time.Until(c.start.Add(m.openDelay))), func() { m.open(e, c) })
+	case t.card != nil:
+		if t.ended {
+			m.inflight.taskEnd(t.sessionKey, t.taskID)
+		}
+		poke(t.card.wake)
+		m.maybeSummarizeLocked(e, t, false)
+	case t.ended:
+		m.dropLocked(t)
+	case t.hidden:
+		// Kept until it ends, so later frames without the flag do not show it.
+	case t.background && !t.scheduled:
+		t.scheduled = true
+		time.AfterFunc(max(0, time.Until(t.start.Add(m.openDelay))), func() { m.show(e, t) })
 	}
 }
 
-func (m *taskCardManager) dropLocked(c *taskCard) {
-	if m.cards[c.key] == c {
-		delete(m.cards, c.key)
-		m.inflight.taskEnd(c.sessionKey, c.taskID)
+func (m *taskCardManager) dropLocked(t *cardTask) {
+	if m.tasks[t.key] == t {
+		delete(m.tasks, t.key)
+		m.inflight.taskEnd(t.sessionKey, t.taskID)
 	}
 }
 
@@ -246,48 +309,75 @@ func poke(ch chan struct{}) {
 	}
 }
 
-func (m *taskCardManager) open(e *Engine, c *taskCard) {
+// show puts a task that has run for openDelay on its session's live card,
+// or opens a card for it with every task of the session due within
+// taskOpenTogether.
+func (m *taskCardManager) show(e *Engine, t *cardTask) {
 	m.mu.Lock()
-	if c.opened || c.ended || c.hidden || m.cards[c.key] != c || e.ctx.Err() != nil {
+	if t.card != nil || t.ended || t.hidden || m.tasks[t.key] != t || e.ctx.Err() != nil {
 		m.mu.Unlock()
 		return
 	}
-	m.inflight.taskOpen(c.sessionKey, c.taskID, c.desc)
-	open := 0
-	for _, other := range m.cards {
-		if other.sessionKey == c.sessionKey && other.opened {
-			open++
+	if c := m.open[t.sessionKey]; c != nil {
+		m.joinLocked(c, t)
+		poke(c.wake)
+		m.mu.Unlock()
+		cardEvent("task_card_join", t.sessionKey, taskCardID(c), "task", t.taskID, "tasks", len(c.tasks))
+		return
+	}
+	c := &taskCard{sessionKey: t.sessionKey, platform: t.platform, replyCtx: t.replyCtx, wake: make(chan struct{}, 1)}
+	m.open[t.sessionKey] = c
+	batch := []*cardTask{t}
+	for _, o := range m.tasks {
+		if o != t && o.sessionKey == t.sessionKey && o.card == nil && o.scheduled && !o.ended && !o.hidden && o.background &&
+			time.Until(o.start.Add(m.openDelay)) <= taskOpenTogether {
+			batch = append(batch, o)
 		}
 	}
-	if open >= taskCardMaxOpen {
-		m.mu.Unlock()
-		slog.Info("task card: too many open cards, not shown", "session", c.sessionKey, "task", c.taskID)
-		return
+	sort.Slice(batch, func(a, b int) bool { return batch[a].seq < batch[b].seq })
+	for _, o := range batch {
+		m.joinLocked(c, o)
 	}
-	c.opened = true
 	view := m.viewLocked(e, c)
 	m.mu.Unlock()
 
 	handle, err := c.platform.SendTaskCard(e.ctx, c.replyCtx, view)
 	m.mu.Lock()
 	if err != nil {
-		m.dropLocked(c)
+		if m.open[c.sessionKey] == c {
+			delete(m.open, c.sessionKey)
+		}
+		for _, o := range c.tasks {
+			m.dropLocked(o)
+		}
 		m.mu.Unlock()
-		slog.Warn("task card: send failed", "task", c.taskID, "error", err)
+		slog.Warn("task card: send failed", "task", t.taskID, "error", err)
 		return
 	}
 	c.handle = handle
-	m.maybeSummarizeLocked(e, c, false)
+	for _, o := range c.tasks {
+		m.maybeSummarizeLocked(e, o, false)
+	}
+	n := len(c.tasks)
 	m.mu.Unlock()
-	cardEvent("task_card_open", c.sessionKey, taskCardID(c), "task", c.taskID, "reason", "background_over_open_delay")
+	cardEvent("task_card_open", c.sessionKey, taskCardID(c), "task", t.taskID, "tasks", n, "reason", "background_over_open_delay")
 	go m.run(e, c, view)
+}
+
+// joinLocked puts t on c and records it for resume after a restart. Caller holds m.mu.
+func (m *taskCardManager) joinLocked(c *taskCard, t *cardTask) {
+	t.card = c
+	c.tasks = append(c.tasks, t)
+	m.inflight.taskOpen(t.sessionKey, t.taskID, t.desc)
 }
 
 // run owns a card's updates after it opened: changes are merged so the card
 // is written at most every minGap, and the elapsed minutes stay current. A
 // card that has not changed for idleBeat (a subagent writing, not calling
 // tools) gets a sign of life: the quick model's next progress line when it
-// can write one, and the line flips between the step and the latest progress.
+// can write one, and each running task's line flips between its step and its
+// latest progress. Once all of its tasks have ended the card settles and
+// leaves the session, so the next task opens a new card.
 func (m *taskCardManager) run(e *Engine, c *taskCard, shown TaskCardView) {
 	tick := time.NewTicker(m.tick)
 	defer tick.Stop()
@@ -304,28 +394,37 @@ func (m *taskCardManager) run(e *Engine, c *taskCard, shown TaskCardView) {
 		}
 		m.mu.Lock()
 		view := m.viewLocked(e, c)
-		if !c.ended && sameTaskView(view, shown) && time.Since(changed) >= m.idleBeat {
-			c.still = !c.still
-			m.maybeSummarizeLocked(e, c, true)
+		if !c.allEnded() && sameTaskView(view, shown) && time.Since(changed) >= m.idleBeat {
+			for _, t := range c.tasks {
+				if !t.ended {
+					t.still = !t.still
+					m.maybeSummarizeLocked(e, t, true)
+				}
+			}
 			view = m.viewLocked(e, c)
 		}
-		final, waiting := c.ended, c.condensing
+		final, waiting := c.allEnded(), c.condensing()
+		if final && !waiting {
+			if m.open[c.sessionKey] == c {
+				delete(m.open, c.sessionKey)
+			}
+			for _, t := range c.tasks {
+				m.dropLocked(t)
+			}
+		}
 		m.mu.Unlock()
 		if waiting || !final && sameTaskView(view, shown) {
 			continue
 		}
 		if err := c.platform.UpdateTaskCard(e.ctx, c.handle, view); err != nil {
-			slog.Warn("task card: update failed", "task", c.taskID, "error", err)
+			slog.Warn("task card: update failed", "card", taskCardID(c), "error", err)
 		}
 		shown, changed = view, time.Now()
 		if final {
-			m.mu.Lock()
-			m.dropLocked(c)
-			m.mu.Unlock()
-			cardEvent("task_card_end", c.sessionKey, taskCardID(c), "task", c.taskID, "reason", string(view.State))
+			cardEvent("task_card_end", c.sessionKey, taskCardID(c), "tasks", len(view.Rows), "reason", string(view.State))
 			return
 		}
-		cardEvent("task_card_update", c.sessionKey, taskCardID(c), "task", c.taskID, "reason", string(view.State))
+		cardEvent("task_card_update", c.sessionKey, taskCardID(c), "reason", string(view.State))
 	}
 }
 
@@ -348,77 +447,221 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 }
 
 func sameTaskView(a, b TaskCardView) bool {
-	return a.State == b.State && a.Title == b.Title && a.Line == b.Line && slices.Equal(a.Details, b.Details)
+	return a.State == b.State && a.Title == b.Title && a.Label == b.Label && a.Line == b.Line && a.More == b.More &&
+		slices.Equal(a.Details, b.Details) && slices.EqualFunc(a.Rows, b.Rows, func(x, y TaskCardRow) bool {
+		return x.State == y.State && x.Text == y.Text && x.Shown == y.Shown && x.Full == y.Full && slices.Equal(x.Details, y.Details)
+	})
 }
 
 func taskMinutes(start time.Time) int { return int(time.Since(start) / time.Minute) }
 
-// viewLocked renders the card: the task's name as the title, its state as a
-// label, and one line under it. Caller holds m.mu.
+// taskShown is how one task reads on a card: its name, state, and a line
+// made of a step or outcome and a time.
+type taskShown struct {
+	name, label     string
+	state           TaskCardState
+	text, time      string // the line's two parts: step or outcome, elapsed or took
+	fullTitle, full string // ended: the agent's own text when the line shows something shorter
+}
+
+// taskShownLocked reads t for its card. Caller holds m.mu.
+func taskShownLocked(i *I18n, t *cardTask) taskShown {
+	s := taskShown{name: t.desc, state: TaskCardRunning, label: i.T(MsgTaskWorking)}
+	if s.name == "" {
+		s.name = i.T(MsgTaskUntitled)
+	}
+	if !t.ended {
+		s.text, s.time = liveStep(t), taskElapsed(i, taskMinutes(t.start))
+		return s
+	}
+	s.state = t.state
+	s.text = clipLines(t.summary, 1, 300)
+	switch t.state {
+	case TaskCardFailed:
+		s.label = i.T(MsgTaskLabelFailed)
+		s.text = failureLine(i, t.summary)
+	case TaskCardStopped:
+		s.label = i.T(MsgTaskLabelStopped)
+		if !readableLine(t.summary) {
+			s.text = ""
+		}
+	case TaskCardInterrupted:
+		s.label = i.T(MsgTaskLabelCutOff)
+	default:
+		s.label = i.T(MsgTaskLabelDone)
+		if !briefEnough(t.summary) {
+			s.text = t.brief
+			if s.text == "" {
+				s.text = firstSentence(t.summary, taskBriefRunes)
+			}
+		}
+	}
+	if t.summary != "" && s.text != t.summary {
+		s.fullTitle, s.full = i.T(MsgTaskFullText), clipRunesKeepLines(t.summary, taskCardFullRunes)
+	}
+	s.time = i.T(MsgTaskTookShort)
+	if n := int(t.endedAt.Sub(t.start) / time.Minute); n >= 1 {
+		s.time = i.Tf(MsgTaskTook, n)
+	}
+	return s
+}
+
+// viewLocked renders the card. Caller holds m.mu.
 func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
-	i := e.i18n
-	title := c.desc
-	if title == "" {
-		title = i.T(MsgTaskUntitled)
+	if len(c.tasks) == 1 {
+		return oneTaskView(e.i18n, c.sessionKey, c.tasks[0])
 	}
+	return manyTasksView(e.i18n, c.sessionKey, c.tasks)
+}
+
+// oneTaskView is the card of a single task: the task's name as the title, its
+// state as a label, and one line under it.
+func oneTaskView(i *I18n, sessionKey string, t *cardTask) TaskCardView {
+	s := taskShownLocked(i, t)
 	v := TaskCardView{
-		State:        TaskCardRunning,
-		Title:        i.Tf(MsgTaskTitle, title),
-		Label:        i.T(MsgTaskWorking),
+		State:        s.state,
+		Title:        i.Tf(MsgTaskTitle, s.name),
+		Label:        s.label,
+		Line:         joinTaskLine(s.text, s.time),
 		DetailsTitle: i.T(MsgTaskDetails),
-		Details:      append([]string(nil), c.details...),
-		SessionKey:   c.sessionKey,
-		Interrupted:  i.Tf(MsgTaskInterrupted, title),
+		Details:      append([]string(nil), t.details...),
+		SessionKey:   sessionKey,
+		Interrupted:  i.Tf(MsgTaskInterrupted, s.name),
 	}
-	if c.ended {
-		v.State = c.state
-		v.Summary = clipLines(c.summary, 1, 300)
-		switch c.state {
-		case TaskCardFailed:
-			v.Label = i.T(MsgTaskLabelFailed)
-			v.Summary = failureLine(i, c.summary)
-		case TaskCardStopped:
-			v.Label = i.T(MsgTaskLabelStopped)
-			if !readableLine(c.summary) {
-				v.Summary = ""
-			}
-		case TaskCardInterrupted:
-			v.Label = i.T(MsgTaskLabelCutOff)
-		default:
-			v.Label = i.T(MsgTaskLabelDone)
-			if !briefEnough(c.summary) {
-				v.Summary = c.brief
-				if v.Summary == "" {
-					v.Summary = firstSentence(c.summary, taskBriefRunes)
-				}
-			}
-		}
-		if c.summary != "" && v.Summary != c.summary {
-			v.FullTitle, v.Full = i.T(MsgTaskFullText), clipRunesKeepLines(c.summary, taskCardFullRunes)
-		}
-		took := i.T(MsgTaskTookShort)
-		if n := int(c.endedAt.Sub(c.start) / time.Minute); n >= 1 {
-			took = i.Tf(MsgTaskTook, n)
-		}
-		v.Line = joinTaskLine(v.Summary, took)
-		return v
+	if t.ended {
+		v.Summary, v.FullTitle, v.Full = s.text, s.fullTitle, s.full
 	}
-	v.Line = joinTaskLine(liveStep(c), taskElapsed(i, taskMinutes(c.start)))
 	return v
+}
+
+// taskMark is the sign in front of a task's row.
+func taskMark(s TaskCardState) string {
+	switch s {
+	case TaskCardCompleted:
+		return "✓"
+	case TaskCardFailed:
+		return "✗"
+	case TaskCardStopped:
+		return "■"
+	case TaskCardInterrupted:
+		return "⊘"
+	}
+	return "◐"
+}
+
+// taskRow is a task's row: "<mark> <name> · <step or outcome> · <time>".
+func taskRow(s taskShown) string {
+	return taskMark(s.state) + " " + clipRunes(s.name, taskRowNameRunes) + " · " + joinTaskLine(clipRunes(s.text, taskRowTextRunes), s.time)
+}
+
+// manyTasksView is the card of several tasks: their count as the title, one
+// row per task, and each task's steps in the folded details. While tasks run
+// the label counts those ended; once all have ended the header says how
+// they went: done when all completed, failed when any failed, else
+// interrupted or stopped.
+func manyTasksView(i *I18n, sessionKey string, tasks []*cardTask) TaskCardView {
+	v := TaskCardView{
+		Title:        i.Tf(MsgTaskTitleCount, len(tasks)),
+		DetailsTitle: i.T(MsgTaskDetails),
+		SessionKey:   sessionKey,
+		Rows:         make([]TaskCardRow, len(tasks)),
+	}
+	count := map[TaskCardState]int{}
+	cut := []string{i.Tf(MsgTaskInterrupted, v.Title)}
+	for k, t := range tasks {
+		s := taskShownLocked(i, t)
+		count[s.state]++
+		row := TaskCardRow{State: s.state, Text: taskRow(s)}
+		steps := t.details
+		if len(steps) > taskRowSteps {
+			steps = steps[len(steps)-taskRowSteps:]
+		}
+		for _, step := range steps {
+			row.Details = append(row.Details, clipRunes(step, 2*taskRowTextRunes))
+		}
+		if s.state == TaskCardFailed && s.full != "" {
+			row.FullTitle, row.Full = s.fullTitle, clipRunesKeepLines(t.summary, taskRowFullRunes)
+		}
+		v.Rows[k] = row
+		if s.state.Live() {
+			cut = append(cut, taskMark(TaskCardInterrupted)+" "+clipRunes(s.name, taskRowNameRunes))
+		} else {
+			cut = append(cut, row.Text)
+		}
+	}
+	v.Interrupted = strings.Join(cut, "\n")
+	ended := len(tasks) - count[TaskCardRunning]
+	switch {
+	case count[TaskCardRunning] > 0:
+		v.State, v.Label = TaskCardRunning, i.T(MsgTaskWorking)
+		if ended > 0 {
+			v.Label = i.Tf(MsgTaskWorkingCount, ended, len(tasks))
+		}
+	case count[TaskCardFailed] > 0:
+		v.State, v.Label = TaskCardFailed, i.Tf(MsgTaskLabelFailedCount, count[TaskCardFailed])
+	case count[TaskCardCompleted] == len(tasks):
+		v.State, v.Label = TaskCardCompleted, i.T(MsgTaskLabelDone)
+	case count[TaskCardInterrupted] > 0:
+		v.State, v.Label = TaskCardInterrupted, i.T(MsgTaskLabelCutOff)
+	default:
+		v.State, v.Label = TaskCardStopped, i.T(MsgTaskLabelStopped)
+	}
+	showRows(&v)
+	if hidden := len(v.Rows) - taskCardRowsShown; hidden > 0 {
+		v.More = i.Tf(MsgTaskMoreRows, hidden)
+	}
+	return v
+}
+
+// showRows picks the rows for the card's body, at most taskCardRowsShown:
+// running and failed tasks first, then the rest, each in joining order.
+func showRows(v *TaskCardView) {
+	left := taskCardRowsShown
+	for _, first := range []bool{true, false} {
+		for k := range v.Rows {
+			r := &v.Rows[k]
+			if left == 0 {
+				return
+			}
+			if !r.Shown && (r.State.Live() || r.State == TaskCardFailed) == first {
+				r.Shown = true
+				left--
+			}
+		}
+	}
 }
 
 // liveStep is what a running task is doing: the current step, or the latest
 // progress line when there is no step, the step is only a tool's generic
 // label, or the card has been idle. A generic label alone says nothing the
 // card's state label does not, so then the line is the time alone.
-func liveStep(c *taskCard) string {
+func liveStep(t *cardTask) string {
 	switch {
-	case c.recent != "" && (c.step == "" || c.generic || c.still):
-		return c.recent
-	case c.step != "" && !c.generic:
-		return c.step
+	case t.recent != "" && (t.step == "" || t.generic || t.still):
+		return t.recent
+	case t.step != "" && !t.generic:
+		return t.step
 	}
 	return ""
+}
+
+// runningRows are the card rows of the session's running background tasks,
+// in the order they started, for the progress answer.
+func (m *taskCardManager) runningRows(i *I18n, sessionKey string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var tasks []*cardTask
+	for _, t := range m.tasks {
+		if t.sessionKey == sessionKey && t.background && !t.hidden && !t.ended {
+			tasks = append(tasks, t)
+		}
+	}
+	sort.Slice(tasks, func(a, b int) bool { return tasks[a].seq < tasks[b].seq })
+	rows := make([]string, len(tasks))
+	for k, t := range tasks {
+		rows[k] = taskRow(taskShownLocked(i, t))
+	}
+	return rows
 }
 
 // taskElapsed is a running time in whole minutes: "3 min", "under a minute".
@@ -519,7 +762,7 @@ const taskResultPrompt = "你在给用户看的后台任务卡片上写这个任
 // summary is long or raw output (several lines, paths, code). The settled card
 // waits for it, at most the quick line's timeout; on failure it shows the
 // summary's first sentence. Caller holds m.mu.
-func (m *taskCardManager) condenseLocked(e *Engine, c *taskCard) {
+func (m *taskCardManager) condenseLocked(e *Engine, c *cardTask) {
 	cfg := e.streamPreview.QuickLine
 	if !cfg.Enabled || c.summary == "" || briefEnough(c.summary) {
 		return
@@ -538,7 +781,7 @@ func (m *taskCardManager) condenseLocked(e *Engine, c *taskCard) {
 		} else if readableLine(line) {
 			c.brief = line
 		}
-		poke(c.wake)
+		poke(c.card.wake)
 	}()
 }
 
@@ -599,7 +842,7 @@ func (e *Engine) settleTasks(agent AgentSession, end TaskCardState) {
 	m := e.taskCards
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, c := range m.cards {
+	for _, c := range m.tasks {
 		if c.agent != agent || c.ended {
 			continue
 		}
@@ -615,9 +858,9 @@ const taskSummaryPrompt = "你在给用户看的后台任务卡片上写一行�
 // agent's own line is missing or has not changed for cliStale: at most every
 // summaryGap, and only after new steps unless the card has been idle. A
 // failure leaves the line as it was. Caller holds m.mu.
-func (m *taskCardManager) maybeSummarizeLocked(e *Engine, c *taskCard, idle bool) {
+func (m *taskCardManager) maybeSummarizeLocked(e *Engine, c *cardTask, idle bool) {
 	cfg := e.streamPreview.QuickLine
-	if !cfg.Enabled || c.ended || c.summarizing || c.handle == nil ||
+	if !cfg.Enabled || c.ended || c.summarizing || c.card == nil || c.card.handle == nil ||
 		time.Since(c.cliAt) < m.cliStale ||
 		c.steps == 0 || (!idle && c.steps == c.summarizedRows) ||
 		time.Since(c.lastSummaryAt) < m.summaryGap {
@@ -648,7 +891,7 @@ func (m *taskCardManager) maybeSummarizeLocked(e *Engine, c *taskCard, idle bool
 		// The agent's own line wins if it arrived while the quick model wrote.
 		if !c.ended && !c.cliAt.After(asked) && line != c.recent {
 			c.recent = line
-			poke(c.wake)
+			poke(c.card.wake)
 		}
 	}()
 }

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -75,6 +76,21 @@ func (s *liveCardStore) add(messageID, cardID, text string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.entries[messageID] = liveCardEntry{MessageID: messageID, CardID: cardID, Text: text, Since: time.Now()}
+	s.saveLocked()
+}
+
+// keep records the card, or changes what it should say, writing the file
+// only when that text changes.
+func (s *liveCardStore) keep(messageID, cardID, text string) {
+	if s == nil || messageID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.entries[messageID]; ok && e.Text == text && e.CardID == cardID {
+		return
+	}
 	s.entries[messageID] = liveCardEntry{MessageID: messageID, CardID: cardID, Text: text, Since: time.Now()}
 	s.saveLocked()
 }
@@ -162,13 +178,19 @@ func (p *Platform) settleLeftoverCard(ctx context.Context, c liveCardEntry) erro
 	return p.updateCardEntity(ctx, h, card)
 }
 
-// greyLineCardJSON is a settled card holding one quiet grey line.
+// greyLineCardJSON is a settled card holding quiet grey text: one line, or a
+// card of several tasks with a line per task under the first. The chat list
+// summary is the first line.
 func greyLineCardJSON(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = "<font color='grey'>" + escapeCardText(line) + "</font>"
+	}
 	card := map[string]any{
 		"schema": "2.0",
-		"config": map[string]any{"width_mode": "default", "summary": map[string]any{"content": text}},
+		"config": map[string]any{"width_mode": "default", "summary": map[string]any{"content": strings.SplitN(text, "\n", 2)[0]}},
 		"body": map[string]any{"elements": []map[string]any{{
-			"tag": "markdown", "content": "<font color='grey'>" + escapeCardText(text) + "</font>", "text_size": "notation",
+			"tag": "markdown", "content": strings.Join(lines, "\n"), "text_size": "notation",
 		}}},
 	}
 	b, _ := json.Marshal(card)

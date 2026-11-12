@@ -80,6 +80,7 @@ func isProgressAsk(content string) bool {
 // triageView is what the bridge knows about the session right now.
 type triageView struct {
 	tasks           []triageTask
+	rows            []string // the running tasks' card rows, in the order they started
 	queued          int
 	pendingQuestion string // why a question is pending; "" = none
 }
@@ -204,18 +205,19 @@ func (e *Engine) triageView(msg *Message, session *Session, interactiveKey strin
 		v.pendingQuestion = "last_reply_asks"
 	}
 	m := e.taskCards
+	v.rows = m.runningRows(e.i18n, interactiveKey)
 	m.mu.Lock()
-	for _, c := range m.cards {
-		if c.sessionKey == interactiveKey && c.background && !c.hidden && !c.ended {
-			title := c.desc
+	for _, t := range m.tasks {
+		if t.sessionKey == interactiveKey && t.background && !t.hidden && !t.ended {
+			title := t.desc
 			if title == "" {
 				title = e.i18n.T(MsgTaskUntitled)
 			}
-			step := c.step
-			if c.generic {
+			step := t.step
+			if t.generic {
 				step = ""
 			}
-			v.tasks = append(v.tasks, triageTask{title: title, step: step, recent: c.recent, minutes: taskMinutes(c.start)})
+			v.tasks = append(v.tasks, triageTask{title: title, step: step, recent: t.recent, minutes: taskMinutes(t.start)})
 		}
 	}
 	m.mu.Unlock()
@@ -250,18 +252,20 @@ func (s *DecisionStore) hasPending(sessionKey string) bool {
 }
 
 // progressAnswer describes the running tasks and the queue in the bridge's
-// own words; every number comes from the bridge. The current step is the
-// agent's own description of it (a command's description), else the task's
-// latest progress line, else the agent's latest words in the chat; with none
-// of them the step is left out rather than named by a generic word.
+// own words; every number comes from the bridge. Several tasks are listed one
+// per line, each as its row on the task card. A single task gets a sentence
+// whose step is the agent's own description of it (a command's description),
+// else the task's latest progress line, else the agent's latest words in the
+// chat; with none of them the step is left out rather than named by a
+// generic word.
 func (e *Engine) progressAnswer(v triageView, session *Session) string {
 	i := e.i18n
 	var lines []string
-	for n, t := range v.tasks {
-		if n == 3 {
-			lines = append(lines, i.Tf(MsgTriageMoreTasks, len(v.tasks)-3))
-			break
-		}
+	if len(v.rows) > 1 {
+		lines = append(lines, i.Tf(MsgTriageTasks, len(v.rows)))
+		lines = append(lines, v.rows...)
+	} else if len(v.tasks) == 1 {
+		t := v.tasks[0]
 		elapsed := taskElapsed(i, t.minutes)
 		step := t.step
 		if step == "" {
@@ -292,10 +296,11 @@ func (e *Engine) lastAgentGist(session *Session) string {
 		return ""
 	}
 	own, _, _ := strings.Cut(e.i18n.T(MsgTriageTask), "%")
+	ownMany, _, _ := strings.Cut(e.i18n.T(MsgTriageTasks), "%")
 	h := session.GetHistory(10)
 	for k := len(h) - 1; k >= 0; k-- {
 		text := strings.TrimSpace(h[k].Content)
-		if h[k].Role != "assistant" || text == "" || (own != "" && strings.HasPrefix(text, own)) {
+		if h[k].Role != "assistant" || text == "" || (own != "" && strings.HasPrefix(text, own)) || (ownMany != "" && strings.HasPrefix(text, ownMany)) {
 			continue
 		}
 		return firstSentence(text, progressStepRunes)
