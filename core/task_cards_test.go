@@ -112,7 +112,7 @@ func TestBackgroundTaskCardOpensUpdatesAndSettles(t *testing.T) {
 	sent, _ := env.p.cards()
 	v := sent[0].view
 	// The step holds the line; the latest progress waits for an idle card.
-	if v.State != TaskCardRunning || v.Title != "按客户整理 200 个文件" || v.Label != "进行中" || v.Line != "读取文件 · 不到 1 分钟" || v.SessionKey != env.key {
+	if v.State != TaskCardRunning || v.Title != "后台任务：按客户整理 200 个文件" || v.Label != "进行中" || v.Line != "读取文件 · 不到 1 分钟" || v.SessionKey != env.key {
 		t.Fatalf("open view=%+v", v)
 	}
 	// Between turns the unsolicited reader carries the task events.
@@ -128,7 +128,7 @@ func TestBackgroundTaskCardOpensUpdatesAndSettles(t *testing.T) {
 	})
 	_, up := env.p.cards()
 	last := up[len(up)-1]
-	if last.handle != sent[0].handle || last.view.Title != "按客户整理 200 个文件" || last.view.Label != "已完成" || last.view.Line != "整理完成 · 用时不到 1 分钟" ||
+	if last.handle != sent[0].handle || last.view.Title != "后台任务：按客户整理 200 个文件" || last.view.Label != "已完成" || last.view.Line != "整理完成 · 用时不到 1 分钟" ||
 		last.view.Full != "整理完成\n共 200 个文件\n分到 12 个客户\n多余的一行" || strings.Join(last.view.Details, "|") != "读取文件|编辑文件" {
 		t.Fatalf("settled=%+v", last)
 	}
@@ -152,7 +152,7 @@ func TestShortAndForegroundTasksGetNoCard(t *testing.T) {
 	env.task(TaskEvent{Kind: TaskUpdated, TaskID: "fg", Background: yes()})
 	waitUntil(t, "moved task card", func() bool {
 		sent, _ := env.p.cards()
-		return len(sent) == 1 && sent[0].view.Title == "前台子任务"
+		return len(sent) == 1 && sent[0].view.Title == "后台任务：前台子任务"
 	})
 }
 
@@ -174,7 +174,7 @@ func TestTaskCardsSettleOneByOne(t *testing.T) {
 		return len(up) > 0 && up[len(up)-1].view.Label == "已停止" && up[len(up)-1].view.Line == "用时不到 1 分钟"
 	})
 	_, up := env.p.cards()
-	if up[len(up)-1].handle != handles["任务乙"] {
+	if up[len(up)-1].handle != handles["后台任务：任务乙"] {
 		t.Fatalf("stopped task settled another card: %+v", up[len(up)-1])
 	}
 	env.e.taskCards.mu.Lock()
@@ -197,7 +197,7 @@ func TestTaskCardsEndWithTheirSession(t *testing.T) {
 	env.e.cleanupInteractiveState(env.key)
 	waitUntil(t, "interrupted card", func() bool {
 		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Title == "任务甲" && up[len(up)-1].view.Label == "已中断"
+		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Title == "后台任务：任务甲" && up[len(up)-1].view.Label == "已中断"
 	})
 }
 
@@ -268,7 +268,7 @@ func waitInterrupted(t *testing.T, env *taskEnv, title string) {
 	t.Helper()
 	waitUntil(t, "interrupted card", func() bool {
 		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Title == title
+		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Title == "后台任务："+title
 	})
 	_, up := env.p.cards()
 	if v := up[len(up)-1].view; v.Label != "已中断" || v.Line != "用时不到 1 分钟" {
@@ -515,7 +515,7 @@ func TestStoppedTaskCardHidesTheRawText(t *testing.T) {
 	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "a", Status: "stopped", Summary: "Background command \"搜索会议\" failed with exit code 144"})
 	v := settledView(t, env)
-	if v.State != TaskCardStopped || v.Title != "搜索会议" || v.Label != "已停止" || v.Line != "用时不到 1 分钟" || !strings.Contains(v.Full, "exit code 144") {
+	if v.State != TaskCardStopped || v.Title != "后台任务：搜索会议" || v.Label != "已停止" || v.Line != "用时不到 1 分钟" || !strings.Contains(v.Full, "exit code 144") {
 		t.Fatalf("stopped=%+v", v)
 	}
 }

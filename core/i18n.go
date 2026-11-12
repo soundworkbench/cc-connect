@@ -229,6 +229,7 @@ const (
 	MsgRetryExpired              MsgKey = "retry_expired"
 	MsgTaskUntitled              MsgKey = "task_untitled"
 	MsgTaskWorking               MsgKey = "task_working"
+	MsgTaskTitle                 MsgKey = "task_title"
 	MsgTaskElapsed               MsgKey = "task_elapsed"
 	MsgTaskElapsedShort          MsgKey = "task_elapsed_short"
 	MsgTaskDetails               MsgKey = "task_details"
@@ -834,6 +835,7 @@ var messages = map[MsgKey]map[Language]string{
 	MsgTaskFailedExit:    {LangEnglish: "The command ended with an error (exit code %s); the original text is under Details", LangChinese: "命令出错（退出码 %s），原文在详情里", LangTraditionalChinese: "命令出錯（退出碼 %s），原文在詳情裡", LangJapanese: "コマンドがエラーで終了（終了コード %s）。原文は詳細に", LangSpanish: "El comando terminó con un error (código %s); el texto original está en Detalles"},
 	MsgTaskFailedGeneric: {LangEnglish: "It ended with an error; the original text is under Details", LangChinese: "出错结束，原文在详情里", LangTraditionalChinese: "出錯結束，原文在詳情裡", LangJapanese: "エラーで終了。原文は詳細に", LangSpanish: "Terminó con un error; el texto original está en Detalles"},
 	MsgTaskFullText:      {LangEnglish: "Original text", LangChinese: "原文", LangTraditionalChinese: "原文", LangJapanese: "原文", LangSpanish: "Texto original"},
+	MsgTaskTitle:         {LangEnglish: "Background task: %s", LangChinese: "后台任务：%s", LangTraditionalChinese: "背景任務：%s", LangJapanese: "バックグラウンドタスク：%s", LangSpanish: "Tarea en segundo plano: %s"},
 	MsgTaskWorking:       {LangEnglish: "Working", LangChinese: "进行中", LangTraditionalChinese: "進行中", LangJapanese: "実行中", LangSpanish: "En curso"},
 	MsgTaskElapsed:       {LangEnglish: "%d min", LangChinese: "%d 分钟", LangTraditionalChinese: "%d 分鐘", LangJapanese: "%d 分", LangSpanish: "%d min"},
 	MsgTaskElapsedShort:  {LangEnglish: "under a minute", LangChinese: "不到 1 分钟", LangTraditionalChinese: "不到 1 分鐘", LangJapanese: "1 分未満", LangSpanish: "menos de un minuto"},

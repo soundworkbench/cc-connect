@@ -363,7 +363,7 @@ func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 	}
 	v := TaskCardView{
 		State:        TaskCardRunning,
-		Title:        title,
+		Title:        i.Tf(MsgTaskTitle, title),
 		Label:        i.T(MsgTaskWorking),
 		DetailsTitle: i.T(MsgTaskDetails),
 		Details:      append([]string(nil), c.details...),
