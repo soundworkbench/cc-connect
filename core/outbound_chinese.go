@@ -19,10 +19,11 @@ import (
 // or a rewrite that loses a placeholder sends the original text.
 
 const (
-	outboundMinLatin       = 40  // fewer Latin letters than this is never rewritten
-	outboundLatinPerHan    = 2.5 // rewritten when Latin letters exceed this many per Han character
-	outboundMaxTimeout     = 5 * time.Second
-	outboundMaxRunes       = 1500 // a longer text would not come back within the timeout
+	outboundMinLatin       = 40               // fewer Latin letters than this is never rewritten
+	outboundLatinPerHan    = 2.5              // rewritten when Latin letters exceed this many per Han character
+	outboundLiveTimeout    = 5 * time.Second  // a reply the person is waiting on
+	outboundLaterTimeout   = 25 * time.Second // background follow-ups, wake-ups, timers, send: nobody is watching the clock
+	outboundMaxRunes       = 1500             // a longer text would not come back within the timeout
 	outboundMaxTokens      = 4000
 	humanEnglishMinLetters = 6
 )
@@ -150,8 +151,9 @@ func (e *Engine) humanWroteEnglish(sessionKey string) bool {
 
 // chineseOutbound returns text, rewritten into Simplified Chinese when the
 // chat is Chinese and the text's prose is mostly English. It never fails: on
-// any problem the original text is returned.
-func (e *Engine) chineseOutbound(sessionKey, text string) string {
+// any problem the original text is returned. live is a reply to a message the
+// person just sent; it gets the short limit, everything else the long one.
+func (e *Engine) chineseOutbound(sessionKey, text string, live bool) string {
 	cfg := e.streamPreview.QuickLine
 	if !cfg.Enabled || e.i18n.CurrentLang() != LangChinese || strings.TrimSpace(text) == "" {
 		return text
@@ -171,9 +173,12 @@ func (e *Engine) chineseOutbound(sessionKey, text string) string {
 		outboundLog(sessionKey, "skipped", reason, 0)
 		return text
 	}
-	timeout := quickLineTimeout(cfg)
-	if timeout > outboundMaxTimeout {
-		timeout = outboundMaxTimeout
+	timeout := outboundLaterTimeout
+	if live {
+		timeout = quickLineTimeout(cfg)
+		if timeout > outboundLiveTimeout {
+			timeout = outboundLiveTimeout
+		}
 	}
 	ctx, cancel := context.WithTimeout(e.ctx, timeout)
 	defer cancel()

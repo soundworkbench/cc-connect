@@ -113,7 +113,7 @@ func TestChineseOutboundRewritesAndKeepsCode(t *testing.T) {
 		}
 		return "我已合入拉取请求并部署了网关，健康检查通过，新镜像已在所有容器上运行。二进制：⟦1⟧（见 ⟦2⟧）。"
 	})
-	got := e.chineseOutbound("s", text)
+	got := e.chineseOutbound("s", text, true)
 	want := "我已合入拉取请求并部署了网关，健康检查通过，新镜像已在所有容器上运行。二进制：`/srv/out/cc-connect`（见 https://github.com/a/b/pull/7）。"
 	if got != want {
 		t.Fatalf("got %q\nwant %q", got, want)
@@ -123,20 +123,20 @@ func TestChineseOutboundRewritesAndKeepsCode(t *testing.T) {
 func TestChineseOutboundKeepsOriginalWhenItCannotRewrite(t *testing.T) {
 	t.Run("gateway error", func(t *testing.T) {
 		e, calls := outboundEngine(t, LangChinese, 0, func(string) string { return "" })
-		if got := e.chineseOutbound("s", englishReport); got != englishReport || calls.Load() != 1 {
+		if got := e.chineseOutbound("s", englishReport, true); got != englishReport || calls.Load() != 1 {
 			t.Fatalf("got %q calls=%d", got, calls.Load())
 		}
 	})
 	t.Run("placeholder lost", func(t *testing.T) {
 		e, _ := outboundEngine(t, LangChinese, 0, func(string) string { return "已部署，镜像在运行。" })
 		text := englishReport + " See `make build`."
-		if got := e.chineseOutbound("s", text); got != text {
+		if got := e.chineseOutbound("s", text, true); got != text {
 			t.Fatalf("got %q", got)
 		}
 	})
 	t.Run("still English", func(t *testing.T) {
 		e, _ := outboundEngine(t, LangChinese, 0, func(string) string { return englishReport })
-		if got := e.chineseOutbound("s", englishReport); got != englishReport {
+		if got := e.chineseOutbound("s", englishReport, true); got != englishReport {
 			t.Fatalf("got %q", got)
 		}
 	})
@@ -146,7 +146,7 @@ func TestChineseOutboundKeepsOriginalWhenItCannotRewrite(t *testing.T) {
 		cfg.TimeoutMs = 300
 		e.streamPreview.QuickLine = cfg
 		start := time.Now()
-		if got := e.chineseOutbound("s", englishReport); got != englishReport {
+		if got := e.chineseOutbound("s", englishReport, true); got != englishReport {
 			t.Fatalf("got %q", got)
 		}
 		if took := time.Since(start); took > time.Second {
@@ -158,18 +158,18 @@ func TestChineseOutboundKeepsOriginalWhenItCannotRewrite(t *testing.T) {
 func TestChineseOutboundLeavesAloneWhatItShould(t *testing.T) {
 	e, calls := outboundEngine(t, LangChinese, 0, func(string) string { return "已部署。" })
 	for _, text := range []string{"已经部署好了。", "Done.", "```\n" + englishReport + "\n```"} {
-		if got := e.chineseOutbound("s", text); got != text {
+		if got := e.chineseOutbound("s", text, true); got != text {
 			t.Fatalf("%q rewritten to %q", text, got)
 		}
 	}
 	// The person asked in English: the reply stays English.
 	e.noteHumanLanguage(&Message{Content: "please answer in English from now on", UserID: "u"}, "s")
-	if got := e.chineseOutbound("s", englishReport); got != englishReport {
+	if got := e.chineseOutbound("s", englishReport, true); got != englishReport {
 		t.Fatalf("English chat rewritten: %q", got)
 	}
 	// A Chinese message switches it back.
 	e.noteHumanLanguage(&Message{Content: "好的，接着做", UserID: "u"}, "s")
-	if got := e.chineseOutbound("s", englishReport); got != "已部署。" {
+	if got := e.chineseOutbound("s", englishReport, true); got != "已部署。" {
 		t.Fatalf("got %q", got)
 	}
 	if calls.Load() != 1 {
@@ -177,7 +177,7 @@ func TestChineseOutboundLeavesAloneWhatItShould(t *testing.T) {
 	}
 	// An English-language bridge never rewrites.
 	en, enCalls := outboundEngine(t, LangEnglish, 0, func(string) string { return "已部署。" })
-	if got := en.chineseOutbound("s", englishReport); got != englishReport || enCalls.Load() != 0 {
+	if got := en.chineseOutbound("s", englishReport, true); got != englishReport || enCalls.Load() != 0 {
 		t.Fatalf("English bridge: %q calls=%d", got, enCalls.Load())
 	}
 }
@@ -206,5 +206,32 @@ func TestTurnReplyIsSentInChinese(t *testing.T) {
 	sent = env.p.stubPlatformEngine.getSent()
 	if last := sent[len(sent)-1]; last != englishReport || env.rewrites.Load() != before {
 		t.Fatalf("English chat: last sent = %q, rewrites %d→%d", last, before, env.rewrites.Load())
+	}
+}
+
+// A slow quick line still turns a background report into Chinese; a reply the
+// person is waiting on gives up after the short limit and goes out as written.
+func TestChineseOutboundWaitsLongerOffTheLiveReply(t *testing.T) {
+	const slow = outboundLiveTimeout + time.Second // the quick line took 8 s and more on 11-12
+	t.Run("background follow-up", func(t *testing.T) {
+		t.Parallel()
+		e, _ := outboundEngine(t, LangChinese, slow, func(string) string { return "已部署。" })
+		if got := e.chineseOutbound("s", englishReport, false); got != "已部署。" {
+			t.Fatalf("got %q", got)
+		}
+	})
+	t.Run("live reply", func(t *testing.T) {
+		t.Parallel()
+		e, _ := outboundEngine(t, LangChinese, slow, func(string) string { return "已部署。" })
+		start := time.Now()
+		if got := e.chineseOutbound("s", englishReport, true); got != englishReport {
+			t.Fatalf("got %q", got)
+		}
+		if took := time.Since(start); took > outboundLiveTimeout+500*time.Millisecond {
+			t.Fatalf("live reply waited %v", took)
+		}
+	})
+	if outboundLaterTimeout < 20*time.Second {
+		t.Fatalf("background limit = %v", outboundLaterTimeout)
 	}
 }

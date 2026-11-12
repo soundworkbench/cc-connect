@@ -4786,7 +4786,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				if silent {
 					slog.Info("silent reply suppressed", "session", sessionKey, "unsolicited", true)
 				} else if outbound != "" {
-					outbound = e.chineseOutbound(sessionKey, outbound)
+					outbound = e.chineseOutbound(sessionKey, outbound, false)
 					for _, chunk := range SplitMessageCodeFenceAware(outbound, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
 					}
@@ -6296,7 +6296,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			// Duplicate detection against `send` side text compares the agent's own words.
 			sideCompare := strings.TrimSpace(baseResponse)
 			if !isSilent {
-				if rewritten := e.chineseOutbound(sessionKey, cleanResponse); rewritten != cleanResponse {
+				if rewritten := e.chineseOutbound(sessionKey, cleanResponse, !automated); rewritten != cleanResponse {
 					baseResponse, cleanResponse = rewritten, rewritten
 				}
 			}
@@ -11742,7 +11742,7 @@ func (e *Engine) SendToSessionWithOptions(sessionKey, message string, images []I
 		return ErrAttachmentSendDisabled
 	}
 	sideText := strings.TrimSpace(message) // the agent's own words, for duplicate detection
-	message = e.chineseOutbound(sessionKey, message)
+	message = e.chineseOutbound(sessionKey, message, false)
 
 	var imageSender ImageSender
 	if len(images) > 0 {
