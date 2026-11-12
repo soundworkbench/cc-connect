@@ -32,7 +32,7 @@ func parseTaskEvent(subtype string, raw map[string]any) *core.TaskEvent {
 			ev.Background = &b
 		}
 		if taskType, _ := raw["task_type"].(string); taskType == "local_bash" {
-			ev.Step = chineseToolProgress("Bash", nil, "")
+			ev.Step, ev.StepGeneric = chineseToolProgress("Bash", nil, ""), true
 		}
 	case "task_progress":
 		ev.Kind = core.TaskProgress
@@ -40,7 +40,7 @@ func parseTaskEvent(subtype string, raw map[string]any) *core.TaskEvent {
 		if step := taskProgressStep(description, ev.Summary); step != "" {
 			ev.Step = step
 		} else if tool, _ := raw["last_tool_name"].(string); tool != "" {
-			ev.Step = chineseToolProgress(tool, nil, "")
+			ev.Step, ev.StepGeneric = chineseToolProgress(tool, nil, ""), true
 		}
 		if usage, ok := raw["usage"].(map[string]any); ok {
 			ev.Elapsed = time.Duration(asInt(usage["duration_ms"])) * time.Millisecond

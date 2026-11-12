@@ -33,7 +33,7 @@ func TestTaskFramesBecomeTaskEvents(t *testing.T) {
 		}
 	}
 	started, progress, updated, ended, ambient := events[0].Task, events[1].Task, events[2].Task, events[3].Task, events[4].Task
-	if started.Kind != core.TaskStarted || started.TaskID != "b1" || started.Description != "整理 200 个文件" || started.Background == nil || !*started.Background || started.Step != "运行命令" {
+	if started.Kind != core.TaskStarted || started.TaskID != "b1" || started.Description != "整理 200 个文件" || started.Background == nil || !*started.Background || started.Step != "运行命令" || !started.StepGeneric {
 		t.Errorf("started=%+v", started)
 	}
 	if progress.Kind != core.TaskProgress || progress.Description != "" || progress.Step != "查资料" || progress.Summary != "在比较三家供应商" || progress.Elapsed != 65*time.Second {
@@ -56,12 +56,13 @@ func TestTaskFramesBecomeTaskEvents(t *testing.T) {
 func TestTaskProgressDescriptionIsTheStep(t *testing.T) {
 	cases := []struct {
 		name, frame, step string
+		generic           bool
 	}{
-		{"command description", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"Running 删除临时目录","last_tool_name":"Bash","usage":{"duration_ms":1000}}`, "删除临时目录"},
-		{"own wording", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"读取八份纪要正文","last_tool_name":"Read"}`, "读取八份纪要正文"},
-		{"command without description", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"Running grep -rn '会议' notes/","last_tool_name":"Bash"}`, "运行命令"},
-		{"English activity", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"Reading main.go","last_tool_name":"Read"}`, "读取文件"},
-		{"summary only", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"正在比对纪要","summary":"正在比对纪要"}`, ""},
+		{"command description", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"Running 删除临时目录","last_tool_name":"Bash","usage":{"duration_ms":1000}}`, "删除临时目录", false},
+		{"own wording", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"读取八份纪要正文","last_tool_name":"Read"}`, "读取八份纪要正文", false},
+		{"command without description", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"Running grep -rn '会议' notes/","last_tool_name":"Bash"}`, "运行命令", true},
+		{"English activity", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"Reading main.go","last_tool_name":"Read"}`, "读取文件", true},
+		{"summary only", `{"type":"system","subtype":"task_progress","task_id":"a1","description":"正在比对纪要","summary":"正在比对纪要"}`, "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -72,8 +73,8 @@ func TestTaskProgressDescriptionIsTheStep(t *testing.T) {
 				t.Fatalf("events=%+v", events)
 			}
 			ev := events[0].Task
-			if ev.Description != "" || ev.Step != tc.step {
-				t.Fatalf("description=%q step=%q, want no description and step %q", ev.Description, ev.Step, tc.step)
+			if ev.Description != "" || ev.Step != tc.step || ev.StepGeneric != tc.generic {
+				t.Fatalf("description=%q step=%q generic=%v, want no description, step %q, generic %v", ev.Description, ev.Step, ev.StepGeneric, tc.step, tc.generic)
 			}
 		})
 	}

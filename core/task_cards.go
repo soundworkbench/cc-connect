@@ -31,6 +31,7 @@ type TaskEvent struct {
 	Background  *bool         // set when the event says whether the task runs in the background
 	Hidden      bool          // housekeeping task the agent itself keeps out of view
 	Step        string        // what the task is doing now, in the user's words
+	StepGeneric bool          // Step is only the tool's generic label ("运行命令"), not the agent's own description
 	Summary     string        // progress: one-line status; ended: result summary
 	Status      string        // ended: "completed", "failed" or "stopped"
 	Elapsed     time.Duration // agent-reported run time; 0 = unknown
@@ -98,6 +99,7 @@ type taskCard struct {
 	hidden     bool
 	start      time.Time
 	step       string
+	generic    bool // step is a tool's generic label, not the agent's own description
 	recent     string
 	still      bool      // the step line says the task is still on the same step
 	cliAt      time.Time // when the agent last wrote recent; zero = never
@@ -184,7 +186,7 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 		c.hidden = true
 	}
 	if ev.Step != "" && ev.Step != c.step {
-		c.step, c.still = ev.Step, false
+		c.step, c.still, c.generic = ev.Step, false, ev.StepGeneric
 		c.steps++
 		c.details = append(c.details, ev.Step)
 		if len(c.details) > taskCardDetailRows {

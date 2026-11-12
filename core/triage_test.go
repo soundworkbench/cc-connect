@@ -364,3 +364,97 @@ func TestNoTriageWhileATurnRuns(t *testing.T) {
 	}
 	env.finishTurn("不客气")
 }
+
+func TestIsProgressAsk(t *testing.T) {
+	for text, want := range map[string]bool{
+		"更新进度":     true,
+		"更新":       true,
+		"更新一下":     true,
+		"好了吗":      true,
+		"好了吗？":     true,
+		"构建什么进度":   true,
+		"现在怎么样了":   true,
+		"到哪了":      true,
+		"加速":       true,
+		"加速吧！":     true,
+		"进度怎么样":    true,
+		"更新一下文档":   false,
+		"更新README": false,
+		"谢谢":       false,
+		"查一下日志":    false,
+		"进度怎么样了，顺便把客户名单导出来发我": false,
+	} {
+		if got := isProgressAsk(text); got != want {
+			t.Errorf("isProgressAsk(%q) = %v, want %v", text, got, want)
+		}
+	}
+}
+
+// Jason's own wording is answered at once, without waiting on a slow quick model.
+func TestProgressKeywordsSkipTheQuickModel(t *testing.T) {
+	env := newTriageEnv(t)
+	env.firstTurn("已在后台整理。")
+	env.backgroundTask("t1", "按客户整理 200 个文件", "读取八份纪要正文")
+	env.label.Store("OTHER")
+	env.delay.Store(int64(3 * time.Second)) // past the classifier's 2.5s cap
+	calls := env.calls.Load()
+	for _, q := range []string{"更新进度", "更新", "好了吗", "加速"} {
+		before := len(env.p.stubPlatformEngine.getSent())
+		start := time.Now()
+		env.send(q)
+		if took := time.Since(start); took > time.Second {
+			t.Fatalf("%q waited %v", q, took)
+		}
+		if env.reachesAgent() {
+			t.Fatalf("%q woke the agent", q)
+		}
+		sent := env.p.stubPlatformEngine.getSent()
+		if len(sent) != before+1 || !strings.Contains(sent[before], "现在在：读取八份纪要正文。") {
+			t.Fatalf("%q: sent=%q", q, sent[before:])
+		}
+	}
+	if env.calls.Load() != calls {
+		t.Fatalf("quick model asked %d times", env.calls.Load()-calls)
+	}
+}
+
+// The answer names the step in the agent's own words, never a tool's generic label.
+func TestProgressAnswerNamesTheStepInTheAgentsWords(t *testing.T) {
+	env := newTriageEnv(t)
+	env.firstTurn("我先在后台跑构建，再核对产物。")
+	env.e.interactiveMu.Lock()
+	state := env.e.interactiveStates[env.key]
+	env.e.interactiveMu.Unlock()
+	b := true
+	env.e.handleTaskEvent(state, env.key, &TaskEvent{Kind: TaskStarted, TaskID: "b1", Description: "构建候选二进制", Background: &b, Step: "运行命令", StepGeneric: true})
+	ask := func() string {
+		before := len(env.p.stubPlatformEngine.getSent())
+		env.send("进度")
+		if env.reachesAgent() {
+			t.Fatal("progress question woke the agent")
+		}
+		return env.p.stubPlatformEngine.getSent()[before]
+	}
+	for range 2 { // the bridge's own answer in the history is not the agent's words
+		if got := ask(); strings.Contains(got, "运行命令") || !strings.Contains(got, "现在在：我先在后台跑构建，再核对产物") {
+			t.Fatalf("no own step: %q", got)
+		}
+	}
+	env.e.handleTaskEvent(state, env.key, &TaskEvent{Kind: TaskProgress, TaskID: "b1", Summary: "正在编译飞书平台包"})
+	if got := ask(); !strings.Contains(got, "现在在：正在编译飞书平台包。") {
+		t.Fatalf("progress line not used: %q", got)
+	}
+	env.e.handleTaskEvent(state, env.key, &TaskEvent{Kind: TaskProgress, TaskID: "b1", Step: "打包二进制"})
+	if got := ask(); !strings.Contains(got, "现在在：打包二进制。") {
+		t.Fatalf("own step not used: %q", got)
+	}
+}
+
+func TestProgressAnswerLeavesOutAnUnknownStep(t *testing.T) {
+	e := NewEngine("p", &stubAgent{}, nil, "", LangChinese)
+	t.Cleanup(func() { _ = e.Stop() })
+	got := e.progressAnswer(triageView{tasks: []triageTask{{title: "构建"}}}, nil)
+	if !strings.HasPrefix(got, "后台任务「构建」还在进行（已跑不到 1 分钟）。") || strings.Contains(got, "现在在") {
+		t.Fatalf("got %q", got)
+	}
+}

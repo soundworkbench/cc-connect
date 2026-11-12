@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -39,8 +40,41 @@ const triagePrompt = "判断用户发来的这条消息属于哪一类，只回�
 
 // triageTask is a background task as the progress answer describes it.
 type triageTask struct {
-	title, step string
+	title, step string // step is the agent's own description of the current step; "" = none
+	recent      string // the task's latest progress line
 	minutes     int
+}
+
+const (
+	progressAskMaxRunes = 12 // a progress question is short; a longer message is a request
+	progressStepRunes   = 40
+)
+
+// progressAskWords mark a short message as a progress question wherever they
+// appear; progressAskWhole only when they are the whole message ("更新" alone
+// asks for an update, "更新文档" is a request).
+var (
+	progressAskWords = []string{"进度", "进展", "好了吗", "好了没", "好没好", "怎么样了", "咋样了", "到哪了", "到哪儿了", "到哪一步",
+		"做完了吗", "做完没", "完成了吗", "完成没", "搞定了吗", "搞定没", "弄好了吗", "在忙什么", "在干嘛"}
+	progressAskWhole = []string{"更新", "更新一下", "更新下", "加速", "加速一下", "加快", "快点", "快一点", "如何了", "怎样了"}
+	progressAskTrim  = "？?！!。.，,~～ \t\n吧呢啊呀哈"
+)
+
+// isProgressAsk reports whether a short message asks how the work is going,
+// by its wording alone, so the answer does not wait on the quick model.
+func isProgressAsk(content string) bool {
+	content = strings.TrimSpace(content)
+	if utf8.RuneCountInString(content) > progressAskMaxRunes {
+		return false
+	}
+	for _, w := range progressAskWords {
+		if strings.Contains(content, w) {
+			return true
+		}
+	}
+	core := strings.Trim(content, progressAskTrim)
+	core = strings.TrimPrefix(core, "请")
+	return slices.Contains(progressAskWhole, core)
 }
 
 // triageView is what the bridge knows about the session right now.
@@ -68,14 +102,18 @@ func (e *Engine) triageIdleMessage(p Platform, msg *Message, session *Session, s
 	if !view.busy() {
 		return false // nothing to wait for: the agent answers at once
 	}
-	class, err := e.classifyIdleMessage(cfg, content)
+	class, matched, err := triageProgress, "keyword", error(nil)
+	if !isProgressAsk(content) {
+		matched = "classifier"
+		class, err = e.classifyIdleMessage(cfg, content)
+	}
 	switch {
 	case err != nil:
 		triageLog(interactiveKey, triageOther, "classifier_failed")
 		slog.Info("card: triage classifier failed", "session", interactiveKey, "error", err)
 		return false
 	case class == triageProgress:
-		answer := e.progressAnswer(view)
+		answer := e.progressAnswer(view, session)
 		if err := e.sendWithError(p, msg.ReplyCtx, answer); err != nil {
 			triageLog(interactiveKey, triageOther, "answer_send_failed")
 			return false
@@ -83,7 +121,7 @@ func (e *Engine) triageIdleMessage(p Platform, msg *Message, session *Session, s
 		session.AddHistory("user", msg.Content)
 		session.AddHistory("assistant", answer)
 		sessions.Save()
-		triageLog(interactiveKey, triageProgress, "answered_from_bridge_state")
+		triageLog(interactiveKey, triageProgress, "answered_from_bridge_state", "matched", matched)
 		return true
 	case view.pendingQuestion != "":
 		// A progress question never answers a pending question or card, but
@@ -109,10 +147,16 @@ func (e *Engine) triageIdleMessage(p Platform, msg *Message, session *Session, s
 	return false
 }
 
-func triageLog(sessionKey string, class triageClass, reason string) {
-	slog.Info("card: triage", "session", sessionKey, "class", string(class), "reason", reason)
+func triageLog(sessionKey string, class triageClass, reason string, extra ...string) {
+	args := []any{"session", sessionKey, "class", string(class), "reason", reason}
+	fields := map[string]any{"session": sessionKey, "class": string(class), "reason": reason}
+	for i := 0; i+1 < len(extra); i += 2 {
+		args = append(args, extra[i], extra[i+1])
+		fields[extra[i]] = extra[i+1]
+	}
+	slog.Info("card: triage", args...)
 	if StreamTraceOn() {
-		StreamTrace("triage", map[string]any{"session": sessionKey, "class": string(class), "reason": reason})
+		StreamTrace("triage", fields)
 	}
 }
 
@@ -167,7 +211,11 @@ func (e *Engine) triageView(msg *Message, session *Session, interactiveKey strin
 			if title == "" {
 				title = e.i18n.T(MsgTaskUntitled)
 			}
-			v.tasks = append(v.tasks, triageTask{title: title, step: c.step, minutes: taskMinutes(c.start)})
+			step := c.step
+			if c.generic {
+				step = ""
+			}
+			v.tasks = append(v.tasks, triageTask{title: title, step: step, recent: c.recent, minutes: taskMinutes(c.start)})
 		}
 	}
 	m.mu.Unlock()
@@ -202,8 +250,11 @@ func (s *DecisionStore) hasPending(sessionKey string) bool {
 }
 
 // progressAnswer describes the running tasks and the queue in the bridge's
-// own words; every number comes from the bridge.
-func (e *Engine) progressAnswer(v triageView) string {
+// own words; every number comes from the bridge. The current step is the
+// agent's own description of it (a command's description), else the task's
+// latest progress line, else the agent's latest words in the chat; with none
+// of them the step is left out rather than named by a generic word.
+func (e *Engine) progressAnswer(v triageView, session *Session) string {
 	i := e.i18n
 	var lines []string
 	for n, t := range v.tasks {
@@ -217,9 +268,16 @@ func (e *Engine) progressAnswer(v triageView) string {
 		}
 		step := t.step
 		if step == "" {
-			step = i.T(MsgTaskWorking)
+			step = t.recent
 		}
-		lines = append(lines, i.Tf(MsgTriageTask, t.title, elapsed, step))
+		if step == "" {
+			step = e.lastAgentGist(session)
+		}
+		if step = strings.TrimRight(clipRunes(step, progressStepRunes), "。.！!；;，, "); step == "" {
+			lines = append(lines, i.Tf(MsgTriageTaskNoStep, t.title, elapsed))
+		} else {
+			lines = append(lines, i.Tf(MsgTriageTask, t.title, elapsed, step))
+		}
 	}
 	if len(v.tasks) > 0 {
 		lines = append(lines, i.T(MsgTriageSeeCards))
@@ -228,4 +286,22 @@ func (e *Engine) progressAnswer(v triageView) string {
 		lines = append(lines, i.Tf(MsgTriageQueued, v.queued))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// lastAgentGist is the first sentence of the agent's latest reply in the
+// chat, skipping the bridge's own progress answers; "" when there is none.
+func (e *Engine) lastAgentGist(session *Session) string {
+	if session == nil {
+		return ""
+	}
+	own, _, _ := strings.Cut(e.i18n.T(MsgTriageTask), "%")
+	h := session.GetHistory(10)
+	for k := len(h) - 1; k >= 0; k-- {
+		text := strings.TrimSpace(h[k].Content)
+		if h[k].Role != "assistant" || text == "" || (own != "" && strings.HasPrefix(text, own)) {
+			continue
+		}
+		return firstSentence(text, progressStepRunes)
+	}
+	return ""
 }
