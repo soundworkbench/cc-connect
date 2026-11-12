@@ -247,6 +247,8 @@ const (
 	MsgResumeItemTask            MsgKey = "resume_item_task"
 	MsgResumeItemSep             MsgKey = "resume_item_sep"
 	MsgResumeTooOld              MsgKey = "resume_too_old"
+	MsgAskSentAsCards            MsgKey = "ask_sent_as_cards"
+	MsgAskCardsNotSent           MsgKey = "ask_cards_not_sent"
 	MsgTriageMoreTasks           MsgKey = "triage_more_tasks"
 	MsgTriageSeeCards            MsgKey = "triage_see_cards"
 	MsgTriageQueued              MsgKey = "triage_queued"
@@ -859,6 +861,14 @@ var messages = map[MsgKey]map[Language]string{
 	MsgResumeItemTask:    {LangEnglish: "background task \"%s\"", LangChinese: "后台任务「%s」", LangTraditionalChinese: "背景任務「%s」", LangJapanese: "バックグラウンドタスク「%s」", LangSpanish: "la tarea en segundo plano «%s»"},
 	MsgResumeItemSep:     {LangEnglish: "; ", LangChinese: "；", LangTraditionalChinese: "；", LangJapanese: "、", LangSpanish: "; "},
 	MsgResumeTooOld:      {LangEnglish: "The task from %s was interrupted. Tell me if you want me to pick it up again.", LangChinese: "上次 %s 的任务被中断，需要的话说一声我再继续。", LangTraditionalChinese: "上次 %s 的任務被中斷，需要的話說一聲我再繼續。", LangJapanese: "%s のタスクは中断されました。必要なら声をかけてください。続きをやります。", LangSpanish: "La tarea de las %s se interrumpió. Si quieres que la retome, dímelo."},
+	MsgAskSentAsCards: {
+		LangEnglish:            "Choice cards were sent; the user's pick will arrive as a new message. End this turn or carry on with other work for now.",
+		LangChinese:            "已发选择卡片，用户点选后会作为新消息到达；先结束本轮或继续别的事。",
+		LangTraditionalChinese: "已發選擇卡片，用戶點選後會作為新訊息到達；先結束本輪或繼續別的事。",
+		LangJapanese:           "選択カードを送りました。ユーザーの選択は新しいメッセージとして届きます。いったんこのターンを終えるか、ほかの作業を続けてください。",
+		LangSpanish:            "Se enviaron tarjetas de elección; la respuesta del usuario llegará como un mensaje nuevo. Termina este turno o sigue con otra tarea.",
+	},
+	MsgAskCardsNotSent: {LangEnglish: " These questions could not be sent; ask them in text: %s", LangChinese: "这几个问题的卡片没发出去，请改用文字问：%s", LangTraditionalChinese: "這幾個問題的卡片沒發出去，請改用文字問：%s", LangJapanese: "次の質問はカードを送れませんでした。文章で尋ねてください：%s", LangSpanish: " Estas preguntas no se pudieron enviar; hazlas por texto: %s"},
 	MsgTriageMoreTasks:   {LangEnglish: "%d more background tasks are running.", LangChinese: "另外还有 %d 个后台任务在跑。", LangTraditionalChinese: "另外還有 %d 個背景任務在跑。", LangJapanese: "ほかに %d 件のバックグラウンドタスクが実行中です。", LangSpanish: "Hay %d tareas más en segundo plano."},
 	MsgTriageSeeCards:    {LangEnglish: "Its card above shows the progress; I'll tell you when it's done.", LangChinese: "进展看上面的任务卡，做完我会告诉你。", LangTraditionalChinese: "進展看上面的任務卡，做完我會告訴你。", LangJapanese: "進捗は上のタスクカードで確認できます。終わったらお知らせします。", LangSpanish: "El avance está en su tarjeta de arriba; te aviso cuando termine."},
 	MsgTriageQueued:      {LangEnglish: "%d more messages are waiting; I'll take them in order.", LangChinese: "还有 %d 条消息排着队，我会按顺序处理。", LangTraditionalChinese: "還有 %d 條訊息排著隊，我會按順序處理。", LangJapanese: "ほかに %d 件のメッセージが待っています。順番に対応します。", LangSpanish: "Hay %d mensajes más en espera; los atenderé en orden."},

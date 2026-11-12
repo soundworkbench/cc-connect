@@ -4855,6 +4855,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				// render the same ask card as a foreground turn and wait for
 				// the answer (handlePendingPermission sends it back).
 				if (event.ToolName == "AskUserQuestion" || event.ToolName == "extension_select") && len(event.Questions) > 0 {
+					if e.askAsDecisions(agentSession, sessionKey, &event) {
+						continue
+					}
 					pending := &pendingPermission{
 						RequestID:    event.RequestID,
 						ToolName:     event.ToolName,
@@ -6001,6 +6004,9 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			// matches other agents. See forwardConfirm in agent/pi/session.go.
 			isAskQuestion := (event.ToolName == "AskUserQuestion" ||
 				event.ToolName == "extension_select") && len(event.Questions) > 0
+			if isAskQuestion && e.askAsDecisions(turnAgentSession, sessionKey, &event) {
+				continue // the cards carry the question; the turn goes on
+			}
 
 			state.mu.Lock()
 			autoApprove := state.approveAll
