@@ -61,12 +61,10 @@ func (s TaskCardState) Live() bool { return s == TaskCardRunning }
 // TaskCardView is the whole content of a task card; every text is ready to show.
 type TaskCardView struct {
 	State        TaskCardState
-	Title        string // live: "background task · running: <task>"
-	Status       string // live: current step; ended: the outcome line, marked as a background task and naming it
-	Elapsed      string // live only, whole minutes
-	Recent       string // live only: latest progress line
-	Hint         string // live only: the task runs aside; the chat stays free
-	Summary      string // ended only: up to three lines
+	Title        string // the task's name
+	Label        string // the state in a word: running, done, failed, stopped, interrupted
+	Line         string // live: "<current step> · <elapsed>"; ended: "<outcome> · took <elapsed>"
+	Summary      string // ended only: the outcome part of Line
 	DetailsTitle string
 	Details      []string // latest steps, oldest first
 	FullTitle    string   // ended only: names Full inside the details panel
@@ -101,11 +99,12 @@ type taskCard struct {
 	step       string
 	generic    bool // step is a tool's generic label, not the agent's own description
 	recent     string
-	still      bool      // the step line says the task is still on the same step
+	still      bool      // the card has been idle: the latest progress line stands in for the step
 	cliAt      time.Time // when the agent last wrote recent; zero = never
 	details    []string
 	steps      int // step changes seen, including those rotated out of details
 	ended      bool
+	endedAt    time.Time
 	state      TaskCardState
 	summary    string
 	brief      string // completed: the quick model's one line for a long or raw summary
@@ -200,7 +199,7 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 			c.recent, c.cliAt = ev.Summary, time.Now()
 		}
 	case TaskEnded:
-		c.ended = true
+		c.ended, c.endedAt = true, time.Now()
 		c.summary = ev.Summary
 		switch ev.Status {
 		case "failed":
@@ -288,7 +287,7 @@ func (m *taskCardManager) open(e *Engine, c *taskCard) {
 // is written at most every minGap, and the elapsed minutes stay current. A
 // card that has not changed for idleBeat (a subagent writing, not calling
 // tools) gets a sign of life: the quick model's next progress line when it
-// can write one, and the step line flips to "still on: <step>" and back.
+// can write one, and the line flips between the step and the latest progress.
 func (m *taskCardManager) run(e *Engine, c *taskCard, shown TaskCardView) {
 	tick := time.NewTicker(m.tick)
 	defer tick.Stop()
@@ -349,13 +348,13 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 }
 
 func sameTaskView(a, b TaskCardView) bool {
-	return a.State == b.State && a.Title == b.Title && a.Status == b.Status && a.Elapsed == b.Elapsed &&
-		a.Recent == b.Recent && a.Summary == b.Summary && slices.Equal(a.Details, b.Details)
+	return a.State == b.State && a.Title == b.Title && a.Line == b.Line && slices.Equal(a.Details, b.Details)
 }
 
 func taskMinutes(start time.Time) int { return int(time.Since(start) / time.Minute) }
 
-// viewLocked renders the card. Caller holds m.mu.
+// viewLocked renders the card: the task's name as the title, its state as a
+// label, and one line under it. Caller holds m.mu.
 func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 	i := e.i18n
 	title := c.desc
@@ -364,7 +363,8 @@ func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 	}
 	v := TaskCardView{
 		State:        TaskCardRunning,
-		Title:        i.Tf(MsgTaskRunningTitle, title),
+		Title:        title,
+		Label:        i.T(MsgTaskWorking),
 		DetailsTitle: i.T(MsgTaskDetails),
 		Details:      append([]string(nil), c.details...),
 		SessionKey:   c.sessionKey,
@@ -372,20 +372,20 @@ func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 	}
 	if c.ended {
 		v.State = c.state
-		v.Summary = clipLines(c.summary, 3, 300)
+		v.Summary = clipLines(c.summary, 1, 300)
 		switch c.state {
 		case TaskCardFailed:
-			v.Status = i.Tf(MsgTaskFailed, title)
+			v.Label = i.T(MsgTaskLabelFailed)
 			v.Summary = failureLine(i, c.summary)
 		case TaskCardStopped:
-			v.Status = i.Tf(MsgTaskStopped, title)
+			v.Label = i.T(MsgTaskLabelStopped)
 			if !readableLine(c.summary) {
 				v.Summary = ""
 			}
 		case TaskCardInterrupted:
-			v.Status = i.Tf(MsgTaskInterrupted, title)
+			v.Label = i.T(MsgTaskLabelCutOff)
 		default:
-			v.Status = i.Tf(MsgTaskCompleted, title)
+			v.Label = i.T(MsgTaskLabelDone)
 			if !briefEnough(c.summary) {
 				v.Summary = c.brief
 				if v.Summary == "" {
@@ -396,28 +396,44 @@ func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 		if c.summary != "" && v.Summary != c.summary {
 			v.FullTitle, v.Full = i.T(MsgTaskFullText), clipRunesKeepLines(c.summary, taskCardFullRunes)
 		}
+		took := i.T(MsgTaskTookShort)
+		if n := int(c.endedAt.Sub(c.start) / time.Minute); n >= 1 {
+			took = i.Tf(MsgTaskTook, n)
+		}
+		v.Line = joinTaskLine(v.Summary, took)
 		return v
 	}
-	minutes := taskMinutes(c.start)
-	if minutes < 1 {
-		v.Elapsed = i.T(MsgTaskElapsedShort)
-	} else {
-		v.Elapsed = i.Tf(MsgTaskElapsed, minutes)
-	}
-	v.Status = c.step
-	if c.still {
-		if v.Status == "" {
-			v.Status = title
-		}
-		v.Status = i.Tf(MsgTaskStill, v.Status)
-	} else if v.Status == "" {
-		v.Status = i.T(MsgTaskWorking)
-	}
-	if c.recent != "" {
-		v.Recent = i.Tf(MsgTaskRecent, c.recent)
-	}
-	v.Hint = i.T(MsgTaskHint)
+	v.Line = joinTaskLine(liveStep(i, c), taskElapsed(i, taskMinutes(c.start)))
 	return v
+}
+
+// liveStep is what a running task is doing: the current step, or the latest
+// progress line when there is no step, the step is only a tool's generic
+// label, or the card has been idle.
+func liveStep(i *I18n, c *taskCard) string {
+	switch {
+	case c.recent != "" && (c.step == "" || c.generic || c.still):
+		return c.recent
+	case c.step != "":
+		return c.step
+	}
+	return i.T(MsgTaskWorking)
+}
+
+// taskElapsed is a running time in whole minutes: "3 min", "under a minute".
+func taskElapsed(i *I18n, minutes int) string {
+	if minutes < 1 {
+		return i.T(MsgTaskElapsedShort)
+	}
+	return i.Tf(MsgTaskElapsed, minutes)
+}
+
+// joinTaskLine is "<text> · <time>", or the time alone when text is empty.
+func joinTaskLine(text, time string) string {
+	if text = strings.TrimRight(strings.TrimSpace(text), "。.；;，, "); text == "" {
+		return time
+	}
+	return text + " · " + time
 }
 
 const taskCardFullRunes = 1500
@@ -586,7 +602,7 @@ func (e *Engine) settleTasks(agent AgentSession, end TaskCardState) {
 		if c.agent != agent || c.ended {
 			continue
 		}
-		c.ended, c.state = true, end
+		c.ended, c.endedAt, c.state = true, time.Now(), end
 		m.scheduleLocked(e, c)
 	}
 }

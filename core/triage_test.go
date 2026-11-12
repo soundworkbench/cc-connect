@@ -262,7 +262,7 @@ func TestProgressQuestionAnsweredDespitePendingCards(t *testing.T) {
 			t.Fatalf("%q with pending cards woke the agent", q)
 		}
 		sent := env.p.stubPlatformEngine.getSent()
-		if len(sent) != before+1 || !strings.Contains(sent[before], "后台任务「按客户整理 200 个文件」还在进行") {
+		if len(sent) != before+1 || !strings.Contains(sent[before], "后台任务「按客户整理 200 个文件」：") {
 			t.Fatalf("%q: sent=%q", q, sent[before:])
 		}
 	}
@@ -289,7 +289,7 @@ func TestProgressQuestionAnsweredFromBridgeState(t *testing.T) {
 	}
 	sent := env.p.stubPlatformEngine.getSent()
 	answer := sent[len(sent)-1]
-	if !strings.Contains(answer, "后台任务「按客户整理 200 个文件」还在进行（已跑不到 1 分钟），现在在：读取文件。") || !strings.Contains(answer, "看上面的任务卡") {
+	if !strings.Contains(answer, "后台任务「按客户整理 200 个文件」：读取文件 · 不到 1 分钟。") || !strings.Contains(answer, "看上面的任务卡") {
 		t.Fatalf("answer=%q", answer)
 	}
 	h := env.e.sessions.GetOrCreateActive(env.key).GetHistory(2)
@@ -409,7 +409,7 @@ func TestProgressKeywordsSkipTheQuickModel(t *testing.T) {
 			t.Fatalf("%q woke the agent", q)
 		}
 		sent := env.p.stubPlatformEngine.getSent()
-		if len(sent) != before+1 || !strings.Contains(sent[before], "现在在：读取八份纪要正文。") {
+		if len(sent) != before+1 || !strings.Contains(sent[before], "：读取八份纪要正文 · 不到 1 分钟。") {
 			t.Fatalf("%q: sent=%q", q, sent[before:])
 		}
 	}
@@ -436,16 +436,16 @@ func TestProgressAnswerNamesTheStepInTheAgentsWords(t *testing.T) {
 		return env.p.stubPlatformEngine.getSent()[before]
 	}
 	for range 2 { // the bridge's own answer in the history is not the agent's words
-		if got := ask(); strings.Contains(got, "运行命令") || !strings.Contains(got, "现在在：我先在后台跑构建，再核对产物") {
+		if got := ask(); strings.Contains(got, "运行命令") || !strings.Contains(got, "：我先在后台跑构建，再核对产物 · ") {
 			t.Fatalf("no own step: %q", got)
 		}
 	}
 	env.e.handleTaskEvent(state, env.key, &TaskEvent{Kind: TaskProgress, TaskID: "b1", Summary: "正在编译飞书平台包"})
-	if got := ask(); !strings.Contains(got, "现在在：正在编译飞书平台包。") {
+	if got := ask(); !strings.Contains(got, "：正在编译飞书平台包 · ") {
 		t.Fatalf("progress line not used: %q", got)
 	}
 	env.e.handleTaskEvent(state, env.key, &TaskEvent{Kind: TaskProgress, TaskID: "b1", Step: "打包二进制"})
-	if got := ask(); !strings.Contains(got, "现在在：打包二进制。") {
+	if got := ask(); !strings.Contains(got, "：打包二进制 · ") {
 		t.Fatalf("own step not used: %q", got)
 	}
 }
@@ -454,7 +454,7 @@ func TestProgressAnswerLeavesOutAnUnknownStep(t *testing.T) {
 	e := NewEngine("p", &stubAgent{}, nil, "", LangChinese)
 	t.Cleanup(func() { _ = e.Stop() })
 	got := e.progressAnswer(triageView{tasks: []triageTask{{title: "构建"}}}, nil)
-	if !strings.HasPrefix(got, "后台任务「构建」还在进行（已跑不到 1 分钟）。") || strings.Contains(got, "现在在") {
+	if !strings.HasPrefix(got, "后台任务「构建」进行中 · 不到 1 分钟。") || strings.Contains(got, "：") {
 		t.Fatalf("got %q", got)
 	}
 }

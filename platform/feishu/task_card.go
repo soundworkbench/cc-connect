@@ -44,45 +44,31 @@ func (p *Platform) UpdateTaskCard(ctx context.Context, handle any, view core.Tas
 	return p.patchCardMessage(ctx, h.messageID, card)
 }
 
-// taskCardJSON lays out a task card. Live: the title marking it a background
-// task, the current step with the spinner, the elapsed minutes, the latest
-// progress, a grey line saying the chat stays free, and the steps panel.
-// Ended: the outcome line, the summary and the steps panel, which also holds
-// the agent's original text when the card shows a shorter line. There is no stop
-// button: the person asks the agent to stop a task.
+// taskCardJSON lays out a task card: a header with the task's name and its
+// state as a coloured tag, one line "<step or outcome> · <time>" (with the
+// spinner while the task runs), and the folded details panel holding the
+// steps and, when the card shows a shorter line, the agent's original text.
+// There is no stop button: the person asks the agent to stop a task.
 func (p *Platform) taskCardJSON(v core.TaskCardView) string {
-	var els []map[string]any
+	// Header templates and text tags name grey differently.
+	color, tag := "grey", "neutral"
+	switch v.State {
+	case core.TaskCardRunning:
+		color, tag = "blue", "blue"
+	case core.TaskCardCompleted:
+		color, tag = "green", "green"
+	case core.TaskCardFailed:
+		color, tag = "red", "red"
+	}
+	line := map[string]any{"tag": "markdown", "content": escapeCardText(v.Line)}
 	if v.State.Live() {
-		els = append(els, map[string]any{"tag": "markdown", "content": "**" + escapeCardText(v.Title) + "**"})
-		step := map[string]any{"tag": "markdown", "content": escapeCardText(v.Status)}
 		if key := p.cachedStepIcons().spinner; key != "" {
-			step["icon"] = map[string]any{"tag": "custom_icon", "img_key": key}
+			line["icon"] = map[string]any{"tag": "custom_icon", "img_key": key}
 		} else {
-			step["content"] = spinnerGlyphs[0] + " " + escapeCardText(v.Status)
-		}
-		els = append(els, step)
-		if v.Elapsed != "" {
-			els = append(els, map[string]any{"tag": "markdown", "content": "<font color='grey'>" + escapeCardText(v.Elapsed) + "</font>", "text_size": "notation"})
-		}
-		if v.Recent != "" {
-			els = append(els, map[string]any{"tag": "markdown", "content": escapeCardText(v.Recent)})
-		}
-		if v.Hint != "" {
-			els = append(els, map[string]any{"tag": "markdown", "content": "<font color='grey'>" + escapeCardText(v.Hint) + "</font>", "text_size": "notation"})
-		}
-	} else {
-		color := "grey"
-		switch v.State {
-		case core.TaskCardCompleted:
-			color = "green"
-		case core.TaskCardFailed:
-			color = "red"
-		}
-		els = append(els, map[string]any{"tag": "markdown", "content": "<font color='" + color + "'>" + escapeCardText(v.Status) + "</font>"})
-		if v.Summary != "" {
-			els = append(els, map[string]any{"tag": "markdown", "content": escapeCardText(v.Summary)})
+			line["content"] = spinnerGlyphs[0] + " " + escapeCardText(v.Line)
 		}
 	}
+	els := []map[string]any{line}
 	var details []map[string]any
 	if len(v.Details) > 0 {
 		lines := make([]string, len(v.Details))
@@ -100,14 +86,17 @@ func (p *Platform) taskCardJSON(v core.TaskCardView) string {
 	if len(details) > 0 {
 		els = append(els, buildRichPanel(v.DetailsTitle, details))
 	}
-	summary := v.Title
-	if !v.State.Live() {
-		summary = v.Status
-	}
 	card := map[string]any{
 		"schema": "2.0",
-		"config": map[string]any{"width_mode": "default", "summary": map[string]any{"content": summary}},
-		"body":   map[string]any{"elements": els},
+		"config": map[string]any{"width_mode": "default", "summary": map[string]any{"content": v.Title + " · " + v.Label}},
+		"header": map[string]any{
+			"title":    map[string]any{"tag": "plain_text", "content": v.Title},
+			"template": color,
+			"text_tag_list": []map[string]any{{
+				"tag": "text_tag", "text": map[string]any{"tag": "plain_text", "content": v.Label}, "color": tag,
+			}},
+		},
+		"body": map[string]any{"elements": els},
 	}
 	b, _ := json.Marshal(card)
 	return string(b)

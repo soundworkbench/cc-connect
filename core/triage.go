@@ -262,10 +262,7 @@ func (e *Engine) progressAnswer(v triageView, session *Session) string {
 			lines = append(lines, i.Tf(MsgTriageMoreTasks, len(v.tasks)-3))
 			break
 		}
-		elapsed := i.T(MsgTaskElapsedShort)
-		if t.minutes >= 1 {
-			elapsed = i.Tf(MsgTaskElapsed, t.minutes)
-		}
+		elapsed := taskElapsed(i, t.minutes)
 		step := t.step
 		if step == "" {
 			step = t.recent
@@ -276,7 +273,7 @@ func (e *Engine) progressAnswer(v triageView, session *Session) string {
 		if step = strings.TrimRight(clipRunes(step, progressStepRunes), "。.！!；;，, "); step == "" {
 			lines = append(lines, i.Tf(MsgTriageTaskNoStep, t.title, elapsed))
 		} else {
-			lines = append(lines, i.Tf(MsgTriageTask, t.title, elapsed, step))
+			lines = append(lines, i.Tf(MsgTriageTask, t.title, step, elapsed))
 		}
 	}
 	if len(v.tasks) > 0 {

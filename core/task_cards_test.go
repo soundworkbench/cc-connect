@@ -111,15 +111,15 @@ func TestBackgroundTaskCardOpensUpdatesAndSettles(t *testing.T) {
 	waitUntil(t, "task card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
 	sent, _ := env.p.cards()
 	v := sent[0].view
-	if v.State != TaskCardRunning || v.Title != "后台任务 · 正在进行：按客户整理 200 个文件" || v.Status != "读取文件" || v.Elapsed != "已跑不到 1 分钟" ||
-		v.Recent != "最近进展：正在读第 3 个客户的文件" || v.Hint != "在后台进行，不影响聊天，你可以接着跟我说话；做完我会告诉你。要停的话直接跟我说。" || v.SessionKey != env.key {
+	// The step holds the line; the latest progress waits for an idle card.
+	if v.State != TaskCardRunning || v.Title != "按客户整理 200 个文件" || v.Label != "进行中" || v.Line != "读取文件 · 不到 1 分钟" || v.SessionKey != env.key {
 		t.Fatalf("open view=%+v", v)
 	}
 	// Between turns the unsolicited reader carries the task events.
 	env.task(TaskEvent{Kind: TaskProgress, TaskID: "t1", Step: "编辑文件"})
 	waitUntil(t, "step update", func() bool {
 		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.Status == "编辑文件"
+		return len(up) > 0 && up[len(up)-1].view.Line == "编辑文件 · 不到 1 分钟"
 	})
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "t1", Status: "completed", Summary: "整理完成\n共 200 个文件\n分到 12 个客户\n多余的一行"})
 	waitUntil(t, "settled card", func() bool {
@@ -128,8 +128,8 @@ func TestBackgroundTaskCardOpensUpdatesAndSettles(t *testing.T) {
 	})
 	_, up := env.p.cards()
 	last := up[len(up)-1]
-	if last.handle != sent[0].handle || last.view.Status != "后台任务 · ✓ 已完成：按客户整理 200 个文件" || last.view.Summary != "整理完成" || last.view.Full != "整理完成\n共 200 个文件\n分到 12 个客户\n多余的一行" ||
-		last.view.Hint != "" || strings.Join(last.view.Details, "|") != "读取文件|编辑文件" {
+	if last.handle != sent[0].handle || last.view.Title != "按客户整理 200 个文件" || last.view.Label != "已完成" || last.view.Line != "整理完成 · 用时不到 1 分钟" ||
+		last.view.Full != "整理完成\n共 200 个文件\n分到 12 个客户\n多余的一行" || strings.Join(last.view.Details, "|") != "读取文件|编辑文件" {
 		t.Fatalf("settled=%+v", last)
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -152,7 +152,7 @@ func TestShortAndForegroundTasksGetNoCard(t *testing.T) {
 	env.task(TaskEvent{Kind: TaskUpdated, TaskID: "fg", Background: yes()})
 	waitUntil(t, "moved task card", func() bool {
 		sent, _ := env.p.cards()
-		return len(sent) == 1 && sent[0].view.Title == "后台任务 · 正在进行：前台子任务"
+		return len(sent) == 1 && sent[0].view.Title == "前台子任务"
 	})
 }
 
@@ -171,10 +171,10 @@ func TestTaskCardsSettleOneByOne(t *testing.T) {
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "b", Status: "stopped"})
 	waitUntil(t, "stopped card", func() bool {
 		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.Status == "后台任务 · 已停止：任务乙"
+		return len(up) > 0 && up[len(up)-1].view.Label == "已停止" && up[len(up)-1].view.Line == "用时不到 1 分钟"
 	})
 	_, up := env.p.cards()
-	if up[len(up)-1].handle != handles["后台任务 · 正在进行：任务乙"] {
+	if up[len(up)-1].handle != handles["任务乙"] {
 		t.Fatalf("stopped task settled another card: %+v", up[len(up)-1])
 	}
 	env.e.taskCards.mu.Lock()
@@ -197,7 +197,7 @@ func TestTaskCardsEndWithTheirSession(t *testing.T) {
 	env.e.cleanupInteractiveState(env.key)
 	waitUntil(t, "interrupted card", func() bool {
 		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Status == "后台任务 · 已中断：任务甲"
+		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Title == "任务甲" && up[len(up)-1].view.Label == "已中断"
 	})
 }
 
@@ -223,10 +223,11 @@ func TestTaskCardProgressLineFromQuickModel(t *testing.T) {
 	env.e.streamPreview.QuickLine = QuickLineCfg{Enabled: true, BaseURL: srv.URL, Model: "m", KeyFile: keyFile, TimeoutMs: 2000}
 	env.e.taskCards.summaryGap = 0
 	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理文件", Background: yes()})
-	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "读取文件"})
+	// A tool's generic label gives way to the progress line.
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "读取文件", StepGeneric: true})
 	waitUntil(t, "quick progress line", func() bool {
 		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.Recent == "最近进展：正在把文件按客户分组"
+		return len(up) > 0 && up[len(up)-1].view.Line == "正在把文件按客户分组 · 不到 1 分钟"
 	})
 	mu.Lock()
 	defer mu.Unlock()
@@ -239,11 +240,11 @@ func waitInterrupted(t *testing.T, env *taskEnv, title string) {
 	t.Helper()
 	waitUntil(t, "interrupted card", func() bool {
 		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Status == "后台任务 · 已中断："+title
+		return len(up) > 0 && up[len(up)-1].view.State == TaskCardInterrupted && up[len(up)-1].view.Title == title
 	})
 	_, up := env.p.cards()
-	if up[len(up)-1].view.Hint != "" {
-		t.Fatalf("interrupted card keeps the running hint: %+v", up[len(up)-1].view)
+	if v := up[len(up)-1].view; v.Label != "已中断" || v.Line != "用时不到 1 分钟" {
+		t.Fatalf("interrupted card: %+v", v)
 	}
 	env.e.taskCards.mu.Lock()
 	defer env.e.taskCards.mu.Unlock()
@@ -260,7 +261,7 @@ func TestStopCommandSettlesTaskCards(t *testing.T) {
 	// The person asked for the stop: the card says stopped, not interrupted.
 	waitUntil(t, "stopped card", func() bool {
 		_, up := env.p.cards()
-		return len(up) > 0 && up[len(up)-1].view.State == TaskCardStopped && up[len(up)-1].view.Status == "后台任务 · 已停止：任务甲"
+		return len(up) > 0 && up[len(up)-1].view.State == TaskCardStopped && up[len(up)-1].view.Label == "已停止"
 	})
 }
 
@@ -303,12 +304,14 @@ func quickTaskServer(t *testing.T, env *taskEnv, reply func(n int) string) func(
 	}
 }
 
-func lastRecent(env *taskEnv) string {
+// lastLine is the latest card line without its elapsed time.
+func lastLine(env *taskEnv) string {
 	_, up := env.p.cards()
 	if len(up) == 0 {
 		return ""
 	}
-	return up[len(up)-1].view.Recent
+	line, _, _ := strings.Cut(up[len(up)-1].view.Line, " · ")
+	return line
 }
 
 // The agent's progress line holds while it is fresh; once it is older than
@@ -324,30 +327,30 @@ func TestTaskCardQuickModelTakesOverStaleAgentLine(t *testing.T) {
 	env.e.taskCards.cliStale = 300 * time.Millisecond
 	env.e.taskCards.summaryGap = 400 * time.Millisecond
 	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理纪要", Background: yes()})
-	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "搜索会议", Summary: "在找本周的会议"})
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "搜索会议", StepGeneric: true, Summary: "在找本周的会议"})
 	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
-	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "读取纪要"})
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "读取纪要", StepGeneric: true})
 	time.Sleep(100 * time.Millisecond)
 	if n := len(calls()); n != 0 {
 		t.Fatalf("quick model called %d times while the agent's line was fresh", n)
 	}
 	time.Sleep(300 * time.Millisecond)
-	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "比对纪要"})
-	waitUntil(t, "quick line over the stale agent line", func() bool { return lastRecent(env) == "最近进展：正在整理第1批纪要" })
-	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "写清单"})
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "比对纪要", StepGeneric: true})
+	waitUntil(t, "quick line over the stale agent line", func() bool { return lastLine(env) == "正在整理第1批纪要" })
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "写清单", StepGeneric: true})
 	time.Sleep(100 * time.Millisecond)
 	if n := len(calls()); n != 1 {
 		t.Fatalf("quick model called %d times within summaryGap", n)
 	}
 	time.Sleep(400 * time.Millisecond)
-	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "核对负责人"})
-	waitUntil(t, "second quick line", func() bool { return lastRecent(env) == "最近进展：正在整理第2批纪要" })
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "核对负责人", StepGeneric: true})
+	waitUntil(t, "second quick line", func() bool { return lastLine(env) == "正在整理第2批纪要" })
 	if c := calls(); c[1].Sub(c[0]) < 400*time.Millisecond {
 		t.Fatalf("two quick lines %v apart, want at least summaryGap", c[1].Sub(c[0]))
 	}
 	// A fresh agent line takes the slot back.
 	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Summary: "在核对负责人"})
-	waitUntil(t, "agent line back", func() bool { return lastRecent(env) == "最近进展：在核对负责人" })
+	waitUntil(t, "agent line back", func() bool { return lastLine(env) == "在核对负责人" })
 }
 
 func TestCollapseRepeat(t *testing.T) {
@@ -366,17 +369,19 @@ func TestCollapseRepeat(t *testing.T) {
 }
 
 // A task that adds no step (a subagent writing, not calling tools) still
-// changes its card about every idleBeat, never faster than minGap. In the 11-11
-// test a card stayed the same for 47 s.
+// changes its card about every idleBeat, never faster than minGap: the line
+// flips between the step and the latest progress. In the 11-11 test a card
+// stayed the same for 47 s.
 func TestIdleTaskCardShowsItIsAlive(t *testing.T) {
 	env := newTaskEnv(t)
 	env.e.taskCards.idleBeat = 150 * time.Millisecond
 	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理纪要", Background: yes(), Step: "写清单"})
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Summary: "在列负责人"})
 	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
 	waitUntil(t, "three idle beats", func() bool { _, up := env.p.cards(); return len(up) >= 3 })
 	sent, up := env.p.cards()
-	if up[0].view.Status != "仍在进行：写清单" || up[1].view.Status != "写清单" || up[2].view.Status != "仍在进行：写清单" {
-		t.Fatalf("idle statuses: %q %q %q", up[0].view.Status, up[1].view.Status, up[2].view.Status)
+	if sent[0].view.Line != "写清单 · 不到 1 分钟" || up[0].view.Line != "在列负责人 · 不到 1 分钟" || up[1].view.Line != "写清单 · 不到 1 分钟" || up[2].view.Line != "在列负责人 · 不到 1 分钟" {
+		t.Fatalf("idle lines: %q %q %q %q", sent[0].view.Line, up[0].view.Line, up[1].view.Line, up[2].view.Line)
 	}
 	prev := sent[0].view
 	for _, u := range up {
@@ -389,7 +394,7 @@ func TestIdleTaskCardShowsItIsAlive(t *testing.T) {
 	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "核对负责人"})
 	waitUntil(t, "new step", func() bool {
 		_, up := env.p.cards()
-		return up[len(up)-1].view.Status == "核对负责人"
+		return up[len(up)-1].view.Line == "核对负责人 · 不到 1 分钟"
 	})
 }
 
@@ -429,8 +434,8 @@ func TestIdleTaskCardAsksTheQuickModel(t *testing.T) {
 	env.e.taskCards.summaryGap = 0
 	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "写报告", Background: yes()})
 	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a", Step: "写报告正文"})
-	waitUntil(t, "first quick line", func() bool { return lastRecent(env) == "最近进展：正在写第1部分" })
-	waitUntil(t, "idle quick line", func() bool { return lastRecent(env) == "最近进展：正在写第2部分" })
+	waitUntil(t, "first quick line", func() bool { return lastLine(env) == "正在写第1部分" })
+	waitUntil(t, "idle quick line", func() bool { return lastLine(env) == "正在写第2部分" })
 	if n := len(calls()); n < 2 {
 		t.Fatalf("quick calls=%d", n)
 	}
@@ -453,8 +458,8 @@ func settledView(t *testing.T, env *taskEnv) TaskCardView {
 // goes to the details panel as written.
 func TestFailedTaskCardShowsAChineseLine(t *testing.T) {
 	for _, tc := range []struct{ summary, line string }{
-		{"Background command \"清理临时目录\" failed with exit code 2", "命令出错结束（退出码 2），原始信息在“详情”里。"},
-		{"Agent \"整理纪要\" failed: API Error: 500", "出错结束，原始信息在“详情”里。"},
+		{"Background command \"清理临时目录\" failed with exit code 2", "命令出错（退出码 2），原文在详情里"},
+		{"Agent \"整理纪要\" failed: API Error: 500", "出错结束，原文在详情里"},
 		{"没找到这一周的纪要", "没找到这一周的纪要"},
 	} {
 		env := newTaskEnv(t)
@@ -462,8 +467,8 @@ func TestFailedTaskCardShowsAChineseLine(t *testing.T) {
 		waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
 		env.task(TaskEvent{Kind: TaskEnded, TaskID: "a", Status: "failed", Summary: tc.summary})
 		v := settledView(t, env)
-		if v.State != TaskCardFailed || v.Summary != tc.line {
-			t.Fatalf("%q: state=%s summary=%q, want %q", tc.summary, v.State, v.Summary, tc.line)
+		if v.State != TaskCardFailed || v.Label != "失败" || v.Summary != tc.line || v.Line != tc.line+" · 用时不到 1 分钟" {
+			t.Fatalf("%q: state=%s label=%s line=%q, want %q", tc.summary, v.State, v.Label, v.Line, tc.line)
 		}
 		if tc.line == tc.summary {
 			if v.Full != "" {
@@ -482,7 +487,7 @@ func TestStoppedTaskCardHidesTheRawText(t *testing.T) {
 	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "a", Status: "stopped", Summary: "Background command \"搜索会议\" failed with exit code 144"})
 	v := settledView(t, env)
-	if v.State != TaskCardStopped || v.Status != "后台任务 · 已停止：搜索会议" || v.Summary != "" || !strings.Contains(v.Full, "exit code 144") {
+	if v.State != TaskCardStopped || v.Title != "搜索会议" || v.Label != "已停止" || v.Line != "用时不到 1 分钟" || !strings.Contains(v.Full, "exit code 144") {
 		t.Fatalf("stopped=%+v", v)
 	}
 }
@@ -553,12 +558,17 @@ func TestLongTaskResultFallsBackToFirstSentence(t *testing.T) {
 }
 
 // A short Chinese result stays as written, with nothing extra in the details.
+// The line carries the running time in whole minutes.
 func TestShortTaskResultStaysAsWritten(t *testing.T) {
 	env := newTaskEnv(t)
-	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理纪要", Background: yes()})
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "a", Description: "整理纪要", Background: yes(), Step: "读纪要", Elapsed: 3*time.Minute + 10*time.Second})
 	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	if sent, _ := env.p.cards(); sent[0].view.Line != "读纪要 · 3 分钟" {
+		t.Fatalf("live line=%q", sent[0].view.Line)
+	}
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "a", Status: "completed", Summary: "整理好了 8 场会的要点。今天的周会没有纪要。"})
-	if v := settledView(t, env); v.Summary != "整理好了 8 场会的要点。今天的周会没有纪要。" || v.Full != "" {
+	if v := settledView(t, env); v.Summary != "整理好了 8 场会的要点。今天的周会没有纪要。" || v.Full != "" ||
+		v.Label != "已完成" || v.Line != "整理好了 8 场会的要点。今天的周会没有纪要 · 用时 3 分钟" {
 		t.Fatalf("settled=%+v", v)
 	}
 }

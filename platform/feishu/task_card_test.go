@@ -15,10 +15,9 @@ func TestTaskCardLiveAndSettled(t *testing.T) {
 	store, _ := loadLiveCards(filepath.Join(t.TempDir(), "live.json"))
 	p.liveCards = store
 	live := core.TaskCardView{
-		State: core.TaskCardRunning, Title: "后台任务 · 正在进行：按客户整理文件", Status: "读取文件", Elapsed: "已跑 3 分钟", Recent: "最近进展：正在读第 3 个客户",
-		Hint:         "在后台进行，不影响聊天，你可以接着跟我说话；做完我会告诉你。要停的话直接跟我说。",
+		State: core.TaskCardRunning, Title: "按客户整理文件", Label: "进行中", Line: "读取文件 · 3 分钟",
 		DetailsTitle: "详情", Details: []string{"读取文件", "编辑文件"}, SessionKey: "feishu:oc:u",
-		Interrupted: "后台任务 · 已中断：按客户整理文件",
+		Interrupted: "按客户整理文件 · 已中断",
 	}
 	h, err := p.SendTaskCard(context.Background(), replyContext{chatID: "oc"}, live)
 	if err != nil {
@@ -30,26 +29,28 @@ func TestTaskCardLiveAndSettled(t *testing.T) {
 		t.Fatalf("first call=%+v", created)
 	}
 	text := plainJSON(parsePreviewJSON(t, created.body["data"]))
-	for _, want := range []string{"**后台任务 · 正在进行：按客户整理文件**", "读取文件", "已跑 3 分钟", "最近进展：正在读第 3 个客户", `"tag":"collapsible_panel"`, "· 编辑文件",
-		"<font color='grey'>在后台进行，不影响聊天，你可以接着跟我说话；做完我会告诉你。要停的话直接跟我说。</font>"} {
+	for _, want := range []string{`"title":{"content":"按客户整理文件","tag":"plain_text"}`, `"template":"blue"`,
+		`"text_tag_list":[{"color":"blue","tag":"text_tag","text":{"content":"进行中","tag":"plain_text"}}]`,
+		"读取文件 · 3 分钟", `"tag":"collapsible_panel"`, `"expanded":false`, "· 编辑文件"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("live card lacks %s: %s", want, text)
 		}
 	}
+	// One line in the body, then the folded details.
+	if els := cardElements(t, text); len(els) != 2 || els[1]["tag"] != "collapsible_panel" {
+		t.Errorf("live card body: %s", text)
+	}
 	if strings.Contains(text, `"tag":"button"`) || strings.Contains(text, `"confirm"`) {
 		t.Errorf("task cards carry no button: %s", text)
-	}
-	if strings.Index(text, "最近进展") > strings.Index(text, "在后台进行") {
-		t.Errorf("the hint goes under the latest progress: %s", text)
 	}
 	if strings.Contains(text, "streaming_mode") {
 		t.Errorf("task cards do not use streaming mode: %s", text)
 	}
-	if e, ok := store.entries["om_preview"]; !ok || e.Text != "后台任务 · 已中断：按客户整理文件" || e.CardID != "card_fixture" {
+	if e, ok := store.entries["om_preview"]; !ok || e.Text != "按客户整理文件 · 已中断" || e.CardID != "card_fixture" {
 		t.Fatalf("live card not recorded: %+v", store.entries)
 	}
 
-	done := core.TaskCardView{State: core.TaskCardCompleted, Title: "按客户整理文件", Status: "后台任务 · ✓ 已完成：按客户整理文件", Summary: "共 200 个文件", DetailsTitle: "详情", Details: live.Details}
+	done := core.TaskCardView{State: core.TaskCardCompleted, Title: "按客户整理文件", Label: "已完成", Line: "共 200 个文件 · 用时 5 分钟", Summary: "共 200 个文件", DetailsTitle: "详情", Details: live.Details}
 	if err := p.UpdateTaskCard(context.Background(), h, done); err != nil {
 		t.Fatal(err)
 	}
@@ -58,8 +59,8 @@ func TestTaskCardLiveAndSettled(t *testing.T) {
 		t.Fatalf("update=%+v", last)
 	}
 	settled := plainJSON(parsePreviewJSON(t, last.body["card"].(map[string]any)["data"]))
-	if !strings.Contains(settled, "<font color='green'>后台任务 · ✓ 已完成：按客户整理文件</font>") || !strings.Contains(settled, "共 200 个文件") ||
-		strings.Contains(settled, "在后台进行") || strings.Contains(settled, "已跑") || !strings.Contains(settled, "collapsible_panel") {
+	if !strings.Contains(settled, `"template":"green"`) || !strings.Contains(settled, `"content":"已完成"`) || !strings.Contains(settled, `"content":"共 200 个文件 · 用时 5 分钟"`) ||
+		strings.Contains(settled, "custom_icon") || strings.Contains(settled, spinnerGlyphs[0]) || len(cardElements(t, settled)) != 2 {
 		t.Fatalf("settled card: %s", settled)
 	}
 	if len(store.entries) != 0 {
@@ -73,12 +74,25 @@ func TestFailedTaskCardKeepsTheRawErrorInDetails(t *testing.T) {
 	_, p := newPreviewFixture(t)
 	raw := "Background command \"清理\" failed with exit code 1\n<stderr> rm: /tmp/x: denied"
 	text := plainJSON(parsePreviewJSON(t, p.taskCardJSON(core.TaskCardView{
-		State: core.TaskCardFailed, Status: "后台任务 · 没做成：清理", Summary: "命令出错结束（退出码 1），原始信息在“详情”里。",
+		State: core.TaskCardFailed, Title: "清理", Label: "失败", Line: "命令出错（退出码 1），原文在详情里 · 用时 2 分钟", Summary: "命令出错（退出码 1），原文在详情里",
 		DetailsTitle: "详情", Details: []string{"运行命令"}, FullTitle: "原文", Full: raw,
 	})))
-	if !strings.Contains(text, "<font color='red'>后台任务 · 没做成：清理</font>") || !strings.Contains(text, "命令出错结束（退出码 1）") {
+	if !strings.Contains(text, `"template":"red"`) || !strings.Contains(text, `"content":"失败"`) || !strings.Contains(text, "命令出错（退出码 1），原文在详情里 · 用时 2 分钟") {
 		t.Fatalf("failed card: %s", text)
 	}
+	for _, el := range cardElements(t, text) {
+		b, _ := json.Marshal(el)
+		if inPanel := el["tag"] == "collapsible_panel"; inPanel != strings.Contains(string(b), "failed with exit code 1") {
+			t.Fatalf("raw error belongs in the details panel only: %s", text)
+		}
+	}
+	if !strings.Contains(text, `"tag":"div","text":{"content":"Background command \"清理\" failed with exit code 1\n<stderr> rm: /tmp/x: denied","tag":"plain_text"`) {
+		t.Fatalf("raw error not kept as plain text: %s", text)
+	}
+}
+
+func cardElements(t *testing.T, text string) []map[string]any {
+	t.Helper()
 	var card struct {
 		Body struct {
 			Elements []map[string]any `json:"elements"`
@@ -87,13 +101,21 @@ func TestFailedTaskCardKeepsTheRawErrorInDetails(t *testing.T) {
 	if err := json.Unmarshal([]byte(text), &card); err != nil {
 		t.Fatal(err)
 	}
-	for _, el := range card.Body.Elements {
-		b, _ := json.Marshal(el)
-		if inPanel := el["tag"] == "collapsible_panel"; inPanel != strings.Contains(string(b), "failed with exit code 1") {
-			t.Fatalf("raw error belongs in the details panel only: %s", text)
+	return card.Body.Elements
+}
+
+// Stopped and interrupted cards are grey; the text tag uses its own name for grey.
+func TestEndedTaskCardGreyHeader(t *testing.T) {
+	_, p := newPreviewFixture(t)
+	text := plainJSON(parsePreviewJSON(t, p.taskCardJSON(core.TaskCardView{
+		State: core.TaskCardInterrupted, Title: "整理纪要", Label: "已中断", Line: "用时 4 分钟",
+	})))
+	for _, want := range []string{`"template":"grey"`, `"color":"neutral"`, `"content":"已中断"`, `"content":"用时 4 分钟"`, `"summary":{"content":"整理纪要 · 已中断"}`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("interrupted card lacks %s: %s", want, text)
 		}
 	}
-	if !strings.Contains(text, `"tag":"div","text":{"content":"Background command \"清理\" failed with exit code 1\n<stderr> rm: /tmp/x: denied","tag":"plain_text"`) {
-		t.Fatalf("raw error not kept as plain text: %s", text)
+	if els := cardElements(t, text); len(els) != 1 {
+		t.Errorf("interrupted card body: %s", text)
 	}
 }
