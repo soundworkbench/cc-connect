@@ -12519,7 +12519,7 @@ func (e *Engine) renderCardForPlatformWorkspace(p Platform, card *Card, workspac
 	if card == nil {
 		return nil
 	}
-	out := &Card{Compact: card.Compact}
+	out := &Card{Compact: card.Compact, Shared: card.Shared, Toast: card.Toast}
 	if card.Header != nil {
 		h := *card.Header
 		out.Header = &h

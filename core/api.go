@@ -97,6 +97,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/assistant/rotate", s.handleAssistantRotate)
 	s.mux.HandleFunc("/send", s.handleSend)
 	s.mux.HandleFunc("/decision", s.handleDecision)
+	s.mux.HandleFunc("/decision/void", s.handleDecisionVoid)
 	s.mux.HandleFunc("/form", s.handleForm)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
@@ -328,6 +329,62 @@ func (s *APIServer) handleDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
+}
+
+// DecisionVoidRequest is the JSON body for POST /decision/void.
+type DecisionVoidRequest struct {
+	ID string `json:"id"`
+}
+
+// handleDecisionVoid withdraws a pending decision or form card by its ID. The
+// card is found in whichever project sent it.
+func (s *APIServer) handleDecisionVoid(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var req DecisionVoidRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.ID = strings.TrimSpace(req.ID)
+	if req.ID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	var engine *Engine
+	enabled := false
+	s.mu.RLock()
+	for _, e := range s.engines {
+		if e.decisions == nil {
+			continue
+		}
+		enabled = true
+		if d := e.decisions.Get(req.ID); d != nil {
+			engine = s.engines[d.Project]
+			break
+		}
+	}
+	s.mu.RUnlock()
+	switch {
+	case !enabled:
+		http.Error(w, "decision cards are not enabled", http.StatusBadRequest)
+		return
+	case engine == nil:
+		http.Error(w, ErrDecisionNotFound.Error()+": "+req.ID, http.StatusNotFound)
+		return
+	}
+	cardErr, err := engine.VoidDecision(req.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	resp := map[string]string{"status": "ok", "id": req.ID, "card": "updated"}
+	if cardErr != nil {
+		resp["card"] = "not updated: " + cardErr.Error()
+	}
+	apiJSON(w, http.StatusOK, resp)
 }
 
 func (s *APIServer) handleForm(w http.ResponseWriter, r *http.Request) {

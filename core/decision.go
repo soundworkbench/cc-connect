@@ -20,7 +20,8 @@ import (
 // without holding its turn open. The card carries one button per option.
 // A tap (or the deadline, when the card has a default) is delivered back to
 // the session as an ordinary scheduled prompt, and the card is rewritten in
-// place so it can no longer be used.
+// place so it can no longer be used. A pending card can also be voided: it
+// greys out, its default is cancelled and nothing reaches the session.
 
 const (
 	DefaultDecisionHours = 12
@@ -28,6 +29,7 @@ const (
 	decisionPending  = "pending"
 	decisionAnswered = "answered" // user tapped an option
 	decisionExpired  = "expired"  // deadline passed, default applied
+	decisionVoided   = "voided"   // withdrawn by the sender; never delivered
 
 	decisionRetryInterval = 30 * time.Second
 
@@ -36,6 +38,9 @@ const (
 	decisionButtonOptions = 6
 	decisionMaxOptions    = 20
 	decisionChoiceField   = "choice"
+
+	decisionVoidLabel = "已作废"
+	decisionVoidToast = "这张卡已作废，选择不会生效"
 )
 
 var decisionZone = time.FixedZone("CST", 8*3600)
@@ -257,6 +262,36 @@ func (s *DecisionStore) SetDelivered(id string, v bool) {
 	}
 }
 
+// ErrDecisionNotFound is returned for an unknown decision ID.
+var ErrDecisionNotFound = errors.New("decision not found")
+
+// Void withdraws a pending decision or form: its default is cancelled and it is
+// never delivered. Voiding a voided decision again succeeds and changes
+// nothing; an answered or expired one cannot be voided. The returned value is
+// a copy.
+func (s *DecisionStore) Void(id string) (*Decision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.find(id)
+	if d == nil {
+		return nil, ErrDecisionNotFound
+	}
+	switch d.State {
+	case decisionVoided:
+	case decisionPending:
+		// Marked delivered so the answer loop never picks it up and the week-old
+		// cleanup drops it like any settled card.
+		d.State, d.ResolvedAt, d.Delivered = decisionVoided, time.Now(), true
+		if err := s.saveLocked(); err != nil {
+			return nil, fmt.Errorf("persist: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("decision %s is already %s", id, d.State)
+	}
+	c := *d
+	return &c, nil
+}
+
 // Due returns copies of pending decisions whose default deadline has passed.
 func (s *DecisionStore) Due(now time.Time) []*Decision {
 	s.mu.Lock()
@@ -277,7 +312,7 @@ func (s *DecisionStore) Undelivered() []*Decision {
 	defer s.mu.Unlock()
 	var out []*Decision
 	for _, d := range s.list {
-		if d.State != decisionPending && !d.Delivered {
+		if d.State != decisionPending && d.State != decisionVoided && !d.Delivered {
 			c := *d
 			out = append(out, &c)
 		}
@@ -315,10 +350,21 @@ func decisionClock(t time.Time) string {
 	return t.In(decisionZone).Format("01-02 15:04")
 }
 
+// buildDecisionCard renders a decision or form card in its current state. It
+// is a shared card, so a later rewrite (a tap, the deadline, a void) reaches
+// everyone who sees it.
 func buildDecisionCard(d *Decision) *Card {
+	var c *Card
 	if d.Form != nil {
-		return formCard(d)
+		c = formCard(d)
+	} else {
+		c = decisionCard(d)
 	}
+	c.Shared = true
+	return c
+}
+
+func decisionCard(d *Decision) *Card {
 	switch d.State {
 	case decisionAnswered:
 		cb := NewCard().Title("✅ 已决定："+d.ChosenLabel(), "green")
@@ -339,13 +385,21 @@ func buildDecisionCard(d *Decision) *Card {
 	case d.HasDefault:
 		title, color = "需要你决定", "blue"
 	}
+	void := d.State == decisionVoided
 	cb := NewCard().Title(title, color)
+	if void {
+		cb.card.Header.Color, cb.card.Header.Tag = "grey", decisionVoidLabel
+	}
 	cb.Markdown("**" + d.Question + "**")
 	if d.Note != "" {
 		cb.Markdown(d.Note)
 	}
 	if d.usesForm() {
-		cb.card.Elements = append(cb.card.Elements, decisionForm(d))
+		form := decisionForm(d)
+		if void {
+			form.Disabled, form.DisabledTip, form.Confirm = true, decisionVoidLabel, nil
+		}
+		cb.card.Elements = append(cb.card.Elements, form)
 	} else {
 		for i, opt := range d.Options {
 			btn := Btn(opt, "default", decisionActionValue(d.ID, i+1))
@@ -356,12 +410,18 @@ func buildDecisionCard(d *Decision) *Card {
 			case d.HasDefault && i == 0:
 				btn.Text, btn.Type = opt+"（推荐）", "primary"
 			}
+			if void {
+				btn.Disabled, btn.DisabledTip, btn.Confirm = true, decisionVoidLabel, nil
+			}
 			cb.Buttons(btn)
 		}
 	}
-	if d.HasDefault {
+	switch {
+	case void:
+		cb.Note(decisionClock(d.ResolvedAt) + " 已作废，不会自动处理")
+	case d.HasDefault:
 		cb.Note(fmt.Sprintf("%s 前未选择，将按推荐处理：%s", decisionClock(d.Deadline), d.Options[0]))
-	} else {
+	default:
 		cb.Note("需要你选择，不会自动处理")
 	}
 	return cb.Build()
@@ -493,6 +553,9 @@ func (e *Engine) handleDecisionTap(args string) *Card {
 		return buildDecisionCard(d)
 	}
 	if d := e.decisions.Get(f[0]); d != nil {
+		if d.State == decisionVoided {
+			return &Card{Toast: decisionVoidToast}
+		}
 		return buildDecisionCard(d) // already answered or expired: show how it ended
 	}
 	cardActionDropped("decision", f[0], "unknown_decision")
@@ -553,8 +616,11 @@ func (e *Engine) handleDecisionForm(args string) *Card {
 		cardActionDropped("decision_form", id, "unknown_decision")
 		return nil
 	}
-	if d.State == decisionPending {
+	switch d.State {
+	case decisionPending:
 		return &Card{Toast: "请先选择"}
+	case decisionVoided:
+		return &Card{Toast: decisionVoidToast}
 	}
 	return buildDecisionCard(d)
 }
@@ -589,7 +655,7 @@ func (e *Engine) expireDecisions() {
 			continue
 		}
 		if r, ok := e.decisions.Resolve(d.ID, 1, decisionExpired); ok {
-			e.patchDecisionCard(r)
+			_ = e.patchDecisionCard(r) // logged; the answer is delivered either way
 		}
 	}
 	for _, d := range e.decisions.Undelivered() {
@@ -613,22 +679,41 @@ func (e *Engine) expireDecisions() {
 	}
 }
 
-func (e *Engine) patchDecisionCard(d *Decision) {
+func (e *Engine) patchDecisionCard(d *Decision) error {
 	if d.MessageID == "" {
-		return
+		return errors.New("the card has no message ID")
 	}
 	_, p, _, err := e.resolveOutboundSessionTarget(d.SessionKey, false)
 	if err != nil {
 		slog.Warn("decision: card update skipped", "id", d.ID, "error", err)
-		return
+		return err
 	}
 	patcher, ok := p.(CardPatcher)
 	if !ok {
-		return
+		return fmt.Errorf("platform %s: %w", p.Name(), ErrNotSupported)
 	}
 	if err := patcher.PatchCard(e.ctx, d.MessageID, d.SessionKey, e.renderCardForPlatform(p, buildDecisionCard(d))); err != nil {
 		slog.Warn("decision: card update failed", "id", d.ID, "error", err)
+		return err
 	}
+	return nil
+}
+
+// VoidDecision withdraws a pending decision or form card: the card greys out
+// with its buttons disabled, the default is cancelled, and a later tap only
+// shows a notice. The void is stored before the card is rewritten, so it holds
+// even when the rewrite fails; that failure is returned as cardErr.
+func (e *Engine) VoidDecision(id string) (cardErr error, err error) {
+	if e.decisions == nil {
+		return nil, errors.New("decision cards are not enabled")
+	}
+	d, err := e.decisions.Void(id)
+	if err != nil {
+		return nil, err
+	}
+	e.wakeDecisions()
+	slog.Info("decision: voided", "id", id)
+	return e.patchDecisionCard(d), nil
 }
 
 // deliverDecision hands the answer to the session as a scheduled prompt.

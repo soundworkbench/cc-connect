@@ -214,6 +214,7 @@ type Platform struct {
 	// session key, enabling async card refreshes via the Patch API.
 	cardActionMsgMu  sync.Mutex
 	cardActionMsgIDs map[string]string // sessionKey → messageID
+	cardActionV2     map[string]bool   // sessionKey → that card is JSON 2.0
 	// activeThreadSessions tracks thread sessionKeys that have already been
 	// accepted by the bot. In group chats with thread_isolation, once a thread
 	// has been engaged (the first @bot message), subsequent attachment-only
@@ -958,6 +959,8 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	}
 
 	actionVal, _ := event.Event.Action.Value["action"].(string)
+	// A click on a 2.0 card must be answered with a 2.0 card.
+	v2 := callbackFromV2(event.Event.Action.Value)
 
 	// select_static callbacks put the chosen value in event.Event.Action.Option
 	if actionVal == "" && event.Event.Action.Option != "" {
@@ -1028,7 +1031,11 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 			if p.cardActionMsgIDs == nil {
 				p.cardActionMsgIDs = make(map[string]string)
 			}
+			if p.cardActionV2 == nil {
+				p.cardActionV2 = make(map[string]bool)
+			}
 			p.cardActionMsgIDs[sessionKey] = messageID
+			p.cardActionV2[sessionKey] = v2
 			p.cardActionMsgMu.Unlock()
 		}
 		// Feishu uses native form checker for delete-mode toggle,
@@ -1056,7 +1063,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 					return &callback.CardActionTriggerResponse{
 						Card: &callback.Card{
 							Type: "raw",
-							Data: renderCardMap(card, sessionKey),
+							Data: renderCallbackCardMap(card, sessionKey, v2),
 						},
 					}, nil
 				}
@@ -1123,7 +1130,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		return &callback.CardActionTriggerResponse{
 			Card: &callback.Card{
 				Type: "raw",
-				Data: renderCardMap(cb.Build(), sessionKey),
+				Data: renderCallbackCardMap(cb.Build(), sessionKey, v2),
 			},
 		}, nil
 	}
@@ -1154,7 +1161,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		return &callback.CardActionTriggerResponse{
 			Card: &callback.Card{
 				Type: "raw",
-				Data: renderCardMap(cb.Build(), sessionKey),
+				Data: renderCallbackCardMap(cb.Build(), sessionKey, v2),
 			},
 		}, nil
 	}
@@ -1192,7 +1199,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 				return &callback.CardActionTriggerResponse{
 					Card: &callback.Card{
 						Type: "raw",
-						Data: renderCardMap(cb.Build(), sessionKey),
+						Data: renderCallbackCardMap(cb.Build(), sessionKey, v2),
 					},
 				}, nil
 			}

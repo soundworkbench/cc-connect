@@ -30,6 +30,12 @@ type fakeCardKit struct {
 	maxIn    int
 	failBody string // when set, body updates answer with this code in an HTTP 400
 	ordinal  int
+	// closedCode, when set, is how body updates are answered while Feishu has
+	// closed streaming on the card; a settings call that turns streaming on
+	// clears it, unless rejectReopen is set.
+	closedCode   string
+	rejectReopen bool
+	reopens      int
 }
 
 type cardOp struct {
@@ -85,11 +91,19 @@ func newFakeCardKit(t *testing.T, latency func(n int) time.Duration) (*fakeCardK
 		switch {
 		case kind == "body" && f.failBody != "":
 			reply = fmt.Sprintf(`{"code":%s,"msg":"fixture"}`, f.failBody)
+		case kind == "body" && f.closedCode != "":
+			reply = fmt.Sprintf(`{"code":%s,"msg":"fixture: streaming closed"}`, f.closedCode)
+		case kind == "settings" && f.rejectReopen && strings.Contains(fmt.Sprint(body["settings"]), `"streaming_mode":true`):
+			reply = `{"code":300309,"msg":"fixture: reopen rejected"}`
 		case op.seq <= f.lastSeq:
 			reply = `{"code":300317,"msg":"sequence number compare failed"}`
 		default:
 			op.accepted = true
 			f.lastSeq = op.seq
+			if kind == "settings" && strings.Contains(fmt.Sprint(body["settings"]), `"streaming_mode":true`) {
+				f.closedCode = ""
+				f.reopens++
+			}
 		}
 		f.ops = append(f.ops, op)
 		f.mu.Unlock()
@@ -449,6 +463,74 @@ func TestBodyUpdateFailureFallsBackToFullCard(t *testing.T) {
 		defer h.live.mu.Unlock()
 		return h.live.fallback
 	})
+}
+
+// Feishu closes streaming ten minutes in; the card turns it back on and goes on
+// streaming element by element, with no full-card updates.
+func TestStreamClosedByServerIsReopened(t *testing.T) {
+	for _, code := range []string{"200850", "300309"} {
+		t.Run(code, func(t *testing.T) {
+			f, p := newFakeCardKit(t, fixedLatency(50*time.Millisecond))
+			h := startLivePreview(t, p, nil)
+			feedModelText(p, h, 60, 60)
+			time.Sleep(300 * time.Millisecond)
+			f.mu.Lock()
+			f.closedCode = code
+			cardsBefore := 0
+			for _, o := range f.ops {
+				if o.kind == "card" {
+					cardsBefore++
+				}
+			}
+			f.mu.Unlock()
+			feedModelText(p, h, 60, 240)
+			waitPreview(t, func() bool {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				return f.reopens > 0
+			})
+			time.Sleep(500 * time.Millisecond)
+			h.live.mu.Lock()
+			fallback, reopened, shown := h.live.fallback, h.live.reopened, h.live.shown
+			h.live.mu.Unlock()
+			if fallback || reopened != 1 {
+				t.Fatalf("fallback=%v reopened=%d, want streaming reopened once", fallback, reopened)
+			}
+			lastBody, cards := "", 0
+			for _, o := range f.snapshot() {
+				if o.kind == "body" && o.accepted {
+					lastBody = o.text
+				}
+				if o.kind == "card" {
+					cards++
+				}
+			}
+			if cards != cardsBefore {
+				t.Fatalf("%d full-card updates after the stream closed, want none", cards-cardsBefore)
+			}
+			if got := len([]rune(lastBody)); got < shown-60 || got < 60 {
+				t.Fatalf("streaming stalled after reopening: card has %d of %d chars", got, shown)
+			}
+		})
+	}
+}
+
+// When turning streaming back on fails, the card moves to full-card updates.
+func TestStreamReopenFailureFallsBackToFullCard(t *testing.T) {
+	f, p := newFakeCardKit(t, fixedLatency(50*time.Millisecond))
+	f.closedCode, f.rejectReopen = "200850", true
+	h := startLivePreview(t, p, nil)
+	feedModelText(p, h, 60, 120)
+	waitPreview(t, func() bool {
+		h.live.mu.Lock()
+		defer h.live.mu.Unlock()
+		return h.live.fallback
+	})
+	h.live.mu.Lock()
+	defer h.live.mu.Unlock()
+	if h.live.reopened != 0 {
+		t.Fatalf("reopened=%d after a rejected reopen", h.live.reopened)
+	}
 }
 
 // The settled card is the last thing the server sees, after every body update.

@@ -220,8 +220,13 @@ func TestRenderCardMap_DeleteModeUsesCheckerForm(t *testing.T) {
 	if !strings.Contains(s, `"name":"delete_mode_submit"`) || !strings.Contains(s, `"name":"delete_mode_cancel"`) {
 		t.Fatalf("expected button names inside form, got %s", s)
 	}
-	if !strings.Contains(s, `"action_type":"form_submit"`) || strings.Contains(s, `form_action_type`) || !strings.Contains(s, `act:/delete-mode form-submit`) {
-		t.Fatalf("expected form submit action, got %s", s)
+	// A 2.0 card: the submit button is bound with form_action_type; the 1.0
+	// key action_type would leave it doing nothing.
+	if !strings.Contains(s, `"schema":"2.0"`) || !strings.Contains(s, `"form_action_type":"submit"`) || strings.Contains(s, `"action_type":"form_submit"`) || !strings.Contains(s, `act:/delete-mode form-submit`) {
+		t.Fatalf("expected a 2.0 form submit action, got %s", s)
+	}
+	if !strings.Contains(s, `"card_schema":"2"`) {
+		t.Fatalf("callbacks do not mark the 2.0 card, got %s", s)
 	}
 	if strings.Contains(s, `act:/delete-mode toggle`) {
 		t.Fatalf("expected no toggle buttons in rendered card, got %s", s)

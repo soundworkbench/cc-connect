@@ -97,13 +97,14 @@ func (p *interactivePlatform) PatchCard(ctx context.Context, messageID, sessionK
 func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string, card *core.Card) error {
 	p.cardActionMsgMu.Lock()
 	msgID := p.cardActionMsgIDs[sessionKey]
+	v2 := p.cardActionV2[sessionKey]
 	p.cardActionMsgMu.Unlock()
 
 	if msgID == "" {
 		return fmt.Errorf("%s: no tracked card messageID for session %q", p.tag(), sessionKey)
 	}
 
-	cardJSON := renderCard(card, sessionKey)
+	cardJSON := marshalCard(renderCallbackCardMap(card, sessionKey, v2))
 	req := larkim.NewPatchMessageReqBuilder().
 		MessageId(msgID).
 		Body(larkim.NewPatchMessageReqBodyBuilder().
@@ -124,9 +125,10 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 	})
 }
 
-// renderCardMap converts a core.Card into the Feishu Interactive Card map
-// using the v1 format. Used both for message API (via renderCard) and
-// callback responses (CardActionTriggerResponse).
+// renderCardMap converts a core.Card into the Feishu Interactive Card map.
+// Compact and shared cards, cards with a form, and the delete-mode form use
+// card JSON 2.0; the rest use the classic 1.0 layout. Used both for message
+// API (via renderCard) and callback responses (CardActionTriggerResponse).
 func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 	result := map[string]any{
 		"config": map[string]any{
@@ -139,6 +141,12 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 	if card.Compact {
 		return renderCompactCardMap(card, sessionKey)
 	}
+	if transformed, ok := renderDeleteModeCheckerCard(card); ok {
+		return transformed
+	}
+	if card.Shared || hasForm(card) {
+		return renderSharedCardMap(card, sessionKey)
+	}
 
 	if card.Header != nil && card.Header.Title != "" {
 		color := card.Header.Color
@@ -149,9 +157,6 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 			"title":    plainText(card.Header.Title),
 			"template": color,
 		}
-	}
-	if transformed, ok := renderDeleteModeCheckerCard(card, result); ok {
-		return transformed
 	}
 
 	var elements []map[string]any
@@ -293,8 +298,6 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 				"tag":      "note",
 				"elements": []map[string]any{plainText(e.Text)},
 			})
-		case core.CardForm:
-			elements = append(elements, renderForm(e, sessionKey))
 		}
 	}
 
@@ -304,6 +307,15 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 
 	result["elements"] = elements
 	return result
+}
+
+func hasForm(card *core.Card) bool {
+	for _, elem := range card.Elements {
+		if _, ok := elem.(core.CardForm); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // compactCardSpacing is the gap between elements in a compact card;
@@ -326,19 +338,12 @@ func renderCompactCardMap(card *core.Card, sessionKey string) map[string]any {
 		if btnType == "" {
 			btnType = "default"
 		}
-		valMap := map[string]string{"action": value}
-		if sessionKey != "" {
-			valMap["session_key"] = sessionKey
-		}
-		for k, v := range extra {
-			valMap[k] = v
-		}
 		return map[string]any{
 			"tag":       "button",
 			"text":      plainText(text),
 			"type":      btnType,
 			"width":     "fill",
-			"behaviors": []map[string]any{{"type": "callback", "value": valMap}},
+			"behaviors": []map[string]any{{"type": "callback", "value": v2CallbackValue(value, sessionKey, extra)}},
 		}
 	}
 	grey := func(text string) map[string]any {
@@ -399,7 +404,9 @@ type deleteModeCheckerRow struct {
 	checked bool
 }
 
-func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[string]any, bool) {
+// renderDeleteModeCheckerCard turns the delete-mode session list into a 2.0
+// form: one checker per session, submitted at once.
+func renderDeleteModeCheckerCard(card *core.Card) (map[string]any, bool) {
 	if card == nil {
 		return nil, false
 	}
@@ -473,90 +480,33 @@ func renderDeleteModeCheckerCard(card *core.Card, base map[string]any) (map[stri
 		if n.Tag == "delete-mode-selected-count" {
 			continue
 		}
-		elements = append(elements, map[string]any{
-			"tag":      "note",
-			"elements": []map[string]any{plainText(n.Text)},
-		})
+		elements = append(elements, v2Note(n.Text))
 	}
-	formElements := append([]map[string]any{}, formRowElements...)
-
-	buttonColumns := []map[string]any{
-		{
-			"tag":            "column",
-			"width":          "auto",
-			"vertical_align": "center",
-			"elements": []map[string]any{
-				{
-					"tag":         "button",
-					"text":        plainText(submitText),
-					"type":        "danger",
-					"name":        "delete_mode_submit",
-					"action_type": "form_submit", // JSON 1.0 card
-					"value":       map[string]string{"action": "act:/delete-mode form-submit"},
-				},
-			},
-		},
-	}
-	if cancelText != "" {
-		buttonColumns = append(buttonColumns, map[string]any{
-			"tag":            "column",
-			"width":          "auto",
-			"vertical_align": "center",
-			"elements": []map[string]any{
-				{
-					"tag":   "button",
-					"text":  plainText(cancelText),
-					"type":  "default",
-					"name":  "delete_mode_cancel",
-					"value": map[string]string{"action": "act:/delete-mode cancel"},
-				},
-			},
-		})
-	}
-	formElements = append(formElements, map[string]any{
-		"tag":              "column_set",
-		"horizontal_align": "left",
-		"columns":          buttonColumns,
-	})
-
+	submit := v2Button(core.CardButton{Text: submitText, Type: "danger", Value: "act:/delete-mode form-submit"}, "")
+	submit["name"] = "delete_mode_submit"
+	submit["form_action_type"] = "submit"
+	formElements := append(append([]map[string]any{}, formRowElements...), submit)
 	elements = append(elements, map[string]any{
 		"tag":      "form",
 		"name":     "delete_mode_form",
 		"elements": formElements,
 	})
-
+	// Cancel sits under the form: a plain callback, not a form action.
+	if cancelText != "" {
+		cancel := v2Button(core.CardButton{Text: cancelText, Value: "act:/delete-mode cancel"}, "")
+		cancel["name"] = "delete_mode_cancel"
+		elements = append(elements, cancel)
+	}
 	for _, row := range navRows {
-		actions := make([]map[string]any, 0, len(row.Buttons))
+		var buttons []map[string]any
 		for _, btn := range row.Buttons {
-			btnType := btn.Type
-			if btnType == "" {
-				btnType = "default"
-			}
-			valMap := map[string]string{"action": btn.Value}
-			for k, v := range btn.Extra {
-				valMap[k] = v
-			}
-			action := map[string]any{
-				"tag":   "button",
-				"text":  plainText(btn.Text),
-				"type":  btnType,
-				"value": valMap,
-			}
-			if row.Layout == core.CardActionLayoutEqualColumns {
-				action["width"] = "fill"
-			}
-			actions = append(actions, action)
+			buttons = append(buttons, v2Button(btn, ""))
 		}
-		if len(actions) > 0 {
-			elements = append(elements, map[string]any{
-				"tag":     "action",
-				"actions": actions,
-			})
+		if len(buttons) > 0 {
+			elements = append(elements, v2ButtonRow(buttons, row.Layout))
 		}
 	}
-
-	base["elements"] = elements
-	return base, true
+	return v2CardMap(card.Header, elements), true
 }
 
 func normalizeDeleteModeCheckerText(text string) string {
@@ -589,7 +539,11 @@ func parseDeleteModeListItemAction(action string) (id string, selectable bool, o
 
 // renderCard converts a core.Card into the Feishu Interactive Card JSON string.
 func renderCard(card *core.Card, sessionKey string) string {
-	b, err := json.Marshal(renderCardMap(card, sessionKey))
+	return marshalCard(renderCardMap(card, sessionKey))
+}
+
+func marshalCard(m map[string]any) string {
+	b, err := json.Marshal(m)
 	if err != nil {
 		slog.Error("feishu: renderCard marshal failed", "error", err)
 		return `{"config":{"width_mode":"default"},"elements":[]}`

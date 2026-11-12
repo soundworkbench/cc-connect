@@ -94,7 +94,8 @@ func (r *FormRequest) validate() error {
 
 // formCard renders a pending form, or the submitted one.
 func formCard(d *Decision) *Card {
-	if d.State != decisionPending {
+	void := d.State == decisionVoided
+	if d.State != decisionPending && !void {
 		cb := NewCard().Title("✅ 已提交："+d.Question, "green")
 		for _, a := range d.Values {
 			cb.Markdown("**" + a.Label + "**：" + a.Value)
@@ -103,6 +104,9 @@ func formCard(d *Decision) *Card {
 		return cb.Build()
 	}
 	cb := NewCard().Title("需要你填写", "blue")
+	if void {
+		cb.card.Header.Color, cb.card.Header.Tag = "grey", decisionVoidLabel
+	}
 	cb.Markdown("**" + d.Question + "**")
 	if d.Note != "" {
 		cb.Markdown(d.Note)
@@ -121,6 +125,12 @@ func formCard(d *Decision) *Card {
 			field.Options = append(field.Options, CardSelectOption{Text: o, Value: strconv.Itoa(j + 1)})
 		}
 		form.Fields = append(form.Fields, field)
+	}
+	if void {
+		form.Disabled, form.DisabledTip = true, decisionVoidLabel
+		cb.card.Elements = append(cb.card.Elements, form)
+		cb.Note(decisionClock(d.ResolvedAt) + " 已作废")
+		return cb.Build()
 	}
 	cb.card.Elements = append(cb.card.Elements, form)
 	cb.Note("提交后作为一条消息回到对话")
@@ -213,8 +223,12 @@ func (e *Engine) handleFormSubmit(args string) *Card {
 		cardActionDropped("form", id, "unknown_form")
 		return nil
 	}
-	if d.State != decisionPending {
-		return formCard(d)
+	switch d.State {
+	case decisionPending:
+	case decisionVoided:
+		return &Card{Toast: decisionVoidToast}
+	default:
+		return buildDecisionCard(d)
 	}
 	values := parseFormValues("form", id, raw)
 	answers, ok := formAnswers(d.Form, values)
@@ -224,13 +238,16 @@ func (e *Engine) handleFormSubmit(args string) *Card {
 	r, ok := e.decisions.ResolveForm(id, answers)
 	if !ok {
 		if cur := e.decisions.Get(id); cur != nil {
-			return formCard(cur)
+			if cur.State == decisionVoided {
+				return &Card{Toast: decisionVoidToast}
+			}
+			return buildDecisionCard(cur)
 		}
 		cardActionDropped("form", id, "unknown_form")
 		return nil
 	}
 	e.wakeDecisions()
-	return formCard(r)
+	return buildDecisionCard(r)
 }
 
 // ResolveForm records a pending form's submitted values. It reports false

@@ -14,6 +14,10 @@ type Card struct {
 	// Compact asks the platform for a tight vertical layout (Feishu: schema 2.0
 	// with small element spacing) instead of the classic card layout.
 	Compact bool
+	// Shared asks for a card that looks the same to everyone who sees it and
+	// can be rewritten in place later, by a callback or an update API (Feishu:
+	// card JSON 2.0). Decision and form cards use it.
+	Shared bool
 	// Toast, set on a card returned from a card action, asks the platform to
 	// show this short notice instead of replacing the clicked card.
 	Toast string
@@ -23,6 +27,8 @@ type Card struct {
 type CardHeader struct {
 	Title string
 	Color string // blue, green, red, orange, purple, grey, turquoise, violet, indigo, wathet, yellow, carmine
+	// Tag is an optional short status label beside the title (Feishu: a text tag).
+	Tag string
 }
 
 // CardElement is the interface satisfied by all card content elements.
@@ -111,6 +117,9 @@ type CardForm struct {
 	SubmitType  string // "primary", "default", "danger"
 	SubmitValue string
 	Confirm     *CardConfirm // optional dialog before submitting
+	// Disabled greys out every field and the submit button; DisabledTip says why.
+	Disabled    bool
+	DisabledTip string
 }
 
 // CardButton represents a clickable button inside a CardActions element.
@@ -121,6 +130,9 @@ type CardButton struct {
 	Extra map[string]string // additional key-value pairs carried in the callback (platform-specific)
 	// Confirm, when set, asks the person to confirm before the callback fires.
 	Confirm *CardConfirm
+	// Disabled shows the button greyed out and not clickable; DisabledTip says why.
+	Disabled    bool
+	DisabledTip string
 }
 
 // CardActionLayout controls how a CardActions row should be rendered by

@@ -368,3 +368,23 @@ func TestCardFilePayloadFillsProjectAndSession(t *testing.T) {
 		t.Fatal("a non-object was accepted")
 	}
 }
+
+func TestCardSentLinePrintsTheID(t *testing.T) {
+	if got := cardSentLine("Decision card sent", []byte(`{"status":"ok","id":"d1a2b3c4"}`)); got != "Decision card sent: d1a2b3c4" {
+		t.Fatalf("got %q", got)
+	}
+	if got := cardSentLine("Form card sent", []byte(`{"status":"ok"}`)); got != "Form card sent." {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestDecisionVoidLines(t *testing.T) {
+	line, warn := decisionVoidLines("d1", []byte(`{"status":"ok","id":"d1","card":"updated"}`))
+	if line != "Decision card voided: d1" || warn != "" {
+		t.Fatalf("line=%q warn=%q", line, warn)
+	}
+	_, warn = decisionVoidLines("d1", []byte(`{"status":"ok","id":"d1","card":"not updated: code=230001"}`))
+	if !strings.Contains(warn, "not updated: code=230001") {
+		t.Fatalf("warn=%q", warn)
+	}
+}

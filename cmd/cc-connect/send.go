@@ -20,8 +20,12 @@ import (
 
 func runSend(args []string) {
 	for _, a := range args {
-		if a == "--decision" || a == "--form" {
+		switch a {
+		case "--decision", "--form":
 			runSendCardFile(args, a)
+			return
+		case "--decision-void":
+			runDecisionVoid(args)
 			return
 		}
 	}
@@ -80,9 +84,9 @@ func runSend(args []string) {
 // The call returns as soon as the card is sent; the answer arrives later as a
 // normal message in the same session.
 func runSendCardFile(args []string, flag string) {
-	endpoint, done := "/decision", "Decision card sent."
+	endpoint, done := "/decision", "Decision card sent"
 	if flag == "--form" {
-		endpoint, done = "/form", "Form card sent."
+		endpoint, done = "/form", "Form card sent"
 	}
 	var file, project, sessionKey, dataDir string
 	for i := 0; i < len(args); i++ {
@@ -137,7 +141,82 @@ func runSendCardFile(args []string, flag string) {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(body)))
 		os.Exit(1)
 	}
-	fmt.Println(done)
+	fmt.Println(cardSentLine(done, body))
+}
+
+// cardSentLine is the confirmation printed after a decision or form card is
+// sent, with the card's ID (used by --decision-void).
+func cardSentLine(done string, body []byte) string {
+	var r struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(body, &r) == nil && r.ID != "" {
+		return done + ": " + r.ID
+	}
+	return done + "."
+}
+
+// runDecisionVoid withdraws a pending decision or form card:
+//
+//	cc-connect send --decision-void d1a2b3c4
+func runDecisionVoid(args []string) {
+	var id, dataDir string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--decision-void", "--data-dir":
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "Error: %s requires a value\n", args[i])
+				os.Exit(1)
+			}
+			if args[i] == "--data-dir" {
+				dataDir = args[i+1]
+			} else {
+				id = args[i+1]
+			}
+			i++
+		}
+	}
+	payload, _ := json.Marshal(core.DecisionVoidRequest{ID: strings.TrimSpace(id)})
+	sockPath := resolveSocketPath(dataDir)
+	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: cc-connect is not running (socket not found: %s)\n", sockPath)
+		os.Exit(1)
+	}
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return net.Dial("unix", sockPath)
+		},
+	}}
+	resp, err := client.Post("http://unix/decision/void", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: failed to connect: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+	line, warn := decisionVoidLines(id, body)
+	fmt.Println(line)
+	if warn != "" {
+		fmt.Fprintln(os.Stderr, warn)
+	}
+}
+
+// decisionVoidLines turns the /decision/void reply into the confirmation and
+// an optional warning that the card itself could not be rewritten.
+func decisionVoidLines(id string, body []byte) (line, warn string) {
+	var r struct {
+		Card string `json:"card"`
+	}
+	_ = json.Unmarshal(body, &r)
+	line = "Decision card voided: " + id
+	if r.Card != "" && r.Card != "updated" {
+		warn = "Warning: voided, but the card was " + r.Card
+	}
+	return line, warn
 }
 
 // cardFilePayload fills project and session_key into a card JSON object:
@@ -473,6 +552,7 @@ func printSendUsage() {
        cc-connect send [options] --react <emoji>
        cc-connect send [options] --decision <card.json>
        cc-connect send [options] --form <form.json>
+       cc-connect send --decision-void <id>
        echo "msg" | cc-connect send [options] --stdin
 
 Send a message, attachment, or synthesized voice message to an active cc-connect session.
@@ -484,6 +564,7 @@ Options:
       --tts <text>         Synthesize text and send it as a voice/audio message
       --react <emoji>      Add an emoji reaction to the message that started this turn (Feishu emoji type, e.g. OK, THUMBSUP, DONE)
       --decision <file>    Send a decision card (JSON: question, options[recommended first], note, no_default, deadline_minutes, danger, multi); the answer comes back as a message
+      --decision-void <id> Void a pending decision or form card (the ID printed when it was sent): the card greys out, its default is cancelled, later taps do nothing
       --form <file>        Send a form card (JSON: title, note, submit, fields[label, type input|date|select|multi_select, options, placeholder, required]); the values come back as one message
       --image <path>       Send an image attachment (repeatable)
       --file <path>        Send a file attachment (repeatable)

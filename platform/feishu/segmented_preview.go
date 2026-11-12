@@ -76,6 +76,7 @@ type segmentedPreview struct {
 	steps         int
 	recent        []string
 	fallback      bool
+	reopened      int // times streaming was turned back on after Feishu closed it
 	lastPublished time.Time
 
 	// Step-list layout (cfg.StepList): the agent's step lines with done/running
@@ -943,6 +944,42 @@ func (p *Platform) closeSegmentedStream(ctx context.Context, h *feishuPreviewHan
 	}
 }
 
+// Feishu closes streaming on a card ten minutes after it was turned on. Updates
+// after that are answered with one of these codes.
+const (
+	cardKitStreamTimeout = 200850
+	cardKitStreamClosed  = 300309
+)
+
+func streamClosedByServer(err error) bool {
+	var ce *feishuCardAPIError
+	return errors.As(err, &ce) && (ce.Code == cardKitStreamTimeout || ce.Code == cardKitStreamClosed)
+}
+
+// reopenSegmentedStream turns streaming back on after Feishu closed it and
+// sends the frame again, element by element. The settings call waits for every
+// body update in flight, so their errors (the same closed-stream code) are
+// dropped. It returns an error when the card cannot stream again; the caller
+// then moves to full-card updates.
+func (p *Platform) reopenSegmentedStream(ctx context.Context, h *feishuPreviewHandle, progress, footer string, cause error) error {
+	v := h.live
+	if err := p.cardKitMutation(ctx, h, http.MethodPatch, "/settings", map[string]any{"settings": `{"config":{"streaming_mode":true}}`}); err != nil {
+		return fmt.Errorf("reopen stream after %v: %w", cause, err)
+	}
+	v.takePipeErr()
+	v.reopened++
+	slog.Info("feishu: preview stream reopened", "card", h.cardID, "times", v.reopened)
+	v.lastBody = "" // the rejected update may have carried the newest text
+	err := p.streamSegmentedBody(ctx, h, true)
+	if err == nil && progress != v.lastProgress {
+		err = p.replaceSegmentedElement(ctx, h, v.progressID, v.progressElement(progress))
+	}
+	if err == nil && footer != v.lastFooter {
+		err = p.replaceSegmentedElement(ctx, h, v.footerID, v.footerElement(footer))
+	}
+	return err
+}
+
 func (p *Platform) replaceSegmentedCard(ctx context.Context, h *feishuPreviewHandle, final bool) error {
 	card := h.live.card(final)
 	if h.cardID != "" {
@@ -1072,6 +1109,9 @@ func (p *Platform) publishSegmented(ctx context.Context, h *feishuPreviewHandle,
 		}
 		if err == nil && footer != v.lastFooter {
 			err = p.replaceSegmentedElement(ctx, h, v.footerID, v.footerElement(footer))
+		}
+		if err != nil && streamClosedByServer(err) {
+			err = p.reopenSegmentedStream(ctx, h, progress, footer, err)
 		}
 		if err == nil {
 			v.lastProgress, v.lastFooter = progress, footer
