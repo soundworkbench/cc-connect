@@ -149,3 +149,21 @@ func TestStoppedTasksEndAsStopped(t *testing.T) {
 		t.Fatalf("after StopTask: %+v", evs)
 	}
 }
+
+// A subagent's task_notification carries its whole run time in
+// usage.duration_ms (frame of Claude Code 2.1.3xx, eval run B_t1_r1).
+func TestTaskNotificationCarriesTheRunTime(t *testing.T) {
+	cs := progressSession()
+	cs.handleReadLoopLine(`{"type":"system","subtype":"task_notification","task_id":"ac4d8716cd30fe52d","status":"completed","output_file":"/tmp/o","summary":"检查六页 PPT 视觉版式","usage":{"total_tokens":51234,"tool_uses":9,"duration_ms":1740000}}`)
+	cs.handleReadLoopLine(`{"type":"system","subtype":"task_notification","task_id":"b1","status":"completed","summary":"Background command \"统计文档目录\" completed (exit code 0)"}`)
+	events := drainProgressEvents(cs)
+	if len(events) != 2 || events[0].Task == nil || events[1].Task == nil {
+		t.Fatalf("events=%+v", events)
+	}
+	if ev := events[0].Task; ev.Kind != core.TaskEnded || ev.Elapsed != 29*time.Minute {
+		t.Errorf("agent notification=%+v", ev)
+	}
+	if ev := events[1].Task; ev.Kind != core.TaskEnded || ev.Elapsed != 0 {
+		t.Errorf("command notification=%+v", ev)
+	}
+}

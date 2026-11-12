@@ -247,6 +247,7 @@ const (
 	MsgResumeItemMoreTasks       MsgKey = "resume_item_more_tasks"
 	MsgTriageTask                MsgKey = "triage_task"
 	MsgTriageTaskNoStep          MsgKey = "triage_task_no_step"
+	MsgTriageTaskNoTime          MsgKey = "triage_task_no_time"
 	MsgResumePrompt              MsgKey = "resume_prompt"
 	MsgResumeItemRequest         MsgKey = "resume_item_request"
 	MsgResumeItemTurn            MsgKey = "resume_item_turn"
@@ -853,6 +854,7 @@ var messages = map[MsgKey]map[Language]string{
 	MsgTaskInterrupted:   {LangEnglish: "%s · Interrupted", LangChinese: "%s · 已中断", LangTraditionalChinese: "%s · 已中斷", LangJapanese: "%s · 中断", LangSpanish: "%s · Interrumpida"},
 	MsgTriageTask:        {LangEnglish: "Background task \"%s\": %s · %s.", LangChinese: "后台任务「%s」：%s · %s。", LangTraditionalChinese: "背景任務「%s」：%s · %s。", LangJapanese: "バックグラウンドタスク「%s」：%s · %s。", LangSpanish: "Tarea en segundo plano «%s»: %s · %s."},
 	MsgTriageTaskNoStep:  {LangEnglish: "Background task \"%s\" is running · %s.", LangChinese: "后台任务「%s」进行中 · %s。", LangTraditionalChinese: "背景任務「%s」進行中 · %s。", LangJapanese: "バックグラウンドタスク「%s」実行中 · %s。", LangSpanish: "Tarea en segundo plano «%s» en curso · %s."},
+	MsgTriageTaskNoTime:  {LangEnglish: "Background task \"%s\": %s.", LangChinese: "后台任务「%s」：%s。", LangTraditionalChinese: "背景任務「%s」：%s。", LangJapanese: "バックグラウンドタスク「%s」：%s。", LangSpanish: "Tarea en segundo plano «%s»: %s."},
 	MsgResumePrompt: {
 		LangEnglish:            "Your work was cut off at %s by a restart. Unfinished: %s. Check where things stand, carry on, and tell the user in one sentence that you are back on it.",
 		LangChinese:            "上次在 %s 因重启中断，未完成的有：%s。请核对状态后续做，并用一句话告诉用户已接着做。",

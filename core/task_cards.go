@@ -122,7 +122,9 @@ type cardTask struct {
 	desc       string
 	background bool
 	hidden     bool
-	start      time.Time
+	start      time.Time // when the task began; see startKnown
+	startKnown bool      // start is the task's real start, not only when the bridge first heard of it
+	showAt     time.Time // when the task may show on a card
 	step       string
 	generic    bool // step is a tool's generic label, not the agent's own description
 	recent     string
@@ -181,6 +183,7 @@ func (c *taskCard) condensing() bool {
 type taskCardManager struct {
 	mu       sync.Mutex
 	tasks    map[string]*cardTask // by session and task ID
+	started  map[string]time.Time // real start of every task seen lately, by session and task ID; outlives the task's record
 	open     map[string]*taskCard // the live card of each session
 	seq      uint64
 	inflight *inflightStore // background tasks in progress, for resume after restart
@@ -196,6 +199,7 @@ type taskCardManager struct {
 func newTaskCardManager() *taskCardManager {
 	return &taskCardManager{
 		tasks:      make(map[string]*cardTask),
+		started:    make(map[string]time.Time),
 		open:       make(map[string]*taskCard),
 		openDelay:  10 * time.Second,
 		minGap:     3 * time.Second,
@@ -231,9 +235,23 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 			return
 		}
 		m.seq++
+		now := time.Now()
 		t = &cardTask{key: key, sessionKey: sessionKey, taskID: ev.TaskID, seq: m.seq, agent: agent, platform: tp, replyCtx: replyCtx,
-			start: time.Now().Add(-ev.Elapsed), state: TaskCardRunning}
+			start: now.Add(-ev.Elapsed), startKnown: ev.Kind == TaskStarted, showAt: now.Add(-ev.Elapsed).Add(m.openDelay), state: TaskCardRunning}
+		// The agent can report a task again after its card settled (a subagent
+		// it sends more work to keeps its ID): it keeps its first start.
+		if first, ok := m.started[key]; ok {
+			t.start, t.startKnown = first, true
+		}
 		m.tasks[key] = t
+	}
+	if ev.Elapsed > 0 {
+		if at := time.Now().Add(-ev.Elapsed); !t.startKnown || at.Before(t.start) {
+			t.start, t.startKnown = at, true
+		}
+	}
+	if t.startKnown {
+		m.rememberStartLocked(key, t.start)
 	}
 	if ev.Description != "" {
 		t.desc = ev.Description
@@ -278,6 +296,23 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 	m.scheduleLocked(e, t)
 }
 
+// taskStartMemory is how long a task's start is kept after its record is gone.
+const taskStartMemory = 24 * time.Hour
+
+// rememberStartLocked keeps a task's real start for when the agent reports the
+// task again. Caller holds m.mu.
+func (m *taskCardManager) rememberStartLocked(key string, start time.Time) {
+	if old, ok := m.started[key]; ok && !start.Before(old) {
+		return
+	}
+	for k, at := range m.started {
+		if time.Since(at) > taskStartMemory {
+			delete(m.started, k)
+		}
+	}
+	m.started[key] = start
+}
+
 // scheduleLocked moves a task along after any change. Caller holds m.mu.
 func (m *taskCardManager) scheduleLocked(e *Engine, t *cardTask) {
 	switch {
@@ -293,7 +328,7 @@ func (m *taskCardManager) scheduleLocked(e *Engine, t *cardTask) {
 		// Kept until it ends, so later frames without the flag do not show it.
 	case t.background && !t.scheduled:
 		t.scheduled = true
-		time.AfterFunc(max(0, time.Until(t.start.Add(m.openDelay))), func() { m.show(e, t) })
+		time.AfterFunc(max(0, time.Until(t.showAt)), func() { m.show(e, t) })
 	}
 }
 
@@ -332,7 +367,7 @@ func (m *taskCardManager) show(e *Engine, t *cardTask) {
 	batch := []*cardTask{t}
 	for _, o := range m.tasks {
 		if o != t && o.sessionKey == t.sessionKey && o.card == nil && o.scheduled && !o.ended && !o.hidden && o.background &&
-			time.Until(o.start.Add(m.openDelay)) <= taskOpenTogether {
+			time.Until(o.showAt) <= taskOpenTogether {
 			batch = append(batch, o)
 		}
 	}
@@ -474,7 +509,10 @@ func taskShownLocked(i *I18n, t *cardTask) taskShown {
 		s.name = i.T(MsgTaskUntitled)
 	}
 	if !t.ended {
-		s.text, s.time = liveStep(t), taskElapsed(i, taskMinutes(t.start))
+		s.text = liveStep(t)
+		if t.startKnown {
+			s.time = taskElapsed(i, taskMinutes(t.start))
+		}
 		// A tool's generic label counts as a step: it says the task has begun
 		// (a command was launched, a subagent called a tool).
 		s.waiting = t.steps == 0 && t.recent == ""
@@ -491,25 +529,58 @@ func taskShownLocked(i *I18n, t *cardTask) taskShown {
 		if !readableLine(t.summary) {
 			s.text = ""
 		}
+		s.text = outcomeAfterName(s.text, t.desc)
 	case TaskCardInterrupted:
 		s.label = i.T(MsgTaskLabelCutOff)
 	default:
 		s.label = i.T(MsgTaskLabelDone)
-		if !briefEnough(t.summary) {
+		if cliDoneRe.MatchString(t.summary) {
+			s.text = ""
+		} else if !briefEnough(t.summary) {
 			s.text = t.brief
 			if s.text == "" {
 				s.text = firstSentence(t.summary, taskBriefRunes)
 			}
 		}
+		s.text = outcomeAfterName(s.text, t.desc)
 	}
-	if t.summary != "" && s.text != t.summary {
+	if t.summary != "" && s.text != t.summary && !cliDoneRe.MatchString(t.summary) && outcomeAfterName(t.summary, t.desc) != "" {
 		s.fullTitle, s.full = i.T(MsgTaskFullText), clipRunesKeepLines(t.summary, taskCardFullRunes)
 	}
-	s.time = i.T(MsgTaskTookShort)
-	if n := int(t.endedAt.Sub(t.start) / time.Minute); n >= 1 {
-		s.time = i.Tf(MsgTaskTook, n)
+	if t.startKnown {
+		s.time = i.T(MsgTaskTookShort)
+		if n := int(t.endedAt.Sub(t.start) / time.Minute); n >= 1 {
+			s.time = i.Tf(MsgTaskTook, n)
+		}
 	}
 	return s
+}
+
+var (
+	// cliDoneRe is the CLI's own line for a command that finished: it says
+	// nothing the card's state does not.
+	cliDoneRe = regexp.MustCompile(`^Background command ".*" completed`)
+	// emptyOutcomeRe is an outcome that only restates the state: "（任务）已完成",
+	// "done", or the quick model's "无" for a result with nothing in it.
+	emptyOutcomeRe = regexp.MustCompile(`(?i)^(?:（任务）|\(任务\)|任务|the task |task )?(?:已经|已|is |has )?` +
+		`(?:完成|做完|完毕|结束|执行完毕|执行完成|运行完毕|运行完成|成功|停止|终止|done|complete|completed|finished|succeeded|stopped)?了?$|^无$`)
+)
+
+// outcomeAfterName is a task's outcome as its row or card shows it, after the
+// task's name: a leading copy of the name goes, and an outcome that then only
+// restates the state ("统计文档目录任务已完成") is empty.
+func outcomeAfterName(text, name string) string {
+	const cut = " \t。.！!，,：:；;·-—"
+	text = strings.TrimSpace(text)
+	rest := text
+	if name = strings.TrimSpace(name); name != "" && len(text) >= len(name) && strings.EqualFold(text[:len(name)], name) {
+		rest = strings.TrimLeft(text[len(name):], cut)
+		text = rest
+	}
+	if emptyOutcomeRe.MatchString(strings.Trim(rest, cut)) {
+		return ""
+	}
+	return text
 }
 
 // viewLocked renders the card. Caller holds m.mu.
@@ -533,6 +604,9 @@ func oneTaskView(i *I18n, sessionKey string, t *cardTask) TaskCardView {
 		Details:      append([]string(nil), t.details...),
 		SessionKey:   sessionKey,
 		Interrupted:  i.Tf(MsgTaskInterrupted, s.name),
+	}
+	if v.Line == "" {
+		v.Line = s.label
 	}
 	if t.ended {
 		v.Summary, v.FullTitle, v.Full = s.text, s.fullTitle, s.full
@@ -561,7 +635,7 @@ func taskMark(s TaskCardState, waiting bool) string {
 // taskRow is a task's row: "<name> · <step or outcome> · <time>".
 func taskRow(s taskShown) TaskCardRow {
 	return TaskCardRow{State: s.state, Waiting: s.waiting, Mark: taskMark(s.state, s.waiting),
-		Text: clipRunes(s.name, taskRowNameRunes) + " · " + joinTaskLine(clipRunes(s.text, taskRowTextRunes), s.time)}
+		Text: joinTaskLine(clipRunes(s.name, taskRowNameRunes), joinTaskLine(clipRunes(s.text, taskRowTextRunes), s.time))}
 }
 
 // markedRow is a row as one line of text, its mark first.
@@ -706,10 +780,13 @@ func taskElapsed(i *I18n, minutes int) string {
 	return i.Tf(MsgTaskElapsed, minutes)
 }
 
-// joinTaskLine is "<text> · <time>", or the time alone when text is empty.
+// joinTaskLine is "<text> · <time>", or whichever of the two is not empty.
 func joinTaskLine(text, time string) string {
 	if text = strings.TrimRight(strings.TrimSpace(text), "。.；;，, "); text == "" {
 		return time
+	}
+	if time == "" {
+		return text
 	}
 	return text + " · " + time
 }
@@ -790,7 +867,8 @@ func firstSentence(s string, limit int) string {
 }
 
 const taskResultPrompt = "你在给用户看的后台任务卡片上写这个任务的结果。只写一句中文，不超过 25 个字，概括任务做成了什么。" +
-	"只依据给出的结果，不要编造；不要写路径、命令、代码或文件名，不要加引号或前缀。这句话只写一遍。"
+	"只依据给出的结果，不要编造；不要写路径、命令、代码或文件名，不要加引号或前缀，不要复述任务名。" +
+	"结果里除了“已完成”没有具体内容时，只回“无”。这句话只写一遍。"
 
 // condenseLocked asks the quick model for one line when a completed task's
 // summary is long or raw output (several lines, paths, code). The settled card

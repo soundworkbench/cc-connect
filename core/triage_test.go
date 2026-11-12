@@ -453,7 +453,7 @@ func TestProgressAnswerNamesTheStepInTheAgentsWords(t *testing.T) {
 func TestProgressAnswerLeavesOutAnUnknownStep(t *testing.T) {
 	e := NewEngine("p", &stubAgent{}, nil, "", LangChinese)
 	t.Cleanup(func() { _ = e.Stop() })
-	got := e.progressAnswer(triageView{tasks: []triageTask{{title: "构建"}}}, nil)
+	got := e.progressAnswer(triageView{tasks: []triageTask{{title: "构建", elapsed: "不到 1 分钟"}}}, nil)
 	if !strings.HasPrefix(got, "后台任务「构建」进行中 · 不到 1 分钟。") || strings.Contains(got, "：") {
 		t.Fatalf("got %q", got)
 	}

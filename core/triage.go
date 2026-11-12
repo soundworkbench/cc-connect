@@ -42,7 +42,7 @@ const triagePrompt = "判断用户发来的这条消息属于哪一类，只回�
 type triageTask struct {
 	title, step string // step is the agent's own description of the current step; "" = none
 	recent      string // the task's latest progress line
-	minutes     int
+	elapsed     string // "3 min"; "" when the task's real start is unknown
 }
 
 const (
@@ -218,7 +218,11 @@ func (e *Engine) triageView(msg *Message, session *Session, interactiveKey strin
 			if t.generic {
 				step = ""
 			}
-			v.tasks = append(v.tasks, triageTask{title: title, step: step, recent: t.recent, minutes: taskMinutes(t.start)})
+			elapsed := ""
+			if t.startKnown {
+				elapsed = taskElapsed(e.i18n, taskMinutes(t.start))
+			}
+			v.tasks = append(v.tasks, triageTask{title: title, step: step, recent: t.recent, elapsed: elapsed})
 		}
 	}
 	m.mu.Unlock()
@@ -267,7 +271,7 @@ func (e *Engine) progressAnswer(v triageView, session *Session) string {
 		lines = append(lines, v.rows...)
 	} else if len(v.tasks) == 1 {
 		t := v.tasks[0]
-		elapsed := taskElapsed(i, t.minutes)
+		elapsed := t.elapsed
 		step := t.step
 		if step == "" {
 			step = t.recent
@@ -275,9 +279,15 @@ func (e *Engine) progressAnswer(v triageView, session *Session) string {
 		if step == "" {
 			step = e.lastAgentGist(session)
 		}
-		if step = strings.TrimRight(clipRunes(step, progressStepRunes), "。.！!；;，, "); step == "" {
+		step = strings.TrimRight(clipRunes(step, progressStepRunes), "。.！!；;，, ")
+		switch {
+		case elapsed == "" && step == "":
+			lines = append(lines, i.Tf(MsgTriageTaskNoTime, t.title, i.T(MsgTaskWorking)))
+		case elapsed == "":
+			lines = append(lines, i.Tf(MsgTriageTaskNoTime, t.title, step))
+		case step == "":
 			lines = append(lines, i.Tf(MsgTriageTaskNoStep, t.title, elapsed))
-		} else {
+		default:
 			lines = append(lines, i.Tf(MsgTriageTask, t.title, step, elapsed))
 		}
 	}

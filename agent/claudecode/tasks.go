@@ -42,9 +42,7 @@ func parseTaskEvent(subtype string, raw map[string]any) *core.TaskEvent {
 		} else if tool, _ := raw["last_tool_name"].(string); tool != "" {
 			ev.Step, ev.StepGeneric = chineseToolProgress(tool, nil, ""), true
 		}
-		if usage, ok := raw["usage"].(map[string]any); ok {
-			ev.Elapsed = time.Duration(asInt(usage["duration_ms"])) * time.Millisecond
-		}
+		ev.Elapsed = taskDuration(raw)
 	case "task_updated":
 		ev.Kind = core.TaskUpdated
 		patch, _ := raw["patch"].(map[string]any)
@@ -56,12 +54,20 @@ func parseTaskEvent(subtype string, raw map[string]any) *core.TaskEvent {
 		ev.Kind = core.TaskEnded
 		ev.Status, _ = raw["status"].(string)
 		ev.Summary, _ = raw["summary"].(string)
+		// A subagent's notification carries its whole run time.
+		ev.Elapsed = taskDuration(raw)
 	default:
 		return nil
 	}
 	ev.Description = strings.TrimSpace(ev.Description)
 	ev.Summary = strings.TrimSpace(ev.Summary)
 	return ev
+}
+
+// taskDuration is a frame's usage.duration_ms: how long the task has run.
+func taskDuration(raw map[string]any) time.Duration {
+	usage, _ := raw["usage"].(map[string]any)
+	return time.Duration(asInt(usage["duration_ms"])) * time.Millisecond
 }
 
 // taskProgressStep turns a task_progress description into the current step:
