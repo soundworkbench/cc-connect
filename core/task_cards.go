@@ -403,21 +403,22 @@ func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
 		v.Line = joinTaskLine(v.Summary, took)
 		return v
 	}
-	v.Line = joinTaskLine(liveStep(i, c), taskElapsed(i, taskMinutes(c.start)))
+	v.Line = joinTaskLine(liveStep(c), taskElapsed(i, taskMinutes(c.start)))
 	return v
 }
 
 // liveStep is what a running task is doing: the current step, or the latest
 // progress line when there is no step, the step is only a tool's generic
-// label, or the card has been idle.
-func liveStep(i *I18n, c *taskCard) string {
+// label, or the card has been idle. A generic label alone says nothing the
+// card's state label does not, so then the line is the time alone.
+func liveStep(c *taskCard) string {
 	switch {
 	case c.recent != "" && (c.step == "" || c.generic || c.still):
 		return c.recent
-	case c.step != "":
+	case c.step != "" && !c.generic:
 		return c.step
 	}
-	return i.T(MsgTaskWorking)
+	return ""
 }
 
 // taskElapsed is a running time in whole minutes: "3 min", "under a minute".

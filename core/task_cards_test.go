@@ -236,6 +236,34 @@ func TestTaskCardProgressLineFromQuickModel(t *testing.T) {
 	}
 }
 
+// Before the task has a step of its own the line is the time alone: neither a
+// tool's generic label ("运行命令") nor a word repeating the state label.
+func TestTaskCardShowsOnlyTheTimeUntilThereIsARealStep(t *testing.T) {
+	env := newTaskEnv(t)
+	env.task(TaskEvent{Kind: TaskStarted, TaskID: "t1", Description: "后台统计文档目录", Background: yes(), Step: "运行命令", StepGeneric: true})
+	env.s.events <- Event{Type: EventResult, Content: "已在后台统计", Done: true}
+	waitUntil(t, "task card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
+	if sent, _ := env.p.cards(); sent[0].view.Line != "不到 1 分钟" || sent[0].view.Label != "进行中" {
+		t.Fatalf("open view=%+v", sent[0].view)
+	}
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "t1", Step: "统计文档目录"})
+	waitUntil(t, "real step", func() bool {
+		_, up := env.p.cards()
+		return len(up) > 0 && up[len(up)-1].view.Line == "统计文档目录 · 不到 1 分钟"
+	})
+	// A later generic label is not shown either.
+	env.task(TaskEvent{Kind: TaskProgress, TaskID: "t1", Step: "读取文件", StepGeneric: true})
+	waitUntil(t, "generic step hidden", func() bool {
+		_, up := env.p.cards()
+		return up[len(up)-1].view.Line == "不到 1 分钟"
+	})
+
+	// No step at all: the time alone, not "进行中".
+	if got := liveStep(&taskCard{}); got != "" {
+		t.Fatalf("liveStep with nothing = %q", got)
+	}
+}
+
 func waitInterrupted(t *testing.T, env *taskEnv, title string) {
 	t.Helper()
 	waitUntil(t, "interrupted card", func() bool {
