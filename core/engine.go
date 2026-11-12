@@ -363,7 +363,11 @@ type Engine struct {
 	decisionDefaultHours  int
 	decisionWake          chan struct{}
 	decisionInflight      sync.Map
-	humanEnglish          sync.Map // session key → whether the person's latest message was English
+	humanEnglish          sync.Map       // session key → whether the person's latest message was English
+	inflight              *inflightStore // turns and background tasks in progress, for resume after restart
+	inflightLeft          inflightFile   // what the previous process left in progress
+	resumeOnce            sync.Once
+	resumeDelay           time.Duration
 	sessionAgentsMu       sync.Mutex
 	sessionAgents         map[sessionAgentKey]sessionAgent
 	name                  string
@@ -819,6 +823,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
 		taskCards:             newTaskCardManager(),
+		resumeDelay:           resumeStartDelay,
 		name:                  name,
 		agent:                 ag,
 		platforms:             platforms,
@@ -1553,6 +1558,7 @@ func (e *Engine) Start() error {
 	if err := e.loadQueues(); err != nil {
 		return err
 	}
+	e.openInflight()
 	var startErrs []error
 	readyCount := 0
 	pendingCount := 0
@@ -1706,6 +1712,7 @@ func (e *Engine) onPlatformReady(p Platform) {
 	slog.Info("platform ready", "project", e.name, "platform", p.Name())
 	e.initPlatformCapabilities(p)
 	e.resumeQueuesForPlatform(p)
+	e.scheduleResume()
 }
 
 func (e *Engine) markPlatformReady(p Platform) bool {
@@ -5052,6 +5059,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 // stream preview, streaming card or rich card, and only a final non-silent
 // reply reaches the platform. Each queued turn recomputes it.
 func (e *Engine) processTurnEvents(automated bool, state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, lockGen uint64, mutedNotices ...bool) {
+	e.noteTurnStart(sessionKey, session)
+	defer e.noteTurnEnd(sessionKey)
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID

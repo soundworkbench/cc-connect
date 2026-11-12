@@ -241,6 +241,12 @@ const (
 	MsgTaskHint                  MsgKey = "task_hint"
 	MsgTriageTask                MsgKey = "triage_task"
 	MsgTriageTaskNoStep          MsgKey = "triage_task_no_step"
+	MsgResumePrompt              MsgKey = "resume_prompt"
+	MsgResumeItemRequest         MsgKey = "resume_item_request"
+	MsgResumeItemTurn            MsgKey = "resume_item_turn"
+	MsgResumeItemTask            MsgKey = "resume_item_task"
+	MsgResumeItemSep             MsgKey = "resume_item_sep"
+	MsgResumeTooOld              MsgKey = "resume_too_old"
 	MsgTriageMoreTasks           MsgKey = "triage_more_tasks"
 	MsgTriageSeeCards            MsgKey = "triage_see_cards"
 	MsgTriageQueued              MsgKey = "triage_queued"
@@ -814,7 +820,7 @@ var messages = map[MsgKey]map[Language]string{
 	MsgPreviewRetryingBare:   {LangEnglish: "Can't reach the model service, retrying", LangChinese: "模型服务连不上，正在重试", LangTraditionalChinese: "模型服務連不上，正在重試", LangJapanese: "モデルサービスに接続できません。再試行中", LangSpanish: "No se puede conectar con el modelo, reintentando"},
 	MsgPreviewUsageLimitWait: {LangEnglish: "Model usage limit reached, waiting", LangChinese: "模型用量到了上限，正在等待", LangTraditionalChinese: "模型用量到了上限，正在等待", LangJapanese: "モデルの利用上限に達しました。待機中", LangSpanish: "Se alcanzó el límite de uso del modelo, esperando"},
 	MsgPreviewWaitingModel:   {LangEnglish: "Still waiting for the model to respond", LangChinese: "还在等模型响应", LangTraditionalChinese: "還在等模型回應", LangJapanese: "モデルの応答を待っています", LangSpanish: "Todavía esperando la respuesta del modelo"},
-	MsgPreviewInterrupted:    {LangEnglish: "Interrupted, please send again", LangChinese: "已中断，请重发", LangTraditionalChinese: "已中斷，請重發", LangJapanese: "中断されました。もう一度送信してください", LangSpanish: "Interrumpido, vuelve a enviarlo"},
+	MsgPreviewInterrupted:    {LangEnglish: "Interrupted", LangChinese: "已中断", LangTraditionalChinese: "已中斷", LangJapanese: "中断されました", LangSpanish: "Interrumpido"},
 	MsgTurnFailed:            {LangEnglish: "This didn't go through", LangChinese: "这次没做成", LangTraditionalChinese: "這次沒做成", LangJapanese: "今回は完了できませんでした", LangSpanish: "Esta vez no se pudo completar"},
 	MsgTurnFailedModel:       {LangEnglish: "This didn't go through: the model service is unreachable for now", LangChinese: "这次没做成：模型服务暂时连不上", LangTraditionalChinese: "這次沒做成：模型服務暫時連不上", LangJapanese: "今回は完了できませんでした：モデルサービスに一時的に接続できません", LangSpanish: "Esta vez no se pudo completar: el servicio del modelo no responde por ahora"},
 	MsgTurnFailedLimit:       {LangEnglish: "This didn't go through: the model usage limit has been reached", LangChinese: "这次没做成：模型用量到了上限", LangTraditionalChinese: "這次沒做成：模型用量到了上限", LangJapanese: "今回は完了できませんでした：モデルの利用上限に達しました", LangSpanish: "Esta vez no se pudo completar: se alcanzó el límite de uso del modelo"},
@@ -841,6 +847,18 @@ var messages = map[MsgKey]map[Language]string{
 	MsgTaskHint:          {LangEnglish: "Running in the background, so the chat stays free: keep talking to me, and I'll tell you when it's done. To stop it, just tell me.", LangChinese: "在后台进行，不影响聊天，你可以接着跟我说话；做完我会告诉你。要停的话直接跟我说。", LangTraditionalChinese: "在背景進行，不影響聊天，你可以接著跟我說話；做完我會告訴你。要停的話直接跟我說。", LangJapanese: "バックグラウンドで実行中なので、チャットはそのまま続けられます。終わったらお知らせします。止めたいときはそう言ってください。", LangSpanish: "Se ejecuta en segundo plano, así que puedes seguir hablando conmigo; te aviso cuando termine. Si quieres detenerla, dímelo."},
 	MsgTriageTask:        {LangEnglish: "Background task \"%s\" is still running (%s), now on: %s.", LangChinese: "后台任务「%s」还在进行（%s），现在在：%s。", LangTraditionalChinese: "背景任務「%s」還在進行（%s），現在在：%s。", LangJapanese: "バックグラウンドタスク「%s」は実行中です（%s）。現在：%s。", LangSpanish: "La tarea en segundo plano «%s» sigue en curso (%s), ahora: %s."},
 	MsgTriageTaskNoStep:  {LangEnglish: "Background task \"%s\" is still running (%s).", LangChinese: "后台任务「%s」还在进行（%s）。", LangTraditionalChinese: "背景任務「%s」還在進行（%s）。", LangJapanese: "バックグラウンドタスク「%s」は実行中です（%s）。", LangSpanish: "La tarea en segundo plano «%s» sigue en curso (%s)."},
+	MsgResumePrompt: {
+		LangEnglish:            "Your work was cut off at %s by a restart. Unfinished: %s. Check where things stand, carry on, and tell the user in one sentence that you are back on it.",
+		LangChinese:            "上次在 %s 因重启中断，未完成的有：%s。请核对状态后续做，并用一句话告诉用户已接着做。",
+		LangTraditionalChinese: "上次在 %s 因重啟中斷，未完成的有：%s。請核對狀態後續做，並用一句話告訴用戶已接著做。",
+		LangJapanese:           "%s に再起動で中断されました。未完了：%s。状況を確認して続きを進め、再開したことを一文でユーザーに伝えてください。",
+		LangSpanish:            "Tu trabajo se interrumpió a las %s por un reinicio. Pendiente: %s. Comprueba el estado, continúa y dile al usuario en una frase que lo has retomado.",
+	},
+	MsgResumeItemRequest: {LangEnglish: "the request \"%s\"", LangChinese: "请求「%s」", LangTraditionalChinese: "請求「%s」", LangJapanese: "依頼「%s」", LangSpanish: "la petición «%s»"},
+	MsgResumeItemTurn:    {LangEnglish: "the reply in progress", LangChinese: "正在回复的那一轮", LangTraditionalChinese: "正在回覆的那一輪", LangJapanese: "返信中のターン", LangSpanish: "la respuesta en curso"},
+	MsgResumeItemTask:    {LangEnglish: "background task \"%s\"", LangChinese: "后台任务「%s」", LangTraditionalChinese: "背景任務「%s」", LangJapanese: "バックグラウンドタスク「%s」", LangSpanish: "la tarea en segundo plano «%s»"},
+	MsgResumeItemSep:     {LangEnglish: "; ", LangChinese: "；", LangTraditionalChinese: "；", LangJapanese: "、", LangSpanish: "; "},
+	MsgResumeTooOld:      {LangEnglish: "The task from %s was interrupted. Tell me if you want me to pick it up again.", LangChinese: "上次 %s 的任务被中断，需要的话说一声我再继续。", LangTraditionalChinese: "上次 %s 的任務被中斷，需要的話說一聲我再繼續。", LangJapanese: "%s のタスクは中断されました。必要なら声をかけてください。続きをやります。", LangSpanish: "La tarea de las %s se interrumpió. Si quieres que la retome, dímelo."},
 	MsgTriageMoreTasks:   {LangEnglish: "%d more background tasks are running.", LangChinese: "另外还有 %d 个后台任务在跑。", LangTraditionalChinese: "另外還有 %d 個背景任務在跑。", LangJapanese: "ほかに %d 件のバックグラウンドタスクが実行中です。", LangSpanish: "Hay %d tareas más en segundo plano."},
 	MsgTriageSeeCards:    {LangEnglish: "Its card above shows the progress; I'll tell you when it's done.", LangChinese: "进展看上面的任务卡，做完我会告诉你。", LangTraditionalChinese: "進展看上面的任務卡，做完我會告訴你。", LangJapanese: "進捗は上のタスクカードで確認できます。終わったらお知らせします。", LangSpanish: "El avance está en su tarjeta de arriba; te aviso cuando termine."},
 	MsgTriageQueued:      {LangEnglish: "%d more messages are waiting; I'll take them in order.", LangChinese: "还有 %d 条消息排着队，我会按顺序处理。", LangTraditionalChinese: "還有 %d 條訊息排著隊，我會按順序處理。", LangJapanese: "ほかに %d 件のメッセージが待っています。順番に対応します。", LangSpanish: "Hay %d mensajes más en espera; los atenderé en orden."},

@@ -125,8 +125,9 @@ type taskCard struct {
 // has run for openDelay, updated in place at most every minGap, and settled
 // to the task's outcome when it ends.
 type taskCardManager struct {
-	mu    sync.Mutex
-	cards map[string]*taskCard
+	mu       sync.Mutex
+	cards    map[string]*taskCard
+	inflight *inflightStore // background tasks in progress, for resume after restart
 
 	openDelay  time.Duration // a task ending sooner gets no card
 	minGap     time.Duration // between two updates of one card
@@ -235,6 +236,7 @@ func (m *taskCardManager) scheduleLocked(e *Engine, c *taskCard) {
 func (m *taskCardManager) dropLocked(c *taskCard) {
 	if m.cards[c.key] == c {
 		delete(m.cards, c.key)
+		m.inflight.taskEnd(c.sessionKey, c.taskID)
 	}
 }
 
@@ -251,6 +253,7 @@ func (m *taskCardManager) open(e *Engine, c *taskCard) {
 		m.mu.Unlock()
 		return
 	}
+	m.inflight.taskOpen(c.sessionKey, c.taskID, c.desc)
 	open := 0
 	for _, other := range m.cards {
 		if other.sessionKey == c.sessionKey && other.opened {
