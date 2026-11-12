@@ -80,7 +80,8 @@ func isProgressAsk(content string) bool {
 // triageView is what the bridge knows about the session right now.
 type triageView struct {
 	tasks           []triageTask
-	rows            []string // the running tasks' card rows, in the order they started
+	rowsTitle       string   // the title of the tasks' card: "Background tasks: running 2/4"
+	rows            []string // the tasks' card rows, in the order they started
 	queued          int
 	pendingQuestion string // why a question is pending; "" = none
 }
@@ -205,7 +206,7 @@ func (e *Engine) triageView(msg *Message, session *Session, interactiveKey strin
 		v.pendingQuestion = "last_reply_asks"
 	}
 	m := e.taskCards
-	v.rows = m.runningRows(e.i18n, interactiveKey)
+	v.rowsTitle, v.rows = m.progressRows(e.i18n, interactiveKey)
 	m.mu.Lock()
 	for _, t := range m.tasks {
 		if t.sessionKey == interactiveKey && t.background && !t.hidden && !t.ended {
@@ -252,8 +253,8 @@ func (s *DecisionStore) hasPending(sessionKey string) bool {
 }
 
 // progressAnswer describes the running tasks and the queue in the bridge's
-// own words; every number comes from the bridge. Several tasks are listed one
-// per line, each as its row on the task card. A single task gets a sentence
+// own words; every number comes from the bridge. Several tasks are listed as
+// their card shows them: the card's title, then one line per task. A single task gets a sentence
 // whose step is the agent's own description of it (a command's description),
 // else the task's latest progress line, else the agent's latest words in the
 // chat; with none of them the step is left out rather than named by a
@@ -262,7 +263,7 @@ func (e *Engine) progressAnswer(v triageView, session *Session) string {
 	i := e.i18n
 	var lines []string
 	if len(v.rows) > 1 {
-		lines = append(lines, i.Tf(MsgTriageTasks, len(v.rows)))
+		lines = append(lines, v.rowsTitle)
 		lines = append(lines, v.rows...)
 	} else if len(v.tasks) == 1 {
 		t := v.tasks[0]
@@ -296,7 +297,7 @@ func (e *Engine) lastAgentGist(session *Session) string {
 		return ""
 	}
 	own, _, _ := strings.Cut(e.i18n.T(MsgTriageTask), "%")
-	ownMany, _, _ := strings.Cut(e.i18n.T(MsgTriageTasks), "%")
+	ownMany, _, _ := strings.Cut(e.i18n.T(MsgTaskTitleMany), "%")
 	h := session.GetHistory(10)
 	for k := len(h) - 1; k >= 0; k-- {
 		text := strings.TrimSpace(h[k].Content)

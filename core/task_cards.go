@@ -62,8 +62,8 @@ func (s TaskCardState) Live() bool { return s == TaskCardRunning }
 // TaskCardView is the whole content of a task card; every text is ready to show.
 type TaskCardView struct {
 	State        TaskCardState
-	Title        string // one task: "Background task: <name>"; several: "Background tasks: <n>"
-	Label        string // the state in a word: running, done, failed, stopped, interrupted
+	Title        string // one task: "Background task: <name>"; several: "Background tasks: <state>"
+	Label        string // one task: the state in a word (running, done, failed, stopped, interrupted); several: "", the title says it
 	Line         string // one task — live: "<current step> · <elapsed>"; ended: "<outcome> · took <elapsed>"
 	Summary      string // one task, ended only: the outcome part of Line
 	DetailsTitle string
@@ -83,7 +83,9 @@ type TaskCardView struct {
 // TaskCardRow is one task on a card of several tasks.
 type TaskCardRow struct {
 	State     TaskCardState
-	Text      string // "<mark> <name> · <step or outcome> · <time>"
+	Waiting   bool   // running, but nothing from the task yet: no step, no progress line
+	Mark      string // the sign in front of the row as text: ◐ running, ⏳ waiting, ✓ ✗ ■ ⊘ ended
+	Text      string // "<name> · <step or outcome> · <time>"
 	Shown     bool   // on the card's body; otherwise only in the details panel
 	Details   []string
 	FullTitle string // failed only: names Full
@@ -449,7 +451,7 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 func sameTaskView(a, b TaskCardView) bool {
 	return a.State == b.State && a.Title == b.Title && a.Label == b.Label && a.Line == b.Line && a.More == b.More &&
 		slices.Equal(a.Details, b.Details) && slices.EqualFunc(a.Rows, b.Rows, func(x, y TaskCardRow) bool {
-		return x.State == y.State && x.Text == y.Text && x.Shown == y.Shown && x.Full == y.Full && slices.Equal(x.Details, y.Details)
+		return x.State == y.State && x.Mark == y.Mark && x.Text == y.Text && x.Shown == y.Shown && x.Full == y.Full && slices.Equal(x.Details, y.Details)
 	})
 }
 
@@ -460,6 +462,7 @@ func taskMinutes(start time.Time) int { return int(time.Since(start) / time.Minu
 type taskShown struct {
 	name, label     string
 	state           TaskCardState
+	waiting         bool   // running with no step and no progress line yet
 	text, time      string // the line's two parts: step or outcome, elapsed or took
 	fullTitle, full string // ended: the agent's own text when the line shows something shorter
 }
@@ -472,6 +475,9 @@ func taskShownLocked(i *I18n, t *cardTask) taskShown {
 	}
 	if !t.ended {
 		s.text, s.time = liveStep(t), taskElapsed(i, taskMinutes(t.start))
+		// A tool's generic label counts as a step: it says the task has begun
+		// (a command was launched, a subagent called a tool).
+		s.waiting = t.steps == 0 && t.recent == ""
 		return s
 	}
 	s.state = t.state
@@ -534,8 +540,8 @@ func oneTaskView(i *I18n, sessionKey string, t *cardTask) TaskCardView {
 	return v
 }
 
-// taskMark is the sign in front of a task's row.
-func taskMark(s TaskCardState) string {
+// taskMark is the sign in front of a task's row as text.
+func taskMark(s TaskCardState, waiting bool) string {
 	switch s {
 	case TaskCardCompleted:
 		return "✓"
@@ -546,32 +552,38 @@ func taskMark(s TaskCardState) string {
 	case TaskCardInterrupted:
 		return "⊘"
 	}
+	if waiting {
+		return "⏳"
+	}
 	return "◐"
 }
 
-// taskRow is a task's row: "<mark> <name> · <step or outcome> · <time>".
-func taskRow(s taskShown) string {
-	return taskMark(s.state) + " " + clipRunes(s.name, taskRowNameRunes) + " · " + joinTaskLine(clipRunes(s.text, taskRowTextRunes), s.time)
+// taskRow is a task's row: "<name> · <step or outcome> · <time>".
+func taskRow(s taskShown) TaskCardRow {
+	return TaskCardRow{State: s.state, Waiting: s.waiting, Mark: taskMark(s.state, s.waiting),
+		Text: clipRunes(s.name, taskRowNameRunes) + " · " + joinTaskLine(clipRunes(s.text, taskRowTextRunes), s.time)}
 }
 
-// manyTasksView is the card of several tasks: their count as the title, one
-// row per task, and each task's steps in the folded details. While tasks run
-// the label counts those ended; once all have ended the header says how
-// they went: done when all completed, failed when any failed, else
-// interrupted or stopped.
+// markedRow is a row as one line of text, its mark first.
+func markedRow(r TaskCardRow) string { return r.Mark + " " + r.Text }
+
+// manyTasksView is the card of several tasks: one row per task, each task's
+// steps in the folded details, and a title that carries the state, with no
+// separate label. While tasks run the title counts those ended; once all
+// have ended it says how they went: done when all completed, failed when any
+// failed, else interrupted or stopped.
 func manyTasksView(i *I18n, sessionKey string, tasks []*cardTask) TaskCardView {
 	v := TaskCardView{
-		Title:        i.Tf(MsgTaskTitleCount, len(tasks)),
 		DetailsTitle: i.T(MsgTaskDetails),
 		SessionKey:   sessionKey,
 		Rows:         make([]TaskCardRow, len(tasks)),
 	}
-	count := map[TaskCardState]int{}
-	cut := []string{i.Tf(MsgTaskInterrupted, v.Title)}
+	shown := make([]taskShown, len(tasks))
+	cut := []string{i.Tf(MsgTaskTitleMany, i.T(MsgTaskLabelCutOff))}
 	for k, t := range tasks {
 		s := taskShownLocked(i, t)
-		count[s.state]++
-		row := TaskCardRow{State: s.state, Text: taskRow(s)}
+		shown[k] = s
+		row := taskRow(s)
 		steps := t.details
 		if len(steps) > taskRowSteps {
 			steps = steps[len(steps)-taskRowSteps:]
@@ -584,33 +596,44 @@ func manyTasksView(i *I18n, sessionKey string, tasks []*cardTask) TaskCardView {
 		}
 		v.Rows[k] = row
 		if s.state.Live() {
-			cut = append(cut, taskMark(TaskCardInterrupted)+" "+clipRunes(s.name, taskRowNameRunes))
+			cut = append(cut, taskMark(TaskCardInterrupted, false)+" "+clipRunes(s.name, taskRowNameRunes))
 		} else {
-			cut = append(cut, row.Text)
+			cut = append(cut, markedRow(row))
 		}
 	}
 	v.Interrupted = strings.Join(cut, "\n")
-	ended := len(tasks) - count[TaskCardRunning]
-	switch {
-	case count[TaskCardRunning] > 0:
-		v.State, v.Label = TaskCardRunning, i.T(MsgTaskWorking)
-		if ended > 0 {
-			v.Label = i.Tf(MsgTaskWorkingCount, ended, len(tasks))
-		}
-	case count[TaskCardFailed] > 0:
-		v.State, v.Label = TaskCardFailed, i.Tf(MsgTaskLabelFailedCount, count[TaskCardFailed])
-	case count[TaskCardCompleted] == len(tasks):
-		v.State, v.Label = TaskCardCompleted, i.T(MsgTaskLabelDone)
-	case count[TaskCardInterrupted] > 0:
-		v.State, v.Label = TaskCardInterrupted, i.T(MsgTaskLabelCutOff)
-	default:
-		v.State, v.Label = TaskCardStopped, i.T(MsgTaskLabelStopped)
-	}
+	var state string
+	v.State, state = manyTasksState(i, shown)
+	v.Title = i.Tf(MsgTaskTitleMany, state)
 	showRows(&v)
 	if hidden := len(v.Rows) - taskCardRowsShown; hidden > 0 {
 		v.More = i.Tf(MsgTaskMoreRows, hidden)
 	}
 	return v
+}
+
+// manyTasksState is the state of a card of several tasks and its words:
+// "running", "running <ended>/<all>", "done", "<n> failed", "interrupted" or
+// "stopped".
+func manyTasksState(i *I18n, tasks []taskShown) (TaskCardState, string) {
+	count := map[TaskCardState]int{}
+	for _, s := range tasks {
+		count[s.state]++
+	}
+	switch {
+	case count[TaskCardRunning] > 0:
+		if ended := len(tasks) - count[TaskCardRunning]; ended > 0 {
+			return TaskCardRunning, i.Tf(MsgTaskWorkingCount, ended, len(tasks))
+		}
+		return TaskCardRunning, i.T(MsgTaskWorking)
+	case count[TaskCardFailed] > 0:
+		return TaskCardFailed, i.Tf(MsgTaskLabelFailedCount, count[TaskCardFailed])
+	case count[TaskCardCompleted] == len(tasks):
+		return TaskCardCompleted, i.T(MsgTaskLabelDone)
+	case count[TaskCardInterrupted] > 0:
+		return TaskCardInterrupted, i.T(MsgTaskLabelCutOff)
+	}
+	return TaskCardStopped, i.T(MsgTaskLabelStopped)
 }
 
 // showRows picks the rows for the card's body, at most taskCardRowsShown:
@@ -645,23 +668,34 @@ func liveStep(t *cardTask) string {
 	return ""
 }
 
-// runningRows are the card rows of the session's running background tasks,
-// in the order they started, for the progress answer.
-func (m *taskCardManager) runningRows(i *I18n, sessionKey string) []string {
+// progressRows are the session's background tasks as their card shows them,
+// for the progress answer: the card's title and one line per task, in the
+// order they started. Tasks of the live card stay listed once they end, so
+// the count matches the card; tasks not on a card yet are listed while they
+// run. Nothing is listed when no task runs.
+func (m *taskCardManager) progressRows(i *I18n, sessionKey string) (title string, rows []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var tasks []*cardTask
+	running := false
 	for _, t := range m.tasks {
-		if t.sessionKey == sessionKey && t.background && !t.hidden && !t.ended {
+		if t.sessionKey == sessionKey && t.background && !t.hidden && (!t.ended || t.card != nil) {
 			tasks = append(tasks, t)
+			running = running || !t.ended
 		}
 	}
-	sort.Slice(tasks, func(a, b int) bool { return tasks[a].seq < tasks[b].seq })
-	rows := make([]string, len(tasks))
-	for k, t := range tasks {
-		rows[k] = taskRow(taskShownLocked(i, t))
+	if !running {
+		return "", nil
 	}
-	return rows
+	sort.Slice(tasks, func(a, b int) bool { return tasks[a].seq < tasks[b].seq })
+	shown := make([]taskShown, len(tasks))
+	rows = make([]string, len(tasks))
+	for k, t := range tasks {
+		shown[k] = taskShownLocked(i, t)
+		rows[k] = markedRow(taskRow(shown[k]))
+	}
+	_, state := manyTasksState(i, shown)
+	return i.Tf(MsgTaskTitleMany, state), rows
 }
 
 // taskElapsed is a running time in whole minutes: "3 min", "under a minute".

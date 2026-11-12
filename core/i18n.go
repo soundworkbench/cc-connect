@@ -240,11 +240,10 @@ const (
 	MsgTaskLabelStopped          MsgKey = "task_label_stopped"
 	MsgTaskLabelCutOff           MsgKey = "task_label_cut_off"
 	MsgTaskInterrupted           MsgKey = "task_interrupted"
-	MsgTaskTitleCount            MsgKey = "task_title_count"
+	MsgTaskTitleMany             MsgKey = "task_title_many"
 	MsgTaskWorkingCount          MsgKey = "task_working_count"
 	MsgTaskLabelFailedCount      MsgKey = "task_label_failed_count"
 	MsgTaskMoreRows              MsgKey = "task_more_rows"
-	MsgTriageTasks               MsgKey = "triage_tasks"
 	MsgResumeItemMoreTasks       MsgKey = "resume_item_more_tasks"
 	MsgTriageTask                MsgKey = "triage_task"
 	MsgTriageTaskNoStep          MsgKey = "triage_task_no_step"
@@ -2340,11 +2339,10 @@ var messages = map[MsgKey]map[Language]string{
 		LangSpanish:            "Últ",
 	},
 
-	MsgTaskTitleCount:       {LangEnglish: "Background tasks: %d", LangChinese: "后台任务：%d 项", LangTraditionalChinese: "背景任務：%d 項", LangJapanese: "バックグラウンドタスク：%d 件", LangSpanish: "Tareas en segundo plano: %d"},
+	MsgTaskTitleMany:        {LangEnglish: "Background tasks: %s", LangChinese: "后台任务：%s", LangTraditionalChinese: "背景任務：%s", LangJapanese: "バックグラウンドタスク：%s", LangSpanish: "Tareas en segundo plano: %s"},
 	MsgTaskWorkingCount:     {LangEnglish: "Working %d/%d", LangChinese: "进行中 %d/%d", LangTraditionalChinese: "進行中 %d/%d", LangJapanese: "実行中 %d/%d", LangSpanish: "En curso %d/%d"},
 	MsgTaskLabelFailedCount: {LangEnglish: "%d failed", LangChinese: "%d 项失败", LangTraditionalChinese: "%d 項失敗", LangJapanese: "%d 件失敗", LangSpanish: "%d fallaron"},
 	MsgTaskMoreRows:         {LangEnglish: "%d more under Details", LangChinese: "另有 %d 项，见详情", LangTraditionalChinese: "另有 %d 項，見詳情", LangJapanese: "ほか %d 件は詳細に", LangSpanish: "%d más en Detalles"},
-	MsgTriageTasks:          {LangEnglish: "%d background tasks are running:", LangChinese: "后台任务 %d 项进行中：", LangTraditionalChinese: "背景任務 %d 項進行中：", LangJapanese: "バックグラウンドタスク %d 件が実行中：", LangSpanish: "%d tareas en segundo plano en curso:"},
 	MsgResumeItemMoreTasks:  {LangEnglish: "%d more background tasks", LangChinese: "另有 %d 个后台任务", LangTraditionalChinese: "另有 %d 個背景任務", LangJapanese: "ほか %d 件のバックグラウンドタスク", LangSpanish: "%d tareas más en segundo plano"},
 
 	// ── Timer (one-shot) ──────────────────────────────────────

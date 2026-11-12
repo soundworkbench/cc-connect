@@ -166,9 +166,9 @@ func TestTaskCardRowsSettleOneByOne(t *testing.T) {
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "b", Status: "stopped"})
 	waitUntil(t, "stopped row", func() bool {
 		v := lastView(env)
-		return len(v.Rows) == 2 && v.Rows[1].Text == "■ 任务乙 · 用时不到 1 分钟"
+		return len(v.Rows) == 2 && markedRow(v.Rows[1]) == "■ 任务乙 · 用时不到 1 分钟"
 	})
-	if v := lastView(env); v.State != TaskCardRunning || v.Label != "进行中 1/2" || v.Rows[0].Text != "◐ 任务甲 · 不到 1 分钟" {
+	if v := lastView(env); v.State != TaskCardRunning || v.Title != "后台任务：进行中 1/2" || markedRow(v.Rows[0]) != "⏳ 任务甲 · 不到 1 分钟" {
 		t.Fatalf("card after one stop: %+v", v)
 	}
 	if sent, _ := env.p.cards(); len(sent) != 1 {

@@ -58,10 +58,11 @@ func (p *Platform) taskCardJSON(v core.TaskCardView) string {
 	if len(v.Rows) == 0 {
 		return taskCardFrame(v, p.oneTaskBody(v))
 	}
-	card := taskCardFrame(v, taskRowsBody(v, true))
+	spinner := p.cachedStepIcons().spinner
+	card := taskCardFrame(v, taskRowsBody(v, spinner, true))
 	if len(card) > maxRichCardJSONBytes {
 		// Many long-running rows: the details keep the rows, not every step.
-		card = taskCardFrame(v, taskRowsBody(v, false))
+		card = taskCardFrame(v, taskRowsBody(v, spinner, false))
 	}
 	return card
 }
@@ -90,14 +91,13 @@ func (p *Platform) oneTaskBody(v core.TaskCardView) []map[string]any {
 // taskRowsBody is the body of a card of several tasks: the shown rows, a
 // note naming how many more sit in the details, then the details panel with
 // every task's row, its steps (when withSteps) and a failed task's raw error.
-func taskRowsBody(v core.TaskCardView, withSteps bool) []map[string]any {
+func taskRowsBody(v core.TaskCardView, spinner string, withSteps bool) []map[string]any {
 	var shown, details []map[string]any
-	var body []string
 	for _, r := range v.Rows {
 		if r.Shown {
-			body = append(body, escapeCardText(r.Text))
+			shown = append(shown, taskRowElement(r, spinner))
 		}
-		text := escapeCardText(r.Text)
+		text := escapeCardText(r.Mark + " " + r.Text)
 		if withSteps && len(r.Details) > 0 {
 			text += "\n" + stepLines(r.Details)
 		}
@@ -106,11 +106,34 @@ func taskRowsBody(v core.TaskCardView, withSteps bool) []map[string]any {
 			details = appendFull(details, r.FullTitle, r.Full)
 		}
 	}
-	shown = append(shown, map[string]any{"tag": "markdown", "content": strings.Join(body, "\n")})
 	if v.More != "" {
 		shown = append(shown, notation("<font color='grey'>"+escapeCardText(v.More)+"</font>"))
 	}
 	return append(shown, buildRichPanel(v.DetailsTitle, details))
+}
+
+// taskRowElement is one row on the body: a narrow column for the row's sign
+// and a column for its text, so every row's text starts at the same place
+// and a wrapped line stays under it. A running task shows the spinner image
+// the card of one task uses, at the size of a line icon; a waiting or ended
+// one, and every row while the image is not uploaded yet, its text mark.
+func taskRowElement(r core.TaskCardRow, spinner string) map[string]any {
+	sign := map[string]any{"tag": "markdown", "content": r.Mark}
+	switch {
+	case r.State.Live() && !r.Waiting && spinner != "":
+		sign = map[string]any{"tag": "img", "img_key": spinner, "size": "16px 16px", "scale_type": "crop_center",
+			"preview": false, "transparent": true, "margin": "3px 0px 0px 0px", "alt": map[string]any{"tag": "plain_text", "content": ""}}
+	case r.State.Live() && !r.Waiting:
+		sign["content"] = spinnerGlyphs[0]
+	}
+	return map[string]any{
+		"tag": "column_set", "flex_mode": "none", "horizontal_spacing": "small",
+		"columns": []map[string]any{
+			{"tag": "column", "width": "20px", "vertical_align": "top", "elements": []map[string]any{sign}},
+			{"tag": "column", "width": "weighted", "weight": 1, "vertical_align": "top",
+				"elements": []map[string]any{{"tag": "markdown", "content": escapeCardText(r.Text)}}},
+		},
+	}
 }
 
 func notation(content string) map[string]any {
@@ -148,15 +171,19 @@ func taskCardFrame(v core.TaskCardView, els []map[string]any) string {
 	}
 	card := map[string]any{
 		"schema": "2.0",
-		"config": map[string]any{"width_mode": "default", "summary": map[string]any{"content": v.Title + " · " + v.Label}},
+		"config": map[string]any{"width_mode": "default", "summary": map[string]any{"content": v.Title}},
 		"header": map[string]any{
 			"title":    map[string]any{"tag": "plain_text", "content": v.Title},
 			"template": color,
-			"text_tag_list": []map[string]any{{
-				"tag": "text_tag", "text": map[string]any{"tag": "plain_text", "content": v.Label}, "color": tag,
-			}},
 		},
 		"body": map[string]any{"elements": els},
+	}
+	// A card of several tasks carries its state in the title.
+	if v.Label != "" {
+		card["config"].(map[string]any)["summary"] = map[string]any{"content": v.Title + " · " + v.Label}
+		card["header"].(map[string]any)["text_tag_list"] = []map[string]any{{
+			"tag": "text_tag", "text": map[string]any{"tag": "plain_text", "content": v.Label}, "color": tag,
+		}}
 	}
 	b, _ := json.Marshal(card)
 	return string(b)
