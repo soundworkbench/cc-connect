@@ -80,7 +80,7 @@
 enabled = true
 max_messages = 20
 max_chars = 20000                  # Unicode characters, including source/time markers
-hold_seconds = 60                 # idle automation wait; 0 disables waiting
+hold_seconds = 3                  # idle automation wait; 0 disables waiting
 immediate_sources = ["human"]      # add "relay", "timer", "cron", "assistant" as needed
 
 [log]

@@ -642,5 +642,6 @@ func (e *Engine) deliverDecision(d *Decision) error {
 		Prompt:      d.inboundText(),
 		Description: "decision " + d.ID,
 		Silent:      &silent,
+		Urgent:      true,
 	})
 }

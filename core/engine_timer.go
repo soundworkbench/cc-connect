@@ -132,6 +132,7 @@ func (e *Engine) ExecuteTimerJob(job *TimerJob) error {
 		Content:          content,
 		ReplyCtx:         replyCtx,
 		ModeOverride:     job.Mode,
+		Urgent:           job.Urgent,
 	}
 
 	agent := e.agent

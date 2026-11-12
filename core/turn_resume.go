@@ -285,6 +285,7 @@ func (e *Engine) promptResume(key, clock string, items []string, now time.Time) 
 		Description: "resume after restart",
 		SessionMode: "reuse",
 		Silent:      &silent,
+		Urgent:      true,
 	}
 	slog.Info("resume: prompting", "session", key, "items", len(items))
 	// The job runs the whole turn, so each session resumes on its own.

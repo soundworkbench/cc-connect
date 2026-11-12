@@ -228,7 +228,7 @@ allow_from = "ou_xxx"
 ### 关闭和启动
 
 - 停止时，服务等待运行中的回合结束（`core/shutdown_drain.go`）。
-- 重启后续做（`core/turn_resume.go`）：桥把每个会话正在跑的回合（取会话历史里最近一条用户消息的前 60 字作名字）和开了卡的后台任务记在 `data_dir/inflight/<项目哈希>.json`，回合结束、任务结束就删；关机或进程被杀时来不及删的留下。文件每分钟刷新一次时间（只在有记录时），所以中断时刻误差不超过 1 分钟。启动时读出上次留下的记录、清空文件，每条记录只处理一次；第一个平台就绪 20 秒后（先让私聊补收把重启期间的消息补进来）各会话分别处理：中断不到 6 小时的，以定时提示的方式补一轮内部提示“【重启续做】上次在 HH:MM 因重启中断，未完成的有：请求「…」；后台任务「…」。请核对状态后续做，并用一句话告诉用户已接着做。”，按自动回合发出，回复就是给用户的那一句；这一轮和其他自动消息一样受 `[queue_batch]` 的合并等待（默认最多 60 秒）。超过 6 小时的，或者被打断的正是上次补的那一轮，只发一句“上次 HH:MM 的任务被中断，需要的话说一声我再继续。”。没有开关；没有 `data_dir` 时不记录。按次运行的定时任务会话不记录。回合卡在重启时改成的灰字由“已中断，请重发”改为“已中断”。
+- 重启后续做（`core/turn_resume.go`）：桥把每个会话正在跑的回合（取会话历史里最近一条用户消息的前 60 字作名字）和开了卡的后台任务记在 `data_dir/inflight/<项目哈希>.json`，回合结束、任务结束就删；关机或进程被杀时来不及删的留下。文件每分钟刷新一次时间（只在有记录时），所以中断时刻误差不超过 1 分钟。启动时读出上次留下的记录、清空文件，每条记录只处理一次；第一个平台就绪 20 秒后（先让私聊补收把重启期间的消息补进来）各会话分别处理：中断不到 6 小时的，以定时提示的方式补一轮内部提示“【重启续做】上次在 HH:MM 因重启中断，未完成的有：请求「…」；后台任务「…」。请核对状态后续做，并用一句话告诉用户已接着做。”，按自动回合发出，回复就是给用户的那一句；这一轮不受 `[queue_batch]` 的合并等待，会话一空闲就开始。超过 6 小时的，或者被打断的正是上次补的那一轮，只发一句“上次 HH:MM 的任务被中断，需要的话说一声我再继续。”。没有开关；没有 `data_dir` 时不记录。按次运行的定时任务会话不记录。回合卡在重启时改成的灰字由“已中断，请重发”改为“已中断”。
 - 崩溃后遗留的实例锁可以复用（`cmd/cc-connect/instance_lock.go`）。
 
 ### 代码布局
@@ -263,7 +263,7 @@ allow_from = "ou_xxx"
 | | `trace_file` (off) | 流式耗时，写成 JSON 行 |
 | agent 选项 | `stream_partial_text` (含飞书平台的 claudecode 项目为 true) | 卡片显示正在写的文本块；写 `false` 关闭 |
 | `[display]` | `progress_history`、`keep_progress_card`、`tool_progress_lines` | quiet 模式的进度（见上文） |
-| `[queue_batch]` | `enabled` (true)、`max_messages` (20)、`max_chars` (20000)、`hold_seconds` (60)、`immediate_sources` (`["human"]`) | 队列合并；自动消息最多等待 `hold_seconds` 秒，看是否有更多消息 |
+| `[queue_batch]` | `enabled` (true)、`max_messages` (20)、`max_chars` (20000)、`hold_seconds` (3)、`debounce_ms` (1500)、`immediate_sources` (`["human"]`) | 队列合并；会话空闲时，自动消息最多等待 `hold_seconds` 秒，把同时到达的几条合成一轮；人发的消息等 `debounce_ms` 毫秒，合并紧接着发来的几条。决定卡片的答案和重启续做不等待 |
 | `[decision]` | `enabled` (false)、`default_hours` (12) | 决策卡 |
 | Claude Code 选项 | `stream_partial_text` (false)、`first_write_timeout` (`"60s"`)、`config_dirs` | 见上文 |
 | Codex 选项 | `backend` (`"exec"`)、`background_wakeup`、`background_wakeup_max_turns`、`background_wakeup_timeout_mins` | 回合并入和后台唤醒 |

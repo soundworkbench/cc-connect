@@ -32,6 +32,7 @@ type TimerJob struct {
 	Fired       bool      `json:"fired"`
 	FiredAt     time.Time `json:"fired_at,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
+	Urgent      bool      `json:"-"` // the bridge's own follow-up (decision answer, restart resume): starts as soon as the session is idle
 }
 
 // IsShellJob returns true if the job runs a shell command directly.

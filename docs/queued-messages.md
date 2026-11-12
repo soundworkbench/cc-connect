@@ -11,7 +11,7 @@ The top-level `[queue_batch]` section applies to every project. Changes take eff
 enabled = true
 max_messages = 20
 max_chars = 20000
-hold_seconds = 60
+hold_seconds = 3
 immediate_sources = ["human"]
 ```
 
@@ -23,7 +23,7 @@ At dequeue, consecutive compatible messages share one `AgentSession.Send`. They 
 
 The final message supplies the reply platform and reply context. Earlier parts with a different context receive the platform's existing received/done reaction or done acknowledgement when supported. This acknowledges that their answer is included in the final message's reply. Platforms without this capability skip the acknowledgement. The batch is muted only when every part is muted, so a human message releases waiting muted automation into a visible reply. History stores the combined user content once. Existing session-save points are unchanged.
 
-When a session is idle, automation enters the durable FIFO before waiting for `hold_seconds`. The first arrival sets the deadline; later arrivals do not extend it. A human or urgent message wakes that wait and joins the same FIFO. Normal batch limits and individual-message boundaries still apply.
+When a session is idle, automation enters the durable FIFO before waiting for `hold_seconds`. The first arrival sets the deadline; later arrivals do not extend it. A human or urgent message wakes that wait and joins the same FIFO. Decision-card answers and restart resumes are urgent, so they start as soon as the session is idle. Normal batch limits and individual-message boundaries still apply.
 
 Source classification uses these fields in order:
 

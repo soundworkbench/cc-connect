@@ -19,7 +19,7 @@ type QueueBatchConfig struct {
 }
 
 func DefaultQueueBatchConfig() QueueBatchConfig {
-	return QueueBatchConfig{Enabled: true, MaxMessages: 20, MaxChars: 20000, Hold: 60 * time.Second, ImmediateSources: []string{"human"}}
+	return QueueBatchConfig{Enabled: true, MaxMessages: 20, MaxChars: 20000, Hold: 3 * time.Second, ImmediateSources: []string{"human"}}
 }
 
 func (e *Engine) SetQueueBatchConfig(cfg QueueBatchConfig) {

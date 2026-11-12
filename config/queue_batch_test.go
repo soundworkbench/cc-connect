@@ -8,7 +8,7 @@ import (
 )
 
 func TestQueueBatchConfig_DefaultsAndExplicitZero(t *testing.T) {
-	want := ResolvedQueueBatch{Enabled: true, MaxMessages: 20, MaxChars: 20000, HoldSeconds: 60, DebounceMs: 1500, ImmediateSources: []string{"human"}}
+	want := ResolvedQueueBatch{Enabled: true, MaxMessages: 20, MaxChars: 20000, HoldSeconds: 3, DebounceMs: 1500, ImmediateSources: []string{"human"}}
 	if got := (QueueBatchConfig{}).Resolve(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("defaults=%+v", got)
 	}
