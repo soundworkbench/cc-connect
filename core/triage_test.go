@@ -42,16 +42,18 @@ func (p *reactPlatform) reacted() []string {
 }
 
 type triageEnv struct {
-	t     *testing.T
-	p     *reactPlatform
-	s     *queuedLifecycleSession
-	e     *Engine
-	key   string
-	label atomic.Value // what the quick model answers
-	fail  atomic.Bool
-	delay atomic.Int64 // how long the quick model takes, in ns
-	calls atomic.Int32
-	n     int
+	t        *testing.T
+	p        *reactPlatform
+	s        *queuedLifecycleSession
+	e        *Engine
+	key      string
+	label    atomic.Value // what the quick model answers
+	rewrite  atomic.Value // what the quick model answers to a Chinese rewrite; unset = gateway error
+	rewrites atomic.Int32
+	fail     atomic.Bool
+	delay    atomic.Int64 // how long the quick model takes, in ns
+	calls    atomic.Int32
+	n        int
 }
 
 func newTriageEnv(t *testing.T) *triageEnv {
@@ -63,6 +65,15 @@ func newTriageEnv(t *testing.T) *triageEnv {
 			System string `json:"system"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.System == outboundChinesePrompt {
+			env.rewrites.Add(1)
+			if v, ok := env.rewrite.Load().(string); ok {
+				fmt.Fprintf(w, `{"content":[{"type":"text","text":%q}]}`, v)
+				return
+			}
+			http.Error(w, "down", http.StatusBadGateway)
+			return
+		}
 		if body.System != triagePrompt {
 			fmt.Fprint(w, `{"content":[{"type":"text","text":"收到"}]}`) // the turn's quick line
 			return

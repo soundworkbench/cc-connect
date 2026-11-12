@@ -363,6 +363,7 @@ type Engine struct {
 	decisionDefaultHours  int
 	decisionWake          chan struct{}
 	decisionInflight      sync.Map
+	humanEnglish          sync.Map // session key → whether the person's latest message was English
 	sessionAgentsMu       sync.Mutex
 	sessionAgents         map[sessionAgentKey]sessionAgent
 	name                  string
@@ -2374,6 +2375,7 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		agent = wsAgent
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
 	}
+	e.noteHumanLanguage(msg, msg.SessionKey, interactiveKey)
 
 	var isolationErr error
 	agent, isolationErr = e.isolateAgent(agent, sessions, msg.SessionKey, msg.IsolateAgent)
@@ -4777,6 +4779,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				if silent {
 					slog.Info("silent reply suppressed", "session", sessionKey, "unsolicited", true)
 				} else if outbound != "" {
+					outbound = e.chineseOutbound(sessionKey, outbound)
 					for _, chunk := range SplitMessageCodeFenceAware(outbound, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
 					}
@@ -6275,6 +6278,13 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 					cleanResponse = outbound
 				}
 			}
+			// Duplicate detection against `send` side text compares the agent's own words.
+			sideCompare := strings.TrimSpace(baseResponse)
+			if !isSilent {
+				if rewritten := e.chineseOutbound(sessionKey, cleanResponse); rewritten != cleanResponse {
+					baseResponse, cleanResponse = rewritten, rewritten
+				}
+			}
 
 			if !isSilent {
 				sp.acknowledgeVisible(baseResponse)
@@ -6344,9 +6354,8 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 
 			e.noteUserTurnCompleted(state)
 
-			normalizedBaseResponse := strings.TrimSpace(baseResponse)
 			state.mu.Lock()
-			suppressDuplicate := normalizedBaseResponse != "" && normalizedBaseResponse == state.sideText
+			suppressDuplicate := sideCompare != "" && sideCompare == state.sideText
 			state.sideText = ""
 			state.mu.Unlock()
 
@@ -11717,6 +11726,8 @@ func (e *Engine) SendToSessionWithOptions(sessionKey, message string, images []I
 	if (len(images) > 0 || len(files) > 0) && !e.attachmentSendEnabled {
 		return ErrAttachmentSendDisabled
 	}
+	sideText := strings.TrimSpace(message) // the agent's own words, for duplicate detection
+	message = e.chineseOutbound(sessionKey, message)
 
 	var imageSender ImageSender
 	if len(images) > 0 {
@@ -11758,7 +11769,7 @@ func (e *Engine) SendToSessionWithOptions(sessionKey, message string, images []I
 		}
 		if state != nil {
 			state.mu.Lock()
-			state.sideText = strings.TrimSpace(message)
+			state.sideText = sideText
 			state.mu.Unlock()
 		}
 	}

@@ -133,6 +133,20 @@ func fetchQuickLine(ctx context.Context, cfg QuickLineCfg, userMsg string, histo
 
 // fetchQuickText asks the quick model for one short line. The key file is read on every call.
 func fetchQuickText(ctx context.Context, cfg QuickLineCfg, system string, messages []map[string]string) (string, error) {
+	text, err := fetchQuickReply(ctx, cfg, system, messages, quickLineMaxTokens)
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(strings.Join(strings.Fields(text), " "))
+	if line == "" {
+		return "", fmt.Errorf("empty text block")
+	}
+	return clipQuickLine(collapseRepeat(line)), nil
+}
+
+// fetchQuickReply asks the quick model and returns its first text block as
+// written. The key file is read on every call.
+func fetchQuickReply(ctx context.Context, cfg QuickLineCfg, system string, messages []map[string]string, maxTokens int) (string, error) {
 	key, err := os.ReadFile(cfg.KeyFile)
 	if err != nil {
 		return "", fmt.Errorf("read key file: %w", err)
@@ -143,7 +157,7 @@ func fetchQuickText(ctx context.Context, cfg QuickLineCfg, system string, messag
 	}
 	payload := map[string]any{
 		"model":      cfg.Model,
-		"max_tokens": quickLineMaxTokens,
+		"max_tokens": maxTokens,
 		"system":     system,
 		"messages":   messages,
 	}
@@ -186,11 +200,10 @@ func fetchQuickText(ctx context.Context, cfg QuickLineCfg, system string, messag
 		if c.Type != "text" {
 			continue
 		}
-		line := strings.TrimSpace(strings.Join(strings.Fields(c.Text), " "))
-		if line == "" {
+		if strings.TrimSpace(c.Text) == "" {
 			return "", fmt.Errorf("empty text block")
 		}
-		return clipQuickLine(collapseRepeat(line)), nil
+		return c.Text, nil
 	}
 	return "", fmt.Errorf("no text block")
 }
