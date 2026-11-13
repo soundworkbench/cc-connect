@@ -39,6 +39,11 @@ const (
 	decisionMaxOptions    = 20
 	decisionChoiceField   = "choice"
 
+	// A checklist shows each option as a row with a check box, for approving a
+	// batch at once: tick some and submit, or agree to all.
+	decisionChecklistMax = 50
+	checklistEmptyToast  = "请先勾选要同意的项"
+
 	decisionVoidLabel = "已作废"
 	decisionVoidToast = "这张卡已作废，选择不会生效"
 )
@@ -60,6 +65,12 @@ type DecisionRequest struct {
 	Danger bool `json:"danger,omitempty"`
 	// Multi lets the person pick several options from a dropdown.
 	Multi bool `json:"multi,omitempty"`
+	// Checklist shows every option as a row with a check box, submitted with
+	// "提交勾选" or "全部同意". It never has a default.
+	Checklist bool `json:"checklist,omitempty"`
+	// Details are optional second lines under the checklist rows (amount,
+	// reason, advice), in the order of Options.
+	Details []string `json:"details,omitempty"`
 }
 
 // Decision is one persisted decision card.
@@ -76,6 +87,9 @@ type Decision struct {
 	State      string    `json:"state"`
 	Danger     bool      `json:"danger,omitempty"`
 	Multi      bool      `json:"multi,omitempty"`
+	Checklist  bool      `json:"checklist,omitempty"`
+	Details    []string  `json:"details,omitempty"`
+	AllAgreed  bool      `json:"all_agreed,omitempty"` // a checklist answered with 全部同意
 	Chosen     int       `json:"chosen,omitempty"`     // 1-based, valid when State != pending; the first pick when Multi
 	ChosenSet  []int     `json:"chosen_set,omitempty"` // every pick, ascending, when Multi
 	ResolvedAt time.Time `json:"resolved_at,omitempty"`
@@ -94,8 +108,18 @@ func (d *Decision) validate() error {
 	if len(d.Options) < 2 {
 		return errors.New("at least two options are required")
 	}
-	if len(d.Options) > decisionMaxOptions {
-		return fmt.Errorf("at most %d options are allowed", decisionMaxOptions)
+	limit := decisionMaxOptions
+	if d.Checklist {
+		limit = decisionChecklistMax
+	}
+	if len(d.Options) > limit {
+		return fmt.Errorf("at most %d options are allowed", limit)
+	}
+	if len(d.Details) > 0 && !d.Checklist {
+		return errors.New("details are only shown on a checklist")
+	}
+	if len(d.Details) > len(d.Options) {
+		return errors.New("more details than options")
 	}
 	for _, o := range d.Options {
 		if strings.TrimSpace(o) == "" {
@@ -133,6 +157,9 @@ func (d *Decision) inboundText() string {
 	}
 	if d.State == decisionExpired {
 		return fmt.Sprintf("【到期默认】%s：%s（到期未回复，按推荐处理）", d.Question, d.ChosenLabel())
+	}
+	if d.AllAgreed {
+		return fmt.Sprintf("【决定】%s：%s（全部同意）", d.Question, d.ChosenLabel())
 	}
 	return fmt.Sprintf("【决定】%s：%s", d.Question, d.ChosenLabel())
 }
@@ -244,6 +271,27 @@ func (s *DecisionStore) ResolveSet(id string, picks []int, state string) (*Decis
 	if d.Multi {
 		d.ChosenSet = append([]int(nil), picks...)
 	}
+	if err := s.saveLocked(); err != nil {
+		slog.Error("decision: persist failed", "id", id, "error", err)
+	}
+	c := *d
+	return &c, true
+}
+
+// ResolveAll answers a pending checklist with every option (全部同意). The
+// returned value is a copy.
+func (s *DecisionStore) ResolveAll(id string) (*Decision, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.find(id)
+	if d == nil || !d.Checklist || d.State != decisionPending {
+		return nil, false
+	}
+	d.ChosenSet = nil
+	for i := range d.Options {
+		d.ChosenSet = append(d.ChosenSet, i+1)
+	}
+	d.State, d.Chosen, d.AllAgreed, d.ResolvedAt = decisionAnswered, 1, true, time.Now()
 	if err := s.saveLocked(); err != nil {
 		slog.Error("decision: persist failed", "id", id, "error", err)
 	}
@@ -367,6 +415,9 @@ func buildDecisionCard(d *Decision) *Card {
 func decisionCard(d *Decision) *Card {
 	switch d.State {
 	case decisionAnswered:
+		if d.Checklist {
+			return checklistDoneCard(d)
+		}
 		cb := NewCard().Title("✅ 已决定："+d.ChosenLabel(), "green")
 		cb.Markdown("**" + d.Question + "**")
 		cb.Markdown("→ " + d.ChosenLabel() + "（" + decisionClock(d.ResolvedAt) + " 你已选择）")
@@ -398,6 +449,9 @@ func decisionCard(d *Decision) *Card {
 		form := decisionForm(d)
 		if void {
 			form.Disabled, form.DisabledTip, form.Confirm = true, decisionVoidLabel, nil
+			for i := range form.More {
+				form.More[i].Confirm = nil
+			}
 		}
 		cb.card.Elements = append(cb.card.Elements, form)
 	} else {
@@ -430,6 +484,9 @@ func decisionCard(d *Decision) *Card {
 // decisionForm is the dropdown of a decision with many options or a multiple
 // choice, submitted as "act:/decision-form <id> <values>".
 func decisionForm(d *Decision) CardForm {
+	if d.Checklist {
+		return checklistForm(d)
+	}
 	field := CardFormField{Name: decisionChoiceField, Kind: "select", Placeholder: "请选择", Required: true}
 	if d.Multi {
 		field.Kind, field.Placeholder = "multi_select", "可以选多个"
@@ -448,6 +505,76 @@ func decisionForm(d *Decision) CardForm {
 		form.Confirm = &CardConfirm{Title: "确认这个操作？", Text: "提交后会马上照你选的做，不能撤回。"}
 	}
 	return form
+}
+
+func checklistField(i int) string { return "c" + strconv.Itoa(i+1) }
+
+// checklistForm is one check box per option, submitted as
+// "act:/decision-form <id> <values>", or agreed in full as
+// "act:/decision-all <id>". Both ask for confirmation.
+func checklistForm(d *Decision) CardForm {
+	form := CardForm{Name: "decision_" + d.ID, SubmitText: "提交勾选", SubmitType: "primary",
+		SubmitValue: "act:/decision-form " + d.ID,
+		Confirm:     &CardConfirm{Title: "提交勾选的项？", Text: "勾选的项同意，没勾的不同意。"}}
+	for i, opt := range d.Options {
+		text := "**" + opt + "**"
+		if i < len(d.Details) && strings.TrimSpace(d.Details[i]) != "" {
+			text += "\n" + strings.TrimSpace(d.Details[i])
+		}
+		form.Fields = append(form.Fields, CardFormField{Name: checklistField(i), Kind: "checker", Label: text})
+	}
+	all := Btn("全部同意", "default", "act:/decision-all "+d.ID)
+	all.Confirm = &CardConfirm{Title: "全部同意？", Text: fmt.Sprintf("同意全部 %d 项。", len(d.Options))}
+	form.More = []CardButton{all}
+	return form
+}
+
+// checklistDoneCard shows which rows were agreed and which were not.
+func checklistDoneCard(d *Decision) *Card {
+	picked := map[int]bool{}
+	for _, i := range d.ChosenSet {
+		picked[i] = true
+	}
+	var yes, no []string
+	for i, opt := range d.Options {
+		if picked[i+1] {
+			yes = append(yes, "- "+opt)
+		} else {
+			no = append(no, "- "+opt)
+		}
+	}
+	title := fmt.Sprintf("✅ 已决定：同意 %d 项", len(yes))
+	if d.AllAgreed {
+		title = "✅ 已决定：全部同意"
+	}
+	cb := NewCard().Title(title, "green")
+	cb.Markdown("**" + d.Question + "**")
+	cb.Markdown(fmt.Sprintf("**同意（%d）**\n", len(yes)) + strings.Join(yes, "\n"))
+	if len(no) > 0 {
+		cb.Markdown(fmt.Sprintf("**不同意（%d）**\n", len(no)) + strings.Join(no, "\n"))
+	}
+	cb.Note(decisionClock(d.ResolvedAt) + " 你已提交")
+	return cb.Build()
+}
+
+// checklistChecked reads a check box from the submitted form values. Feishu
+// does not document the shape, so a boolean, a "true"-like string, a number
+// and an object with a checked field are all accepted.
+func checklistChecked(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "true", "1", "yes", "on", "checked":
+			return true
+		}
+	case float64:
+		return x != 0
+	case map[string]any:
+		return checklistChecked(x["checked"])
+	}
+	return false
 }
 
 // ── Engine side ────────────────────────────────────────────────
@@ -476,9 +603,11 @@ func (e *Engine) SendDecisionCard(req DecisionRequest) (string, error) {
 		Question:   strings.TrimSpace(req.Question),
 		Note:       strings.TrimSpace(req.Note),
 		Options:    req.Options,
-		HasDefault: !req.NoDefault && !req.Danger && !req.Multi,
+		HasDefault: !req.NoDefault && !req.Danger && !req.Multi && !req.Checklist,
 		Danger:     req.Danger,
-		Multi:      req.Multi,
+		Multi:      req.Multi || req.Checklist,
+		Checklist:  req.Checklist,
+		Details:    req.Details,
 		State:      decisionPending,
 		CreatedAt:  time.Now(),
 	}
@@ -588,6 +717,9 @@ func (e *Engine) handleDecisionForm(args string) *Card {
 	}
 	id, raw, _ := strings.Cut(strings.TrimSpace(args), " ")
 	values := parseFormValues("decision_form", id, raw)
+	if d := e.decisions.Get(id); d != nil && d.Checklist {
+		return e.handleChecklistSubmit(d, values)
+	}
 	var picks []int
 	seen := map[int]bool{}
 	add := func(v any) {
@@ -620,6 +752,57 @@ func (e *Engine) handleDecisionForm(args string) *Card {
 	case decisionPending:
 		return &Card{Toast: "请先选择"}
 	case decisionVoided:
+		return &Card{Toast: decisionVoidToast}
+	}
+	return buildDecisionCard(d)
+}
+
+// handleChecklistSubmit takes the ticked rows of a checklist; an empty submit
+// only shows a notice.
+func (e *Engine) handleChecklistSubmit(d *Decision, values map[string]any) *Card {
+	switch d.State {
+	case decisionVoided:
+		return &Card{Toast: decisionVoidToast}
+	case decisionPending:
+	default:
+		return buildDecisionCard(d)
+	}
+	var picks []int
+	for i := range d.Options {
+		if checklistChecked(values[checklistField(i)]) {
+			picks = append(picks, i+1)
+		}
+	}
+	if len(picks) == 0 {
+		return &Card{Toast: checklistEmptyToast}
+	}
+	if r, ok := e.decisions.ResolveSet(d.ID, picks, decisionAnswered); ok {
+		e.wakeDecisions()
+		return buildDecisionCard(r)
+	}
+	if cur := e.decisions.Get(d.ID); cur != nil && cur.State != decisionVoided {
+		return buildDecisionCard(cur)
+	}
+	return &Card{Toast: decisionVoidToast}
+}
+
+// handleDecisionAll handles "act:/decision-all <id>", 全部同意 on a checklist.
+func (e *Engine) handleDecisionAll(args string) *Card {
+	if e.decisions == nil {
+		cardActionDropped("decision_all", "", "decisions_disabled")
+		return nil
+	}
+	id, _, _ := strings.Cut(strings.TrimSpace(args), " ") // form values may follow; not needed
+	if r, ok := e.decisions.ResolveAll(id); ok {
+		e.wakeDecisions()
+		return buildDecisionCard(r)
+	}
+	d := e.decisions.Get(id)
+	switch {
+	case d == nil || !d.Checklist:
+		cardActionDropped("decision_all", id, "unknown_checklist")
+		return nil
+	case d.State == decisionVoided:
 		return &Card{Toast: decisionVoidToast}
 	}
 	return buildDecisionCard(d)

@@ -12749,6 +12749,10 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 		return e.handleDecisionForm(args)
 	}
 
+	if prefix == "act" && cmd == "/decision-all" {
+		return e.handleDecisionAll(args)
+	}
+
 	if prefix == "act" && cmd == "/decision" {
 		return e.handleDecisionTap(args)
 	}

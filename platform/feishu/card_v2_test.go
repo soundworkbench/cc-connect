@@ -212,3 +212,60 @@ func TestClassicCardsStayJSON1(t *testing.T) {
 		t.Fatalf("classic card changed: %s", plainJSON(got))
 	}
 }
+
+// A checklist card: one checker per row inside the form, a submit button and
+// an agree-all button, both bound to the form and both confirmed.
+func TestChecklistFormRendersCheckersAndTwoSubmits(t *testing.T) {
+	form := core.CardForm{Name: "decision_d9", SubmitText: "提交勾选", SubmitType: "primary", SubmitValue: "act:/decision-form d9",
+		Confirm: &core.CardConfirm{Title: "提交勾选的项？", Text: "勾选的项同意。"},
+		More:    []core.CardButton{{Text: "全部同意", Type: "default", Value: "act:/decision-all d9", Confirm: &core.CardConfirm{Title: "全部同意？", Text: "同意全部 2 项。"}}},
+		Fields: []core.CardFormField{
+			{Name: "c1", Kind: "checker", Label: "**张三 报销 1,280 元**\n事由：交通费"},
+			{Name: "c2", Kind: "checker", Label: "**李四 采购 5 万元**"},
+		}}
+	card := core.NewCard().Title("需要你选择", "orange").Markdown("**本批审批**").Build()
+	card.Elements = append(card.Elements, form)
+	card.Shared = true
+	got := generic(t, renderCardMap(card, "feishu:oc_test_chat:ou_allowed"))
+	c1 := findNode(got, func(m map[string]any) bool { return m["tag"] == "checker" && m["name"] == "c1" })
+	if c1 == nil || c1["checked"] != false || !strings.Contains(plainJSON(c1["text"]), `"tag":"lark_md"`) || !strings.Contains(plainJSON(c1["text"]), "事由：交通费") {
+		t.Fatalf("checker = %v", c1)
+	}
+	for label, name := range map[string]string{"提交勾选": "decision_d9_submit", "全部同意": "decision_d9_submit2"} {
+		b := buttonNamed(got, label)
+		if b == nil || b["form_action_type"] != "submit" || b["name"] != name || b["confirm"] == nil {
+			t.Fatalf("%s = %v", label, b)
+		}
+	}
+	formNode := findNode(got, func(m map[string]any) bool { return m["tag"] == "form" })
+	if findNode(formNode, func(m map[string]any) bool { return m["tag"] == "checker" }) == nil || buttonNamed(formNode, "全部同意") == nil {
+		t.Fatalf("checkers and buttons must sit inside the form: %v", formNode)
+	}
+
+	// The submit brings the ticked boxes after the action; agree-all its own action.
+	reply := core.NewCard().Title("✅ 已决定：同意 1 项", "green").Build()
+	call, resp := submitForm(t, formSubmitCallback(t, callbackValueJSON(t, buttonNamed(got, "提交勾选")), "decision_d9_submit", `{"c1": true, "c2": false}`), reply)
+	if call.action != `act:/decision-form d9 {"c1":true,"c2":false}` {
+		t.Fatalf("submit call = %q", call.action)
+	}
+	if resp == nil || resp.Card == nil || generic(t, resp.Card.Data)["schema"] != "2.0" {
+		t.Fatalf("submit reply = %+v", resp)
+	}
+	call, _ = submitForm(t, formSubmitCallback(t, callbackValueJSON(t, buttonNamed(got, "全部同意")), "decision_d9_submit2", `{"c1": false, "c2": false}`), reply)
+	if !strings.HasPrefix(call.action, "act:/decision-all d9") {
+		t.Fatalf("agree all call = %q", call.action)
+	}
+
+	// Voided: checkers and both buttons disabled, no confirm dialog.
+	form.Disabled, form.DisabledTip = true, "已作废"
+	card.Elements[len(card.Elements)-1] = form
+	got = generic(t, renderCardMap(card, ""))
+	for _, label := range []string{"提交勾选", "全部同意"} {
+		if b := buttonNamed(got, label); b["disabled"] != true || b["confirm"] != nil {
+			t.Fatalf("voided %s = %v", label, b)
+		}
+	}
+	if c := findNode(got, func(m map[string]any) bool { return m["tag"] == "checker" }); c["disabled"] != true {
+		t.Fatalf("voided checker = %v", c)
+	}
+}

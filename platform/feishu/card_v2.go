@@ -1,6 +1,10 @@
 package feishu
 
-import "github.com/chenhg5/cc-connect/core"
+import (
+	"strconv"
+
+	"github.com/chenhg5/cc-connect/core"
+)
 
 // Card JSON 2.0 rendering of the classic card layout, for shared cards
 // (core.Card.Shared: decision and form cards), the delete-mode form, and any
@@ -189,6 +193,18 @@ func v2CardMap(header *core.CardHeader, elements []map[string]any) map[string]an
 func renderFormV2(f core.CardForm, sessionKey string) map[string]any {
 	var els []map[string]any
 	for _, field := range f.Fields {
+		if field.Kind == "checker" {
+			el := map[string]any{"tag": "checker", "name": field.Name, "checked": false,
+				"text": map[string]any{"tag": "lark_md", "content": field.Label}}
+			if f.Disabled {
+				el["disabled"] = true
+				if f.DisabledTip != "" {
+					el["disabled_tips"] = plainText(f.DisabledTip)
+				}
+			}
+			els = append(els, el)
+			continue
+		}
 		if field.Label != "" {
 			els = append(els, map[string]any{"tag": "markdown", "content": "**" + escapeCardText(field.Label) + "**"})
 		}
@@ -221,10 +237,20 @@ func renderFormV2(f core.CardForm, sessionKey string) map[string]any {
 	if submitType == "" {
 		submitType = "primary"
 	}
-	submit := v2Button(core.CardButton{Text: f.SubmitText, Type: submitType, Value: f.SubmitValue,
-		Confirm: f.Confirm, Disabled: f.Disabled, DisabledTip: f.DisabledTip}, sessionKey)
-	submit["name"] = f.Name + "_submit"
-	submit["form_action_type"] = "submit"
-	els = append(els, submit)
+	buttons := append([]core.CardButton{{Text: f.SubmitText, Type: submitType, Value: f.SubmitValue, Confirm: f.Confirm}}, f.More...)
+	var row []map[string]any
+	for i, b := range buttons {
+		if f.Disabled {
+			b.Disabled, b.DisabledTip, b.Confirm = true, f.DisabledTip, nil
+		}
+		btn := v2Button(b, sessionKey)
+		btn["name"] = f.Name + "_submit"
+		if i > 0 {
+			btn["name"] = f.Name + "_submit" + strconv.Itoa(i+1)
+		}
+		btn["form_action_type"] = "submit"
+		row = append(row, btn)
+	}
+	els = append(els, v2ButtonRow(row, core.CardActionLayoutRow))
 	return map[string]any{"tag": "form", "name": f.Name, "elements": els}
 }

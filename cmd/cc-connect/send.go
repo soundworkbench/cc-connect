@@ -563,7 +563,7 @@ Options:
       --work-dir <path>    Alias for --cwd
       --tts <text>         Synthesize text and send it as a voice/audio message
       --react <emoji>      Add an emoji reaction to the message that started this turn (Feishu emoji type, e.g. OK, THUMBSUP, DONE)
-      --decision <file>    Send a decision card (JSON: question, options[recommended first], note, no_default, deadline_minutes, danger, multi); the answer comes back as a message
+      --decision <file>    Send a decision card (JSON: question, options[recommended first], note, no_default, deadline_minutes, danger, multi, checklist with details[one line per option]); the answer comes back as a message
       --decision-void <id> Void a pending decision or form card (the ID printed when it was sent): the card greys out, its default is cancelled, later taps do nothing
       --form <file>        Send a form card (JSON: title, note, submit, fields[label, type input|date|select|multi_select, options, placeholder, required]); the values come back as one message
       --image <path>       Send an image attachment (repeatable)

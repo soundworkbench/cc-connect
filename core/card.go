@@ -101,7 +101,7 @@ type CardConfirm struct {
 type CardFormField struct {
 	Name        string // key in the submitted values; unique within the card
 	Label       string // shown above the field; empty = none
-	Kind        string // "input", "date", "select" or "multi_select"
+	Kind        string // "input", "date", "select", "multi_select" or "checker" (Label is its markdown text)
 	Placeholder string
 	Required    bool
 	Options     []CardSelectOption // select kinds only
@@ -117,7 +117,10 @@ type CardForm struct {
 	SubmitType  string // "primary", "default", "danger"
 	SubmitValue string
 	Confirm     *CardConfirm // optional dialog before submitting
-	// Disabled greys out every field and the submit button; DisabledTip says why.
+	// More are further submit buttons beside the first one, each with its own
+	// action and confirm dialog; the values follow its action the same way.
+	More []CardButton
+	// Disabled greys out every field and the submit buttons; DisabledTip says why.
 	Disabled    bool
 	DisabledTip string
 }
