@@ -360,6 +360,8 @@ type Engine struct {
 	taskCards   *taskCardManager
 
 	decisions             *DecisionStore
+	secrets               *SecretStore                        // saved secrets: masked in everything sent
+	secretNotify          func(sessionKey, text string) error // tests: replaces the notice delivery
 	decisionDefaultHours  int
 	decisionWake          chan struct{}
 	decisionLoopDone      chan struct{} // closed when the deadline loop has returned
@@ -823,6 +825,7 @@ func (pp *pendingPermission) resolve() {
 func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath string, lang Language) *Engine {
 	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
+		secrets:               NewSecretStore(DefaultSecretDir()),
 		taskCards:             newTaskCardManager(),
 		resumeDelay:           resumeStartDelay,
 		name:                  name,
@@ -1763,6 +1766,9 @@ func (e *Engine) initPlatformCapabilities(p Platform) {
 
 	if nav, ok := p.(CardNavigable); ok {
 		nav.SetCardNavigationHandler(e.handleCardNav)
+	}
+	if m, ok := p.(SecretMasker); ok && e.secrets != nil {
+		m.SetSecretStore(e.secrets)
 	}
 }
 
@@ -3510,9 +3516,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	e.i18n.DetectAndSet(msg.Content)
 	var admittedPreview *streamPreview
 	if e.streamPreview.Segmented && isHumanTurn(msg) && !msg.scheduledMute {
-		preview := newStreamPreview(e.streamPreview, p, msg.ReplyCtx, e.ctx, func(text string) string {
+		preview := newStreamPreview(e.streamPreview, p, msg.ReplyCtx, e.ctx, e.maskStreaming(func(text string) string {
 			return e.renderOutgoingContentForWorkspace(p, text, workspaceDir)
-		})
+		}))
 		preview.progressI18n = e.i18n
 		if preview.segmented != nil && preview.canPreview() {
 			admittedPreview = preview
@@ -5163,7 +5169,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 	}
 	sp := state.activePreview
 	if sp == nil || sp.segmented == nil {
-		sp = newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, workspaceRenderer)
+		sp = newStreamPreview(e.streamPreview, state.platform, state.replyCtx, e.ctx, e.maskStreaming(workspaceRenderer))
 	}
 	sp.hidden = automated
 	sp.progressI18n = e.i18n
@@ -6710,7 +6716,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
-				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, queuedRenderer)
+				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, e.maskStreaming(queuedRenderer))
 				sp.hidden = automated
 				sp.progressI18n = e.i18n
 				sp.keepProgressCard = e.display.KeepProgressCard && sp.segmented == nil
@@ -12748,6 +12754,10 @@ func (e *Engine) handleCardNav(action string, sessionKey string) *Card {
 
 	if prefix == "act" && cmd == "/form-submit" {
 		return e.handleFormSubmit(args)
+	}
+
+	if prefix == "act" && cmd == "/secret-submit" {
+		return e.handleSecretSubmit(args, sessionKey)
 	}
 
 	if prefix == "act" && cmd == "/decision-form" {

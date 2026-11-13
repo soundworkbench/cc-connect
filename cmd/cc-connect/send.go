@@ -27,6 +27,15 @@ func runSend(args []string) {
 		case "--decision-void":
 			runDecisionVoid(args)
 			return
+		case "--secret":
+			runSendSecret(args)
+			return
+		case "--secret-list":
+			runSecretList(args)
+			return
+		case "--secret-delete":
+			runSecretDelete(args)
+			return
 		}
 	}
 	req, dataDir, err := parseSendArgs(args)
@@ -553,6 +562,9 @@ func printSendUsage() {
        cc-connect send [options] --decision <card.json>
        cc-connect send [options] --form <form.json>
        cc-connect send --decision-void <id>
+       cc-connect send [options] --secret <name> [--hint <text>] [--url <https page>]
+       cc-connect send --secret-list
+       cc-connect send --secret-delete <name>
        echo "msg" | cc-connect send [options] --stdin
 
 Send a message, attachment, or synthesized voice message to an active cc-connect session.
@@ -566,6 +578,9 @@ Options:
       --decision <file>    Send a decision card (JSON: question, options[recommended first], note, no_default, deadline_minutes, danger, multi, checklist with details[one line per option]); the answer comes back as a message
       --decision-void <id> Void a pending decision or form card (the ID printed when it was sent): the card greys out, its default is cancelled, later taps do nothing
       --form <file>        Send a form card (JSON: title, note, submit, fields[label, type input|date|select|multi_select, options, placeholder, required]); the values come back as one message
+      --secret <name>      Ask for a password or token with a card in the private chat (name: lowercase letters, digits, hyphens). The value is saved to ~/.secrets/<name>, never shown; a message says when it is saved. Read it in commands with $(cat ~/.secrets/<name>). --hint: one line on what it is for. --url: optional page for values over 1000 characters or with line breaks
+      --secret-list        List saved secrets by name and time (never values)
+      --secret-delete <name> Delete a saved secret
       --image <path>       Send an image attachment (repeatable)
       --file <path>        Send a file attachment (repeatable)
       --audio <path>       Send an audio attachment (repeatable)

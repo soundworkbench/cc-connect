@@ -107,6 +107,10 @@ type CardFormField struct {
 	Placeholder string
 	Required    bool
 	Options     []CardSelectOption // select kinds only
+	// Password hides what is typed (input kind only); MaxLength caps it in
+	// characters, 0 = the platform's limit.
+	Password  bool
+	MaxLength int
 }
 
 // CardForm renders fields with a submit button. On submit the platform calls
@@ -125,6 +129,9 @@ type CardForm struct {
 	// Disabled greys out every field and the submit buttons; DisabledTip says why.
 	Disabled    bool
 	DisabledTip string
+	// Owner, when set, is the only user whose submit counts; anyone else is
+	// told the card is not theirs.
+	Owner string
 }
 
 // CardButton represents a clickable button inside a CardActions element.

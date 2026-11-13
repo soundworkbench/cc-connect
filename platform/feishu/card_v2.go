@@ -227,6 +227,12 @@ func renderFormV2(f core.CardForm, sessionKey string) map[string]any {
 			el["tag"] = "date_picker"
 		default:
 			el["tag"] = "input"
+			if field.Password {
+				el["input_type"] = "password"
+			}
+			if field.MaxLength > 0 {
+				el["max_length"] = field.MaxLength
+			}
 		}
 		if f.Disabled {
 			el["disabled"] = true
@@ -242,6 +248,9 @@ func renderFormV2(f core.CardForm, sessionKey string) map[string]any {
 	for i, b := range buttons {
 		if f.Disabled {
 			b.Disabled, b.DisabledTip, b.Confirm = true, f.DisabledTip, nil
+		}
+		if f.Owner != "" {
+			b.Extra = map[string]string{cardOwnerKey: f.Owner}
 		}
 		btn := v2Button(b, sessionKey)
 		btn["name"] = f.Name + "_submit"

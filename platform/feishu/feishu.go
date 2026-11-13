@@ -201,7 +201,9 @@ type Platform struct {
 	mentionMap             map[string]string // agent name -> open_id (for outbound @ resolution)
 	userNameCache          sync.Map          // open_id -> display name
 	chatNameCache          sync.Map          // chat_id -> chat name
-	chatMemberCache        sync.Map          // chatID -> *chatMemberEntry
+	chatKinds              sync.Map          // chat_id -> chatKind, from received messages
+	secrets                atomic.Pointer[core.SecretStore]
+	chatMemberCache        sync.Map // chatID -> *chatMemberEntry
 	recalledMu             sync.Mutex
 	recalledMsgIDs         map[string]time.Time // message_id -> recall time, short TTL race guard
 	// Webhook mode fields (for Lark international version)
@@ -583,8 +585,6 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		groupChatHistoryShare:      groupChatHistoryShare,
 		resolveMentions:            resolveMentionsOpt,
 		noReplyToTrigger:           noReplyToTrigger,
-		client:                     lark.NewClient(appID, appSecret, clientOpts...),
-		replayClient:               newFeishuReplayClient(appID, appSecret, domain),
 		dedup:                      &core.MessageDedup{},
 		port:                       port,
 		callbackPath:               callbackPath,
@@ -597,6 +597,10 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		resourceChunkSize:          resourceChunkSize,
 		resourceMaxBytes:           defaultResourceMaxBytes,
 	}
+	// Every request goes through the masking client, so a saved secret never
+	// leaves in a message, card, progress update or error text.
+	base.client = lark.NewClient(appID, appSecret, append(clientOpts, lark.WithHttpClient(&maskingHTTPClient{secrets: &base.secrets}))...)
+	base.replayClient = base.newReplayClient()
 	base.configureP2PCatchup(opts)
 	base.configureTopicMemory(opts)
 	base.configureWelcome(opts)
@@ -832,7 +836,7 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 					return nil, err
 				}
 				if resp != nil {
-					return resp, nil
+					return sibling.redactCallbackResponse(resp), nil
 				}
 			}
 			return nil, nil
@@ -1014,6 +1018,12 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	// else who clicks it gets a notice only they see, and the card stays.
 	if owner := p.cardOwner(sessionKey); userID != "" && owner != "" && owner != userID {
 		slog.Info("card: button_not_owner", "session", sessionKey, "card", messageID, "reason", "clicked_by_other_user")
+		return p.notYourButton(owner), nil
+	}
+	// A card that names its owner (a secret card) counts only that person's
+	// submit, wherever the card ended up.
+	if owner, _ := event.Event.Action.Value[cardOwnerKey].(string); owner != "" && owner != userID {
+		slog.Info("card: button_not_owner", "session", sessionKey, "card", messageID, "reason", "not_card_owner")
 		return p.notYourButton(owner), nil
 	}
 
@@ -1995,6 +2005,9 @@ func (p *Platform) handleMessageEvent(ctx context.Context, event *larkim.P2Messa
 	}
 
 	chatType := stringValue(msg.ChatType)
+	if senderType != "app" {
+		p.noteChat(chatID, chatType, userID)
+	}
 	var createTimeMs int64
 	if msg.CreateTime != nil {
 		if ms, err := strconv.ParseInt(*msg.CreateTime, 10, 64); err == nil {
@@ -4599,13 +4612,17 @@ func (p *Platform) replayAPIClient() *lark.Client {
 	p.replayClientMu.Lock()
 	defer p.replayClientMu.Unlock()
 	if p.replayClient == nil {
-		p.replayClient = newFeishuReplayClient(p.appID, p.appSecret, p.domain)
+		p.replayClient = p.newReplayClient()
 	}
 	return p.replayClient
 }
 
-func newFeishuReplayClient(appID, appSecret, domain string) *lark.Client {
-	var opts []lark.ClientOptionFunc
+func (p *Platform) newReplayClient() *lark.Client {
+	return newFeishuReplayClient(p.appID, p.appSecret, p.domain, lark.WithHttpClient(&maskingHTTPClient{secrets: &p.secrets}))
+}
+
+func newFeishuReplayClient(appID, appSecret, domain string, extra ...lark.ClientOptionFunc) *lark.Client {
+	opts := append([]lark.ClientOptionFunc(nil), extra...)
 	opts = append(opts, lark.WithEnableTokenCache(false))
 	if domain != "" && domain != lark.FeishuBaseUrl {
 		opts = append(opts, lark.WithOpenBaseUrl(domain))
