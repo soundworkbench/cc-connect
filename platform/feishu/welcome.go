@@ -9,20 +9,29 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	callback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 // The first-run welcome is one private message from a bot that has never had
 // a conversation to its single owner. It is sent once per data directory,
-// on a working day in Beijing working hours.
+// on a working day in Beijing working hours. It is a card with a short
+// greeting and three example requests; a tap on one is sent on as if the
+// owner had typed it, once. When the card cannot be sent, the plain-text
+// greeting goes out instead.
+
+// welcomeActionPrefix marks a welcome card button; the rest is its text.
+const welcomeActionPrefix = "welcome:"
 
 const (
 	welcomeMaxAttempts = 3
@@ -39,8 +48,20 @@ var (
 // welcomer sends the first-run welcome. Its clock, wait, jitter and send are
 // fields so tests can drive a whole schedule without waiting.
 type welcomer struct {
-	tag          string
-	text         func() string
+	tag   string
+	owner string
+	text  func() string
+	// card renders the welcome card; clicked is the button text already sent
+	// ("" while none is), which greys the buttons out.
+	card       func(clicked string) *core.Card
+	buttons    func() []string
+	usedNotice func() string
+	sendCard   func(ctx context.Context, card *core.Card) error
+	// clickedPath records the first tap, so the card works once across restarts.
+	clickedPath string
+	clickMu     sync.Mutex
+	clicked     bool
+
 	markerPath   string
 	attemptsPath string
 	chatted      func() (bool, error)
@@ -88,28 +109,125 @@ func (p *Platform) configureWelcome(opts map[string]any) {
 		return
 	}
 	custom, _ := opts["welcome_message"].(string)
-	custom = strings.TrimSpace(custom)
 	sessionStore, _ := opts["cc_session_store"].(string)
 	project, _ := opts["cc_project"].(string)
-	dir := filepath.Join(dataDir, "feishu")
-	p.welcome = &welcomer{
+	p.welcome = p.newWelcomer(owner, custom, filepath.Join(dataDir, "feishu"), func() (bool, error) { return p.hasConversation(sessionStore, project) })
+}
+
+// newWelcomer builds the welcome for owner. custom, when set, replaces the
+// greeting text of both the card and the plain-text message; the button texts
+// always follow the language.
+func (p *Platform) newWelcomer(owner, custom, dir string, chatted func() (bool, error)) *welcomer {
+	custom = strings.TrimSpace(custom)
+	w := &welcomer{
 		tag:          p.tag(),
+		owner:        owner,
 		markerPath:   filepath.Join(dir, "welcome-sent"),
 		attemptsPath: filepath.Join(dir, "welcome-attempts"),
+		clickedPath:  filepath.Join(dir, "welcome-clicked"),
 		text: func() string {
 			if custom != "" {
 				return custom
 			}
 			return p.welcomeI18n().T(core.MsgFirstRunWelcome)
 		},
-		chatted: func() (bool, error) { return p.hasConversation(sessionStore, project) },
+		buttons: func() []string {
+			t := p.welcomeI18n()
+			return []string{t.T(core.MsgWelcomeTrySchedule), t.T(core.MsgWelcomeTryEmail), t.T(core.MsgWelcomeTryWhat)}
+		},
+		usedNotice: func() string { return p.welcomeI18n().T(core.MsgWelcomeCardUsed) },
+		chatted:    chatted,
 		send: func(ctx context.Context, text string) error {
 			return p.sendToOpenID(ctx, owner, text)
+		},
+		sendCard: func(ctx context.Context, card *core.Card) error {
+			return p.sendCardToOpenID(ctx, owner, card)
 		},
 		now:       time.Now,
 		waitUntil: sleepUntil,
 		jitter:    func() time.Duration { return rand.N(welcomeMaxJitter) },
 	}
+	w.card = func(clicked string) *core.Card {
+		body := custom
+		if body == "" {
+			body = p.welcomeI18n().T(core.MsgWelcomeCardBody)
+		}
+		sent := ""
+		if clicked != "" {
+			sent = p.welcomeI18n().Tf(core.MsgWelcomeCardSent, clicked)
+		}
+		return welcomeCard(body, w.buttons(), sent)
+	}
+	return w
+}
+
+// welcomeCard is the greeting with one button per example request. sent, once
+// a button was tapped, greys the buttons out and shows as a note.
+func welcomeCard(body string, buttons []string, sent string) *core.Card {
+	cb := core.NewCard().Markdown(body)
+	for _, text := range buttons {
+		btn := core.Btn(text, "default", welcomeActionPrefix+text)
+		if sent != "" {
+			btn.Disabled, btn.DisabledTip = true, sent
+		}
+		cb.Buttons(btn)
+	}
+	cb.Note(sent)
+	card := cb.Build()
+	card.Shared = true
+	return card
+}
+
+// claimTap records the first tap on the welcome card and reports whether this
+// is it. A tap recorded before a restart counts.
+func (w *welcomer) claimTap() bool {
+	w.clickMu.Lock()
+	defer w.clickMu.Unlock()
+	if w.clicked {
+		return false
+	}
+	w.clicked = true
+	if err := os.MkdirAll(filepath.Dir(w.clickedPath), 0o755); err != nil {
+		slog.Warn("welcome: cannot record the tap", "platform", w.tag, "error", err)
+		return true
+	}
+	f, err := os.OpenFile(w.clickedPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if errors.Is(err, os.ErrExist) {
+		return false
+	}
+	if err != nil {
+		slog.Warn("welcome: cannot record the tap", "platform", w.tag, "error", err)
+		return true
+	}
+	_, _ = fmt.Fprintf(f, "tapped %s\n", time.Now().In(beijing).Format(time.RFC3339))
+	_ = f.Close()
+	return true
+}
+
+// onWelcomeTap handles a tap on a welcome card button. The owner's first tap
+// is sent on as if the owner had typed the text, and the card is replaced
+// with its buttons greyed out; a later tap only shows a notice.
+func (p *Platform) onWelcomeTap(text, userID, chatID, messageID, sessionKey string) *callback.CardActionTriggerResponse {
+	w := p.welcome
+	if w == nil || !slices.Contains(w.buttons(), text) {
+		p.cardDropped("unknown_welcome_button", "card", messageID)
+		return nil
+	}
+	if userID != w.owner {
+		return p.notYourButton(w.owner)
+	}
+	if !w.claimTap() {
+		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "info", Content: w.usedNotice()}}
+	}
+	slog.Info("welcome: button tapped", "platform", p.tag())
+	p.dispatchCardActionMessage(chatID, &core.Message{
+		SessionKey: sessionKey,
+		Platform:   p.platformName,
+		UserID:     userID,
+		Content:    text,
+		ReplyCtx:   replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey},
+	})
+	return &callback.CardActionTriggerResponse{Card: &callback.Card{Type: "raw", Data: renderCardMap(w.card(text), "")}}
 }
 
 // SetI18n implements core.I18nReceiver.
@@ -193,12 +311,21 @@ func (p *Platform) sendToOpenID(ctx context.Context, openID, text string) error 
 	if err != nil {
 		return fmt.Errorf("%s: welcome: encode: %w", p.tag(), err)
 	}
+	return p.sendOpenIDMessage(ctx, openID, larkim.MsgTypeText, string(content))
+}
+
+// sendCardToOpenID sends a private card message to a user by open_id.
+func (p *Platform) sendCardToOpenID(ctx context.Context, openID string, card *core.Card) error {
+	return p.sendOpenIDMessage(ctx, openID, larkim.MsgTypeInteractive, renderCard(card, ""))
+}
+
+func (p *Platform) sendOpenIDMessage(ctx context.Context, openID, msgType, content string) error {
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeOpenId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(openID).
-			MsgType(larkim.MsgTypeText).
-			Content(string(content)).
+			MsgType(msgType).
+			Content(content).
 			Build()).
 		Build()
 	return p.withFreshTenantAccessTokenRetry(ctx, "welcome", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
@@ -337,7 +464,7 @@ func (w *welcomer) attempt(ctx context.Context) welcomeOutcome {
 		slog.Warn("welcome: cannot record attempt", "platform", w.tag, "error", err)
 		return welcomeDone
 	}
-	err = w.send(ctx, w.text())
+	err = w.deliver(ctx)
 	if err == nil {
 		slog.Info("welcome: sent", "platform", w.tag, "attempt", n)
 		return welcomeDone
@@ -352,6 +479,19 @@ func (w *welcomer) attempt(ctx context.Context) welcomeOutcome {
 		return welcomeDone
 	}
 	return welcomeLater
+}
+
+// deliver sends the welcome card, or the plain-text greeting when the card
+// cannot be sent.
+func (w *welcomer) deliver(ctx context.Context) error {
+	if w.sendCard != nil && w.card != nil {
+		err := w.sendCard(ctx, w.card(""))
+		if err == nil {
+			return nil
+		}
+		slog.Warn("welcome: card not sent; sending text", "platform", w.tag, "error", err)
+	}
+	return w.send(ctx, w.text())
 }
 
 func (w *welcomer) attempts() int {

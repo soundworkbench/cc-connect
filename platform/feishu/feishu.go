@@ -1024,6 +1024,10 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 		return nil, nil
 	}
 
+	if text, ok := strings.CutPrefix(actionVal, welcomeActionPrefix); ok {
+		return p.onWelcomeTap(text, userID, chatID, messageID, sessionKey), nil
+	}
+
 	// nav: / act: — synchronous card update
 	if strings.HasPrefix(actionVal, "nav:") || strings.HasPrefix(actionVal, "act:") {
 		if messageID != "" {

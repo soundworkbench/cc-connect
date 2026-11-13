@@ -298,6 +298,12 @@ const (
 	MsgPromptNotDelivered        MsgKey = "prompt_not_delivered"
 	MsgPermissionChannelRetrying MsgKey = "permission_channel_retrying"
 	MsgFirstRunWelcome           MsgKey = "first_run_welcome"
+	MsgWelcomeCardBody           MsgKey = "welcome_card_body"
+	MsgWelcomeTrySchedule        MsgKey = "welcome_try_schedule"
+	MsgWelcomeTryEmail           MsgKey = "welcome_try_email"
+	MsgWelcomeTryWhat            MsgKey = "welcome_try_what"
+	MsgWelcomeCardSent           MsgKey = "welcome_card_sent"
+	MsgWelcomeCardUsed           MsgKey = "welcome_card_used"
 	MsgPermissionChannelLost     MsgKey = "permission_channel_lost"
 	MsgPermissionChannelResume   MsgKey = "permission_channel_resume"
 	MsgAgentTurnFailed           MsgKey = "agent_turn_failed"
@@ -1090,6 +1096,48 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "你好，我是你的工作夥伴 👋\n有事直接在這裡跟我說，比如：\n· 幫我看看今天有什麼會\n· 把這份文件整理成幾條重點\n· 幫我寫一封給客戶的郵件\n大一點的工作我會放到背景慢慢做，你可以繼續跟我聊。先隨便說一句試試？",
 		LangJapanese:           "こんにちは、あなたの仕事のパートナーです 👋\n用事があれば、ここで気軽に話しかけてください。たとえば：\n· 今日の会議を確認して\n· このファイルを要点にまとめて\n· お客様へのメールを書いて\n大きめの作業はバックグラウンドで進めるので、そのまま話し続けて大丈夫です。まずは何か一言どうぞ。",
 		LangSpanish:            "Hola, soy tu compañero de trabajo 👋\nCuando necesites algo, dímelo aquí. Por ejemplo:\n· ¿Qué reuniones tengo hoy?\n· Resume este archivo en unos puntos clave\n· Escríbeme un correo para un cliente\nLas tareas más grandes las hago en segundo plano, así que puedes seguir hablando conmigo. ¿Por qué no me escribes algo para probar?",
+	},
+	MsgWelcomeCardBody: {
+		LangEnglish:            "Hi, I'm your work partner 👋 Just tell me here whenever you need something; bigger jobs run in the background while we keep chatting. Tap one below to try, or type anything.",
+		LangChinese:            "你好，我是你的工作伙伴 👋 有事直接在这里跟我说，大一点的活我会放到后台做，你可以接着跟我聊。点下面任一句试试，或者直接打字。",
+		LangTraditionalChinese: "你好，我是你的工作夥伴 👋 有事直接在這裡跟我說，大一點的工作我會放到背景做，你可以繼續跟我聊。點下面任一句試試，或者直接打字。",
+		LangJapanese:           "こんにちは、あなたの仕事のパートナーです 👋 用事があればここで話しかけてください。大きめの作業はバックグラウンドで進めます。下のどれかを押すか、そのまま入力してみてください。",
+		LangSpanish:            "Hola, soy tu compañero de trabajo 👋 Cuando necesites algo, dímelo aquí; las tareas grandes las hago en segundo plano mientras seguimos hablando. Pulsa una opción o escribe lo que quieras.",
+	},
+	MsgWelcomeTrySchedule: {
+		LangEnglish:            "What's on my calendar today?",
+		LangChinese:            "看看我今天的日程",
+		LangTraditionalChinese: "看看我今天的行程",
+		LangJapanese:           "今日の予定を見せて",
+		LangSpanish:            "¿Qué tengo hoy en la agenda?",
+	},
+	MsgWelcomeTryEmail: {
+		LangEnglish:            "Help me write an email in English",
+		LangChinese:            "帮我写一封英文邮件",
+		LangTraditionalChinese: "幫我寫一封英文郵件",
+		LangJapanese:           "英語のメールを書くのを手伝って",
+		LangSpanish:            "Ayúdame a escribir un correo en inglés",
+	},
+	MsgWelcomeTryWhat: {
+		LangEnglish:            "What can you help me with?",
+		LangChinese:            "你能帮我做什么？",
+		LangTraditionalChinese: "你能幫我做什麼？",
+		LangJapanese:           "何を手伝ってくれるの？",
+		LangSpanish:            "¿En qué me puedes ayudar?",
+	},
+	MsgWelcomeCardSent: {
+		LangEnglish:            "Sent: %s",
+		LangChinese:            "已发送：%s",
+		LangTraditionalChinese: "已發送：%s",
+		LangJapanese:           "送信しました：%s",
+		LangSpanish:            "Enviado: %s",
+	},
+	MsgWelcomeCardUsed: {
+		LangEnglish:            "Already sent. Just type to keep going.",
+		LangChinese:            "已经发过了，直接打字继续聊吧",
+		LangTraditionalChinese: "已經發過了，直接打字繼續聊吧",
+		LangJapanese:           "送信済みです。そのまま入力して続けてください",
+		LangSpanish:            "Ya se envió. Escribe para seguir.",
 	},
 	MsgPermissionChannelRetrying: {
 		LangEnglish:            "The tool approval channel dropped. Reconnected; continuing where it stopped.",
