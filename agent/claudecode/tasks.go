@@ -32,15 +32,15 @@ func parseTaskEvent(subtype string, raw map[string]any) *core.TaskEvent {
 			ev.Background = &b
 		}
 		if taskType, _ := raw["task_type"].(string); taskType == "local_bash" {
-			ev.Step, ev.StepGeneric = chineseToolProgress("Bash", nil, ""), true
+			ev.Step, ev.StepGeneric, ev.StepCommand = chineseToolProgress("Bash", nil, ""), true, true
 		}
 	case "task_progress":
 		ev.Kind = core.TaskProgress
 		ev.Summary, _ = raw["summary"].(string)
 		if step := taskProgressStep(description, ev.Summary); step != "" {
-			ev.Step = step
+			ev.Step, ev.StepCommand = step, strings.HasPrefix(strings.TrimSpace(description), "Running ")
 		} else if tool, _ := raw["last_tool_name"].(string); tool != "" {
-			ev.Step, ev.StepGeneric = chineseToolProgress(tool, nil, ""), true
+			ev.Step, ev.StepGeneric, ev.StepCommand = chineseToolProgress(tool, nil, ""), true, tool == "Bash"
 		}
 		ev.Elapsed = taskDuration(raw)
 	case "task_updated":

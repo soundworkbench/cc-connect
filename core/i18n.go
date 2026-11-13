@@ -218,7 +218,9 @@ const (
 	MsgPreviewRetrying           MsgKey = "preview_retrying"
 	MsgPreviewRetryingBare       MsgKey = "preview_retrying_bare"
 	MsgPreviewUsageLimitWait     MsgKey = "preview_usage_limit_wait"
-	MsgPreviewWaitingModel       MsgKey = "preview_waiting_model"
+	MsgStillWorking              MsgKey = "still_working"
+	MsgWaitedMinutes             MsgKey = "waited_minutes"
+	MsgModelSlowWaited           MsgKey = "model_slow_waited"
 	MsgPreviewInterrupted        MsgKey = "preview_interrupted"
 	MsgPreviewMoved              MsgKey = "preview_moved"
 	MsgTurnFailed                MsgKey = "turn_failed"
@@ -832,7 +834,9 @@ var messages = map[MsgKey]map[Language]string{
 	MsgPreviewRetrying:       {LangEnglish: "Can't reach the model service, retrying (attempt %d)", LangChinese: "模型服务连不上，正在重试（第 %d 次）", LangTraditionalChinese: "模型服務連不上，正在重試（第 %d 次）", LangJapanese: "モデルサービスに接続できません。再試行中（%d 回目）", LangSpanish: "No se puede conectar con el modelo, reintentando (intento %d)"},
 	MsgPreviewRetryingBare:   {LangEnglish: "Can't reach the model service, retrying", LangChinese: "模型服务连不上，正在重试", LangTraditionalChinese: "模型服務連不上，正在重試", LangJapanese: "モデルサービスに接続できません。再試行中", LangSpanish: "No se puede conectar con el modelo, reintentando"},
 	MsgPreviewUsageLimitWait: {LangEnglish: "Model usage limit reached, waiting", LangChinese: "模型用量到了上限，正在等待", LangTraditionalChinese: "模型用量到了上限，正在等待", LangJapanese: "モデルの利用上限に達しました。待機中", LangSpanish: "Se alcanzó el límite de uso del modelo, esperando"},
-	MsgPreviewWaitingModel:   {LangEnglish: "Still waiting for the model to respond", LangChinese: "还在等模型响应", LangTraditionalChinese: "還在等模型回應", LangJapanese: "モデルの応答を待っています", LangSpanish: "Todavía esperando la respuesta del modelo"},
+	MsgStillWorking:          {LangEnglish: "Still working", LangChinese: "仍在处理", LangTraditionalChinese: "仍在處理", LangJapanese: "処理中", LangSpanish: "Sigo trabajando"},
+	MsgWaitedMinutes:         {LangEnglish: "waited %d min", LangChinese: "已等待 %d 分钟", LangTraditionalChinese: "已等待 %d 分鐘", LangJapanese: "待ち時間 %d 分", LangSpanish: "esperando %d min"},
+	MsgModelSlowWaited:       {LangEnglish: "the model is responding slowly, waited %d min", LangChinese: "模型响应较慢，已等待 %d 分钟", LangTraditionalChinese: "模型回應較慢，已等待 %d 分鐘", LangJapanese: "モデルの応答が遅れています、待ち時間 %d 分", LangSpanish: "el modelo responde con lentitud, esperando %d min"},
 	MsgPreviewInterrupted:    {LangEnglish: "Interrupted", LangChinese: "已中断", LangTraditionalChinese: "已中斷", LangJapanese: "中断されました", LangSpanish: "Interrumpido"},
 	MsgTurnFailed:            {LangEnglish: "This didn't go through", LangChinese: "这次没做成", LangTraditionalChinese: "這次沒做成", LangJapanese: "今回は完了できませんでした", LangSpanish: "Esta vez no se pudo completar"},
 	MsgTurnFailedModel:       {LangEnglish: "This didn't go through: the model service is unreachable for now", LangChinese: "这次没做成：模型服务暂时连不上", LangTraditionalChinese: "這次沒做成：模型服務暫時連不上", LangJapanese: "今回は完了できませんでした：モデルサービスに一時的に接続できません", LangSpanish: "Esta vez no se pudo completar: el servicio del modelo no responde por ahora"},

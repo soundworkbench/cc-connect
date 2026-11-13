@@ -33,6 +33,7 @@ type TaskEvent struct {
 	Hidden      bool          // housekeeping task the agent itself keeps out of view
 	Step        string        // what the task is doing now, in the user's words
 	StepGeneric bool          // Step is only the tool's generic label ("运行命令"), not the agent's own description
+	StepCommand bool          // Step is a shell command: a long wait on it is the command's, not the model's
 	Summary     string        // progress: one-line status; ended: result summary
 	Status      string        // ended: "completed", "failed" or "stopped"
 	Elapsed     time.Duration // agent-reported run time; 0 = unknown
@@ -127,7 +128,10 @@ type cardTask struct {
 	showAt     time.Time // when the task may show on a card
 	step       string
 	generic    bool // step is a tool's generic label, not the agent's own description
+	command    bool // step is a shell command
 	recent     string
+	cliLine    string    // the agent's latest progress line; recent may be the quick model's
+	movedAt    time.Time // when the task last showed progress of its own: a new step or progress line
 	still      bool      // the card has been idle: the latest progress line stands in for the step
 	cliAt      time.Time // when the agent last wrote recent; zero = never
 	details    []string
@@ -244,7 +248,8 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 		m.seq++
 		now := time.Now()
 		t = &cardTask{key: key, sessionKey: sessionKey, taskID: ev.TaskID, seq: m.seq, agent: agent, platform: tp, replyCtx: replyCtx,
-			start: now.Add(-ev.Elapsed), startKnown: ev.Kind == TaskStarted, showAt: now.Add(-ev.Elapsed).Add(m.openDelay), state: TaskCardRunning}
+			start: now.Add(-ev.Elapsed), startKnown: ev.Kind == TaskStarted, showAt: now.Add(-ev.Elapsed).Add(m.openDelay), state: TaskCardRunning,
+			movedAt: now}
 		m.tasks[key] = t
 	}
 	if ev.Elapsed > 0 {
@@ -262,7 +267,8 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 		t.hidden = true
 	}
 	if ev.Step != "" && ev.Step != t.step {
-		t.step, t.still, t.generic = ev.Step, false, ev.StepGeneric
+		t.step, t.still, t.generic, t.command = ev.Step, false, ev.StepGeneric, ev.StepCommand
+		t.movedAt = time.Now()
 		t.steps++
 		t.details = append(t.details, ev.Step)
 		if len(t.details) > taskCardDetailRows {
@@ -273,6 +279,9 @@ func (m *taskCardManager) handle(e *Engine, p Platform, replyCtx any, agent Agen
 	case TaskProgress:
 		if ev.Summary != "" {
 			t.recent, t.cliAt = ev.Summary, time.Now()
+			if ev.Summary != t.cliLine {
+				t.cliLine, t.movedAt = ev.Summary, t.cliAt
+			}
 		}
 	case TaskEnded:
 		if t.ended {
@@ -548,8 +557,10 @@ func taskShownLocked(i *I18n, t *cardTask) taskShown {
 	}
 	if !t.ended {
 		s.text = liveStep(t)
-		if t.startKnown {
-			s.time = taskElapsed(i, taskMinutes(t.start))
+		var slow bool
+		s.time, slow = liveTaskTime(i, t)
+		if slow && s.text == "" {
+			s.text = i.T(MsgStillWorking)
 		}
 		// A tool's generic label counts as a step: it says the task has begun
 		// (a command was launched, a subagent called a tool).
@@ -808,6 +819,24 @@ func (m *taskCardManager) progressRows(i *I18n, sessionKey string) (title string
 	}
 	_, state := manyTasksState(i, shown)
 	return i.Tf(MsgTaskTitleMany, state), rows
+}
+
+// liveTaskTime is the time part of a running task's line: how long it has
+// run. When the task has shown nothing new for slowModelAfter and its step is
+// not a shell command, it says instead that the model is responding slowly
+// and how long the task has waited; the minutes keep the line moving when the
+// quick model writes no progress line. slow reports that case.
+func liveTaskTime(i *I18n, t *cardTask) (text string, slow bool) {
+	n := waitedUnits(t.movedAt, time.Now())
+	switch {
+	case !t.command && n >= slowModelAfter:
+		return waitPhrase(i, n), true
+	case t.startKnown:
+		return taskElapsed(i, taskMinutes(t.start)), false
+	case n >= 1:
+		return waitPhrase(i, n), false
+	}
+	return "", false
 }
 
 // taskElapsed is a running time in whole minutes: "3 min", "under a minute".

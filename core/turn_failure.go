@@ -110,10 +110,6 @@ type FailurePreviewer interface {
 	FailPreview(ctx context.Context, previewHandle any, card FailureCard) error
 }
 
-// silenceNoticeAfter is how long a turn may wait for the model, with no event
-// at all, before the card says it is still waiting. It only changes the card.
-var silenceNoticeAfter = 90 * time.Second
-
 // Retry buttons keep the original request, attachments included, in memory.
 // These bound how long and how much: past the TTL a button no longer works,
 // and past the count or byte limit the oldest requests go first.
@@ -154,16 +150,27 @@ func (sp *streamPreview) setNotice(text string) {
 }
 
 // turnWatch decides what the live card says while the turn waits: a retry
-// notice, the long-silence notice, or nothing. It is owned by one turn loop.
+// notice, the waiting line, or nothing. It is owned by one turn loop.
+//
+// The waiting line counts whole minutes since the card last showed progress
+// (a tool call or its result, reply text): "still working · waited 1 min",
+// and from slowModelAfter on "still working · the model is responding slowly,
+// waited N min". It changes once a minute, so the card gets one more update a
+// minute while nothing else moves. A tool, a permission request or the user
+// being what the turn waits on shows no waiting line: the step on the card
+// says what runs.
 type turnWatch struct {
-	timer       *time.Timer
-	waitingTool bool // a tool, a permission or the user is what the turn waits on, not the model
+	timer         *time.Timer
+	since         time.Time // the card's latest progress
+	waitingTool   bool      // a tool, a permission or the user is what the turn waits on, not the model
+	retry         string    // the retry notice while the agent retries a failed model request
+	thinkingShown bool      // thinking text shows on the card, so it counts as progress
 }
 
-func newTurnWatch(enabled bool) *turnWatch {
-	w := &turnWatch{}
+func newTurnWatch(enabled, thinkingShown bool) *turnWatch {
+	w := &turnWatch{since: time.Now(), thinkingShown: thinkingShown}
 	if enabled {
-		w.timer = time.NewTimer(silenceNoticeAfter)
+		w.timer = time.NewTimer(waitUnit)
 	}
 	return w
 }
@@ -181,37 +188,102 @@ func (w *turnWatch) stop() {
 	}
 }
 
-// observe records one turn event and returns the notice the card should show
-// ("" = the normal running step).
-func (w *turnWatch) observe(i *I18n, ev Event) string {
-	if w.timer != nil {
-		if !w.timer.Stop() {
-			select {
-			case <-w.timer.C:
-			default:
-			}
-		}
-		w.timer.Reset(silenceNoticeAfter)
+// restart begins the wait of a new turn on a new card in the same loop.
+func (w *turnWatch) restart() {
+	w.waitingTool, w.retry = false, ""
+	w.progress(time.Now())
+}
+
+func (w *turnWatch) progress(now time.Time) {
+	w.since = now
+	w.arm(waitUnit)
+}
+
+func (w *turnWatch) arm(d time.Duration) {
+	if w.timer == nil {
+		return
 	}
+	if !w.timer.Stop() {
+		select {
+		case <-w.timer.C:
+		default:
+		}
+	}
+	w.timer.Reset(d)
+}
+
+// observe records one turn event and returns the line the card should show
+// in place of the running step ("" = the step itself).
+func (w *turnWatch) observe(i *I18n, ev Event) string {
+	now := time.Now()
+	w.retry = ""
 	switch ev.Type {
 	case EventRetry:
 		w.waitingTool = false
-		return retryNotice(i, ev.Retry)
+		w.retry = retryNotice(i, ev.Retry)
 	case EventToolUse, EventPermissionRequest, EventUserInputRequest:
 		w.waitingTool = true
+		w.progress(now)
+	case EventToolResult, EventText, EventTextDelta, EventProgress:
+		w.waitingTool = false
+		w.progress(now)
+	case EventThinking:
+		w.waitingTool = false
+		if w.thinkingShown {
+			w.progress(now)
+		}
 	default:
 		w.waitingTool = false
 	}
-	return ""
+	return w.line(i, now)
 }
 
-// silent returns the notice for a turn that saw no event for silenceNoticeAfter,
-// or "" while a tool, a permission request or the user is what it waits on.
-func (w *turnWatch) silent(i *I18n) string {
+// tick is called when the timer fires: the waiting line for the minute just
+// reached, with the timer set for the next one.
+func (w *turnWatch) tick(i *I18n) string {
+	now := time.Now()
+	n := waitedUnits(w.since, now)
+	w.arm(w.since.Add(time.Duration(n+1) * waitUnit).Sub(now))
+	return w.line(i, now)
+}
+
+func (w *turnWatch) line(i *I18n, now time.Time) string {
+	if w.retry != "" {
+		return w.retry
+	}
 	if w.waitingTool {
 		return ""
 	}
-	return i.T(MsgPreviewWaitingModel)
+	n := waitedUnits(w.since, now)
+	if n < 1 {
+		return ""
+	}
+	return i.T(MsgStillWorking) + " · " + waitPhrase(i, n)
+}
+
+// waitUnit is the step of every waiting time the cards show: a minute.
+// slowModelAfter is how long one step may wait on the model before the
+// card says the model is slow.
+var (
+	waitUnit       = time.Minute
+	slowModelAfter = 2 // in waitUnit
+)
+
+// waitedUnits is how many whole waitUnits have passed since from.
+func waitedUnits(from, now time.Time) int {
+	if d := now.Sub(from); d > 0 {
+		return int(d / waitUnit)
+	}
+	return 0
+}
+
+// waitPhrase is "waited N min", or from slowModelAfter on "the model is
+// responding slowly, waited N min".
+func waitPhrase(i *I18n, n int) string {
+	if n >= slowModelAfter {
+		return i.Tf(MsgModelSlowWaited, n)
+	}
+	return i.Tf(MsgWaitedMinutes, n)
 }
 
 type failedTurn struct {

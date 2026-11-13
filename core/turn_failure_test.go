@@ -110,26 +110,6 @@ func TestRetryEventShowsNoticeUntilTheModelAnswers(t *testing.T) {
 	}
 }
 
-func TestSilentModelGetsWaitingNoticeButRunningToolDoesNot(t *testing.T) {
-	old := silenceNoticeAfter
-	silenceNoticeAfter = 40 * time.Millisecond
-	t.Cleanup(func() { silenceNoticeAfter = old })
-	f := newFailureEnv(t)
-	f.send("1", "请求")
-	waitUntil(t, "waiting notice", func() bool {
-		notices, _ := f.p.snapshot()
-		return len(notices) > 0 && notices[0] == "还在等模型响应"
-	})
-	f.s.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "运行命令"}
-	time.Sleep(10 * silenceNoticeAfter)
-	notices, _ := f.p.snapshot()
-	if len(notices) != 2 || notices[1] != "" {
-		t.Fatalf("a running tool is not a silent model: %q", notices)
-	}
-	f.s.events <- Event{Type: EventResult, Content: "done", Done: true}
-	f.waitIdle()
-}
-
 func TestModelFailureSettlesCardWithRetryThatResendsOnce(t *testing.T) {
 	f := newFailureEnv(t)
 	f.send("1", "整理客户名单")

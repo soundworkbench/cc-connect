@@ -50,6 +50,34 @@ func TestPreviewNoticeReplacesRunningStep(t *testing.T) {
 	}
 }
 
+// With no quick line the running row reads "思考中"; the waiting line the core
+// sets each minute goes out as an update of that row, and the next minute's
+// line as another.
+func TestWaitingLineUpdatesTheRunningRow(t *testing.T) {
+	f, p := newPreviewFixture(t)
+	h := startStepPreview(t, p)
+	put := func(text string) {
+		t.Helper()
+		_ = p.SetPreviewNotice(context.Background(), h, text)
+		h.live.mu.Lock()
+		err := p.publishSegmented(context.Background(), h, time.Now())
+		h.live.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		calls := f.read()
+		last := calls[len(calls)-1]
+		if last.method != "PUT" || !strings.HasSuffix(last.path, "/elements/"+h.live.progressID) {
+			t.Fatalf("last call %s %s, want the running row", last.method, last.path)
+		}
+		if got := parsePreviewJSON(t, last.body["element"])["content"].(string); !strings.Contains(got, text) || strings.Contains(got, "思考中") {
+			t.Fatalf("running row=%q, want %q", got, text)
+		}
+	}
+	put("仍在处理 · 模型响应较慢，已等待 2 分钟")
+	put("仍在处理 · 模型响应较慢，已等待 3 分钟")
+}
+
 // plainJSON renders v as JSON without escaping <, > and &, as card markup is read.
 func plainJSON(v any) string {
 	var b strings.Builder

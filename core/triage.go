@@ -218,10 +218,7 @@ func (e *Engine) triageView(msg *Message, session *Session, interactiveKey strin
 			if t.generic {
 				step = ""
 			}
-			elapsed := ""
-			if t.startKnown {
-				elapsed = taskElapsed(e.i18n, taskMinutes(t.start))
-			}
+			elapsed, _ := liveTaskTime(e.i18n, t)
 			v.tasks = append(v.tasks, triageTask{title: title, step: step, recent: t.recent, elapsed: elapsed})
 		}
 	}

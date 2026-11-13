@@ -5291,7 +5291,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 		terminalReply(p, fmt.Sprintf(e.i18n.T(MsgError), displayErr), err, displayErr)
 		e.notifyDroppedQueuedMessages(state, err)
 	}
-	watch := newTurnWatch(!automated && sp.segmented != nil)
+	watch := newTurnWatch(!automated && sp.segmented != nil, e.display.ThinkingMessages && !e.display.appendProgress())
 	defer watch.stop()
 	stopCh := state.stopSignal()
 	for {
@@ -5303,7 +5303,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			sp.discard()
 			return
 		case <-watch.C():
-			sp.setNotice(watch.silent(e.i18n))
+			sp.setNotice(watch.tick(e.i18n))
 			continue
 		case event, ok = <-events:
 			if !ok {
@@ -6718,6 +6718,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				}
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, e.maskStreaming(queuedRenderer))
 				sp.hidden = automated
+				watch.restart()
 				sp.progressI18n = e.i18n
 				sp.keepProgressCard = e.display.KeepProgressCard && sp.segmented == nil
 				state.mu.Lock()
