@@ -588,6 +588,7 @@ func (e *Engine) SetDecisionStore(s *DecisionStore, defaultHours int) {
 	e.decisions = s
 	e.decisionDefaultHours = defaultHours
 	e.decisionWake = make(chan struct{}, 1)
+	e.decisionLoopDone = make(chan struct{})
 	go e.decisionLoop()
 }
 
@@ -809,7 +810,8 @@ func (e *Engine) handleDecisionAll(args string) *Card {
 }
 
 func (e *Engine) decisionLoop() {
-	for {
+	defer close(e.decisionLoopDone)
+	for e.ctx.Err() == nil {
 		e.expireDecisions()
 		wait := decisionRetryInterval
 		if next, ok := e.decisions.nextDeadline(); ok {

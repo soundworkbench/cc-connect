@@ -231,13 +231,14 @@ func TestDecisionSurvivesRestart(t *testing.T) {
 	futureID := sendTestDecision(t, e1, DecisionRequest{Question: "未到期的", Options: []string{"A", "B"}})
 	// answered just before the service stopped, but never handed to the session
 	answeredID := sendTestDecision(t, e1, DecisionRequest{Question: "点过的", Options: []string{"A", "B"}})
+	// Stop first, so the old engine's deadline loop cannot apply the default.
+	_ = e1.Stop()
 	store1.mu.Lock()
 	store1.find(pendingID).Deadline = time.Now().Add(-time.Hour)
 	store1.mu.Unlock()
 	if _, ok := store1.Resolve(answeredID, 2, decisionAnswered); !ok {
 		t.Fatal("resolve failed")
 	}
-	_ = e1.Stop()
 
 	// a fresh process: new store from the same dir, new engine
 	e2, p2, sess2, store2 := newDecisionEngine(t, dir)

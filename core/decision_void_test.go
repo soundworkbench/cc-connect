@@ -32,7 +32,7 @@ func cardForm(c *Card) (CardForm, bool) {
 }
 
 func TestDecisionAndFormCardsAreShared(t *testing.T) {
-	e, p, sess, store := newDecisionEngine(t, t.TempDir())
+	e, p, _, store := newDecisionEngine(t, t.TempDir())
 	id := sendTestDecision(t, e, DecisionRequest{Question: "用哪个方案？", Options: []string{"甲", "乙"}})
 	multi := sendTestDecision(t, e, DecisionRequest{Question: "选哪些？", Options: []string{"甲", "乙"}, Multi: true})
 	form, err := e.SendFormCard(FormRequest{SessionKey: decKey, Title: "出差申请", Fields: []FormField{{Label: "地点"}}})
@@ -71,8 +71,26 @@ func TestDecisionAndFormCardsAreShared(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	waitPrompts(t, sess, 4) // let the answers land before the data directory goes away
-	time.Sleep(200 * time.Millisecond)
+	stopDecisions(t, e)
+}
+
+// stopDecisions stops the engine and waits for deliveries in flight, so
+// nothing writes the decision file after the test's data directory is gone.
+func stopDecisions(t *testing.T, e *Engine) {
+	t.Helper()
+	_ = e.Stop()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		busy := false
+		e.decisionInflight.Range(func(any, any) bool { busy = true; return false })
+		if !busy {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("decision deliveries still running after stop")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestVoidDecisionGreysCardCancelsDefaultAndSurvivesRestart(t *testing.T) {

@@ -362,6 +362,7 @@ type Engine struct {
 	decisions             *DecisionStore
 	decisionDefaultHours  int
 	decisionWake          chan struct{}
+	decisionLoopDone      chan struct{} // closed when the deadline loop has returned
 	decisionInflight      sync.Map
 	humanEnglish          sync.Map       // session key → whether the person's latest message was English
 	inflight              *inflightStore // turns and background tasks in progress, for resume after restart
@@ -1626,6 +1627,10 @@ func (e *Engine) Stop() error {
 		queueErr = errors.Join(queueErr, err)
 	}
 	e.cancel()
+	if e.decisionLoopDone != nil {
+		// No default is applied once Stop has returned.
+		<-e.decisionLoopDone
+	}
 
 	if e.observeCancel != nil {
 		e.observeCancel()
