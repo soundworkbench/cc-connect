@@ -56,3 +56,17 @@ func TestCardHasButtons_DetectsInteractiveElements(t *testing.T) {
 		})
 	}
 }
+
+func TestCardActionForLogKeepsFieldNamesOnly(t *testing.T) {
+	for in, want := range map[string]string{
+		`act:/form-submit d1 {"f2":"2026-11-20 +0800","f1":"我的密码 hunter2"}`: "act:/form-submit d1 fields=f1,f2",
+		`act:/decision-form d2 {"choice":["1","3"]}`:                        "act:/decision-form d2 fields=choice",
+		`act:/decision-form d3 {"f1":"unterminated`:                         "act:/decision-form d3 fields=?",
+		"act:/decision d4 2":                 "act:/decision d4 2",
+		"act:/delete-mode form-submit s1,s2": "act:/delete-mode form-submit s1,s2",
+	} {
+		if got := CardActionForLog(in); got != want {
+			t.Errorf("CardActionForLog(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

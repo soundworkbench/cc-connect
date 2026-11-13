@@ -1,7 +1,9 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -401,4 +403,24 @@ func (c *Card) CollectButtons() [][]ButtonOption {
 		}
 	}
 	return rows
+}
+
+// CardActionForLog is a card action as it may be logged. A form submit carries
+// what the person typed as a JSON object after the action; only the field
+// names are kept, never the values.
+func CardActionForLog(action string) string {
+	i := strings.Index(action, " {")
+	if i < 0 {
+		return action
+	}
+	var values map[string]json.RawMessage
+	if json.Unmarshal([]byte(action[i+1:]), &values) != nil {
+		return action[:i] + " fields=?"
+	}
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return action[:i] + " fields=" + strings.Join(names, ",")
 }

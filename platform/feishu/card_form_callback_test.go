@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chenhg5/cc-connect/core"
 	callback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
@@ -136,5 +137,41 @@ func TestDroppedCardCallbacksAreLoggedWithAReason(t *testing.T) {
 				t.Fatalf("form values were logged: %s", out)
 			}
 		})
+	}
+}
+
+// A form submit that is answered late is refreshed in the background; when
+// that fails, the log names the action and the fields but not what was typed.
+func TestLateFormRefreshFailureLogsNoFormValues(t *testing.T) {
+	logs := captureInfo(t)
+	ip, _ := newAllowFromTestPlatform(t, "ou_allowed")
+	done := make(chan struct{})
+	ip.cardNavHandler = func(_, sessionKey string) *core.Card {
+		time.Sleep(cardNavTimeout + 100*time.Millisecond)
+		ip.cardActionMsgMu.Lock()
+		delete(ip.cardActionMsgIDs, sessionKey) // the refresh then has no card to update
+		ip.cardActionMsgMu.Unlock()
+		defer close(done)
+		return core.NewCard().Title("✅ 已提交：出差申请", "green").Build()
+	}
+	value := `{"action": "act:/form-submit f1", "session_key": "feishu:oc_test_chat:ou_allowed"}`
+	resp, err := ip.onCardAction(formSubmitCallback(t, value, "form_f1_submit", `{"f1": "私密内容-华东区", "f2": "口令 hunter2"}`))
+	if err != nil || resp == nil || resp.Toast == nil {
+		t.Fatalf("late answer: resp=%+v err=%v", resp, err)
+	}
+	<-done
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(logs.String(), "async card refresh failed") {
+		if time.Now().After(deadline) {
+			t.Fatalf("no refresh failure logged: %s", logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	out := logs.String()
+	if strings.Contains(out, "私密内容") || strings.Contains(out, "hunter2") {
+		t.Fatalf("form values reached the log: %s", out)
+	}
+	if !strings.Contains(out, "act:/form-submit f1 fields=f1,f2") {
+		t.Fatalf("log lacks the action and field names: %s", out)
 	}
 }

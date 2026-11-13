@@ -952,7 +952,7 @@ func (a *bridgeAdapter) handleCardAction(raw json.RawMessage) {
 		return
 	}
 
-	slog.Debug("bridge: card_action", "platform", a.platform, "action", ca.Action, "session_key", ca.SessionKey, "project", ca.Project)
+	slog.Debug("bridge: card_action", "platform", a.platform, "action", CardActionForLog(ca.Action), "session_key", ca.SessionKey, "project", ca.Project)
 
 	ref := a.server.resolveEngine(ca.SessionKey, ca.Project)
 	if ref == nil {

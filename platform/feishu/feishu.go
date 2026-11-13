@@ -1079,7 +1079,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 					}
 					if refresher, ok := p.self.(core.CardRefresher); ok {
 						if err := refresher.RefreshCard(context.Background(), sessionKey, card); err != nil {
-							slog.Warn(p.tag()+": async card refresh failed", "action", actionVal, "err", err)
+							slog.Warn(p.tag()+": async card refresh failed", "action", cardActionForLog(actionVal), "err", err)
 						}
 					}
 				}()
@@ -1221,14 +1221,8 @@ func (p *Platform) cardDropped(reason string, args ...any) {
 	slog.Info("card: callback_dropped", append([]any{"platform", p.tag(), "reason", reason}, args...)...)
 }
 
-// cardActionForLog is the action without the form values that follow it:
-// those are what the user typed.
-func cardActionForLog(action string) string {
-	if i := strings.Index(action, " {"); i >= 0 {
-		return action[:i]
-	}
-	return action
-}
+// cardActionForLog is the action as it may be logged: see core.CardActionForLog.
+func cardActionForLog(action string) string { return core.CardActionForLog(action) }
 
 func (p *Platform) addReaction(messageID string) string {
 	return p.addReactionWithEmoji(messageID, p.reactionEmoji)
