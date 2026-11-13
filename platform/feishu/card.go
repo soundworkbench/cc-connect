@@ -44,16 +44,16 @@ func (p *interactivePlatform) SendCard(ctx context.Context, rctx any, card *core
 		return fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
 	}
 
-	if !p.noReplyToTrigger && p.shouldReplyInThread(rc) {
-		return p.ReplyCard(ctx, rctx, card)
-	}
-
 	cardJSON := renderCard(card, rc.sessionKey)
+	if p.shouldReplyInThread(rc) {
+		return p.replyMessage(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	}
 	return p.createMessage(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
 }
 
-// SendCardID sends a card as a new message to the chat and returns the message
-// ID so the card can be patched later (core.CardIDSender).
+// SendCardID sends a card as a new message and returns the message ID so the
+// card can be patched later (core.CardIDSender). In a topic the card is a
+// reply in that topic; elsewhere it is a new chat message.
 func (p *interactivePlatform) SendCardID(ctx context.Context, rctx any, card *core.Card) (string, error) {
 	rc, ok := rctx.(replyContext)
 	if !ok {
@@ -62,7 +62,11 @@ func (p *interactivePlatform) SendCardID(ctx context.Context, rctx any, card *co
 	if rc.chatID == "" {
 		return "", fmt.Errorf("%s: chatID is empty, cannot send card", p.tag())
 	}
-	return p.createMessageID(ctx, rc.chatID, larkim.MsgTypeInteractive, renderCard(card, rc.sessionKey), "send card")
+	cardJSON := renderCard(card, rc.sessionKey)
+	if p.shouldReplyInThread(rc) {
+		return p.replyMessageID(ctx, rc, larkim.MsgTypeInteractive, cardJSON)
+	}
+	return p.createMessageID(ctx, rc.chatID, larkim.MsgTypeInteractive, cardJSON, "send card")
 }
 
 // PatchCard replaces the content of an already sent card message

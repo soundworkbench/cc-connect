@@ -127,6 +127,7 @@ func init() {
 type replyContext struct {
 	source           string
 	p2pThread        bool
+	inThread         bool // the trigger message sits in a topic (Feishu thread_id set)
 	messageID        string
 	chatID           string
 	sessionKey       string
@@ -175,6 +176,7 @@ type Platform struct {
 	cardNavHandler   core.CardNavigationHandler
 	cancel           context.CancelFunc
 	catchup          *p2pCatchup
+	topics           *topicMemory
 	liveCards        *liveCardStore // cards with a spinner, rewritten if a restart cuts them off
 	catchupCancel    context.CancelFunc
 	catchupDone      chan struct{}
@@ -596,6 +598,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		resourceMaxBytes:           defaultResourceMaxBytes,
 	}
 	base.configureP2PCatchup(opts)
+	base.configureTopicMemory(opts)
 	base.configureWelcome(opts)
 	base.configureLiveCards(opts)
 	if !useInteractiveCard {
@@ -2128,7 +2131,11 @@ func (p *Platform) handleMessageEvent(ctx context.Context, event *larkim.P2Messa
 	parentID := stringValue(msg.ParentId)
 
 	rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey,
-		p2pThread: p.p2pThreadIsolation && chatType != "group" && stringValue(msg.ThreadId) != ""}
+		p2pThread: p.p2pThreadIsolation && chatType != "group" && stringValue(msg.ThreadId) != "",
+		inThread:  stringValue(msg.ThreadId) != ""}
+	if !p.isIsolatedThreadSession(sessionKey) {
+		p.topics.note(sessionKey, topicRootOf(msg))
+	}
 	if stringValue(sender.SenderType) == "app" {
 		rctx.source = "relay"
 	}
@@ -4453,19 +4460,25 @@ func (p *Platform) sessionKeyFromCardAction(chatID, userID string, value map[str
 	return fmt.Sprintf("%s:%s:%s", p.tag(), chatID, userID)
 }
 
+// shouldReplyInThread is true when the conversation lives in a topic: an
+// isolated thread session (rc.messageID is its root) or a trigger message
+// inside a topic. Messages for it must go through the reply API with
+// reply_in_thread; creating a message would post to the chat's main stream.
 func (p *Platform) shouldReplyInThread(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
 	}
-	return p.isIsolatedThreadSession(rc.sessionKey)
+	return rc.inThread || p.isIsolatedThreadSession(rc.sessionKey)
 }
 
-// shouldUseThreadOrReplyAPI is true when we should call Im.Message.Reply (optionally with ReplyInThread).
+// shouldUseThreadOrReplyAPI is true when we should call Im.Message.Reply
+// (optionally with ReplyInThread). reply_to_trigger = false only drops the
+// quote outside topics; a topic's messages always stay in the topic.
 func (p *Platform) shouldUseThreadOrReplyAPI(rc replyContext) bool {
 	if rc.messageID == "" {
 		return false
 	}
-	return !p.noReplyToTrigger || (rc.p2pThread && p.shouldReplyInThread(rc))
+	return !p.noReplyToTrigger || p.shouldReplyInThread(rc)
 }
 
 func (p *Platform) sendNewMessageToChat(ctx context.Context, rc replyContext, msgType, content string) error {
@@ -4486,11 +4499,19 @@ func (p *Platform) buildReplyMessageReqBody(rc replyContext, msgType, content st
 }
 
 func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, content string) error {
+	_, err := p.replyMessageID(ctx, rc, msgType, content)
+	return err
+}
+
+// replyMessageID replies to rc.messageID (in its topic when the conversation
+// lives in one) and returns the new message's ID.
+func (p *Platform) replyMessageID(ctx context.Context, rc replyContext, msgType, content string) (string, error) {
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(rc.messageID).
 		Body(p.buildReplyMessageReqBody(rc, msgType, content)).
 		Build()
-	return p.withTransientRetry(ctx, "reply", func() error {
+	var msgID string
+	err := p.withTransientRetry(ctx, "reply", func() error {
 		return p.withFreshTenantAccessTokenRetry(ctx, "reply", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {
 			resp, err := client.Im.Message.Reply(ctx, req, options...)
 			if err != nil {
@@ -4499,9 +4520,13 @@ func (p *Platform) replyMessage(ctx context.Context, rc replyContext, msgType, c
 			if !resp.Success() {
 				return fmt.Errorf("%s: reply failed code=%d msg=%s", p.tag(), resp.Code, resp.Msg)
 			}
+			if resp.Data != nil && resp.Data.MessageId != nil {
+				msgID = *resp.Data.MessageId
+			}
 			return nil
 		})
 	})
+	return msgID, err
 }
 
 func (p *Platform) createMessage(ctx context.Context, chatID, msgType, content, op string) error {
@@ -4900,6 +4925,11 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 	if len(parts) == 3 {
 		if rootID, ok := parseThreadRootID(parts[2]); ok {
 			rc.messageID = rootID
+		}
+	}
+	if rc.messageID == "" {
+		if rootID := p.topics.root(sessionKey); rootID != "" {
+			rc.messageID, rc.inThread = rootID, true
 		}
 	}
 	return rc, nil

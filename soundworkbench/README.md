@@ -170,6 +170,7 @@ allow_from = "ou_xxx"
 ### 飞书
 
 - `p2p_thread_isolation = true`：私聊中每个话题一个会话。普通消息和引用回复留在已有会话中。
+- 话题里的对话（私聊话题、群里某条消息的话题、话题群）发出的一切都留在这个话题里：决定卡、选择卡、表单卡、权限卡、任务卡、文字和文件都用回复接口加 `reply_in_thread` 发，`reply_to_trigger = false` 也一样。会话键不带话题时（`thread_isolation = false`，一人一个会话），桥记住这个会话最近一条消息所在话题的根消息（`<data_dir>/feishu/topics-*.json`，重启后仍在），决定的回答、重启续跑、定时和叫醒都回到那个话题；最近一条消息在主聊天流时照旧发到主聊天流（`platform/feishu/topic_memory.go`）。
 - 交互卡片和合并转发被读成文本、图片和嵌套转发，供 Agent 使用（`platform/feishu/interactive_content.go`）。来自其他应用的卡片中的图片无法下载；文本中会说明这一点。
 - 提问卡不再占住回合（`core/ask_decision.go`）：开了决定卡片时，Claude Code 调 AskUserQuestion，桥把每个问题发成一张决定卡片（选项即按钮，选项说明写在问题下面一行；多选题用下拉多选），不设推荐、不设截止、不自动处理（卡片显示“需要你选择”），并立即回给工具“已发选择卡片，用户点选后会作为新消息到达；先结束本轮或继续别的事。”，回合照常往下走。点选后按决定卡片的格式进对话：“【决定】问题：选项”。前台回合和两轮之间的主动输出都这样处理。没开决定卡片，或第一张卡发不出去时，照旧发原来的提问卡并等待；后面的卡发不出去时，在给工具的回复里列出这些问题，请模型改用文字问。
 - 决策卡（`core/decision.go`，用 `[decision] enabled = true` 开启）：`cc-connect send --decision card.json` 发出一张卡片，每个选项一个按钮。JSON 含 `question`、`options`（推荐项在前）、`note`、`no_default` 和 `deadline_minutes`。一次点选，或截止时间到后的默认选项（`default_hours`，12），会作为消息回到会话，卡片被改写，不能再次使用。
