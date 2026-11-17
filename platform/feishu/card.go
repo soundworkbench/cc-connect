@@ -190,6 +190,10 @@ func renderCardMap(card *core.Card, sessionKey string) map[string]any {
 					"type":  btnType,
 					"value": valMap,
 				}
+				if btn.URL != "" {
+					delete(action, "value")
+					action["url"] = btn.URL
+				}
 				if c := renderConfirm(btn.Confirm); c != nil {
 					action["confirm"] = c
 				}
@@ -360,7 +364,11 @@ func renderCompactCardMap(card *core.Card, sessionKey string) map[string]any {
 			elements = append(elements, map[string]any{"tag": "hr"})
 		case core.CardActions:
 			for _, btn := range e.Buttons {
-				elements = append(elements, callbackButton(btn.Text, btn.Type, btn.Value, btn.Extra))
+				b := callbackButton(btn.Text, btn.Type, btn.Value, btn.Extra)
+				if btn.URL != "" {
+					b["behaviors"] = []map[string]any{{"type": "open_url", "default_url": btn.URL}}
+				}
+				elements = append(elements, b)
 			}
 		case core.CardListItem:
 			btn := callbackButton(e.BtnText, e.BtnType, e.BtnValue, e.Extra)

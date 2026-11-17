@@ -99,6 +99,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/decision", s.handleDecision)
 	s.mux.HandleFunc("/form", s.handleForm)
 	s.mux.HandleFunc("/sessions", s.handleSessions)
+	s.mux.HandleFunc("/model", s.handleModel)
 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
 	s.mux.HandleFunc("/cron/list", s.handleCronList)
 	s.mux.HandleFunc("/cron/info", s.handleCronInfo)
@@ -360,6 +361,69 @@ func (s *APIServer) handleForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
+}
+
+// ModelRequest is the JSON body for POST /model.
+type ModelRequest struct {
+	Project string `json:"project"`
+	Model   string `json:"model"`
+}
+
+// handleModel reads (GET /model?project=) or switches (POST /model) a
+// project's default model without restarting the bridge.
+func (s *APIServer) handleModel(w http.ResponseWriter, r *http.Request) {
+	var project, model string
+	switch r.Method {
+	case http.MethodGet:
+		project = r.URL.Query().Get("project")
+	case http.MethodPost:
+		var req ModelRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		project, model = req.Project, strings.TrimSpace(req.Model)
+		if model == "" {
+			http.Error(w, "model is required", http.StatusBadRequest)
+			return
+		}
+	default:
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.mu.RLock()
+	engine, ok := s.engines[project]
+	if project == "" && len(s.engines) == 1 {
+		for _, e := range s.engines {
+			engine, ok = e, true
+		}
+	}
+	s.mu.RUnlock()
+	if !ok {
+		if project == "" {
+			http.Error(w, "project is required (multiple projects configured)", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, fmt.Sprintf("project %q not found", project), http.StatusNotFound)
+		return
+	}
+
+	var err error
+	if r.Method == http.MethodGet {
+		model, err = engine.DefaultModel()
+	} else {
+		model, err = engine.SetDefaultModel(model)
+	}
+	if errors.Is(err, ErrModelSwitchUnsupported) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	apiJSON(w, http.StatusOK, map[string]string{"model": model})
 }
 
 func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {

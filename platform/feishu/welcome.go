@@ -104,7 +104,11 @@ func (p *Platform) configureWelcome(opts map[string]any) {
 		},
 		chatted: func() (bool, error) { return p.hasConversation(sessionStore, project) },
 		send: func(ctx context.Context, text string) error {
-			return p.sendToOpenID(ctx, owner, text)
+			msgType, content, err := p.welcomeContent(text)
+			if err != nil {
+				return err
+			}
+			return p.sendToOpenID(ctx, owner, msgType, content)
 		},
 		now:       time.Now,
 		waitUntil: sleepUntil,
@@ -187,18 +191,31 @@ func (p *Platform) hasConversation(sessionStore, project string) (bool, error) {
 	return false, nil
 }
 
-// sendToOpenID sends a private text message to a user by open_id.
-func (p *Platform) sendToOpenID(ctx context.Context, openID, text string) error {
-	content, err := json.Marshal(map[string]string{"text": text})
-	if err != nil {
-		return fmt.Errorf("%s: welcome: encode: %w", p.tag(), err)
+// welcomeContent returns the welcome message: a card with a model button when
+// a model page is configured, plain text otherwise.
+func (p *Platform) welcomeContent(text string) (string, string, error) {
+	if p.modelPageLink == "" {
+		content, err := json.Marshal(map[string]string{"text": text})
+		if err != nil {
+			return "", "", fmt.Errorf("%s: welcome: encode: %w", p.tag(), err)
+		}
+		return larkim.MsgTypeText, string(content), nil
 	}
+	card := core.NewCard().
+		Markdown(text).
+		Buttons(core.LinkBtn(p.welcomeI18n().T(core.MsgCardTitleModel), p.modelPageLink)).
+		Build()
+	return larkim.MsgTypeInteractive, renderCard(card, ""), nil
+}
+
+// sendToOpenID sends a private message to a user by open_id.
+func (p *Platform) sendToOpenID(ctx context.Context, openID, msgType, content string) error {
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeOpenId).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
 			ReceiveId(openID).
-			MsgType(larkim.MsgTypeText).
-			Content(string(content)).
+			MsgType(msgType).
+			Content(content).
 			Build()).
 		Build()
 	return p.withFreshTenantAccessTokenRetry(ctx, "welcome", func(client *lark.Client, options ...larkcore.RequestOptionFunc) error {

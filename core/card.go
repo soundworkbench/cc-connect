@@ -121,6 +121,9 @@ type CardButton struct {
 	Extra map[string]string // additional key-value pairs carried in the callback (platform-specific)
 	// Confirm, when set, asks the person to confirm before the callback fires.
 	Confirm *CardConfirm
+	// URL, when set, makes this a link button: tapping opens URL and no
+	// callback fires.
+	URL string
 }
 
 // CardActionLayout controls how a CardActions row should be rendered by
@@ -145,6 +148,11 @@ func PrimaryBtn(text, value string) CardButton {
 // DefaultBtn creates a default-styled button.
 func DefaultBtn(text, value string) CardButton {
 	return CardButton{Text: text, Type: "default", Value: value}
+}
+
+// LinkBtn creates a button that opens url.
+func LinkBtn(text, url string) CardButton {
+	return CardButton{Text: text, Type: "default", URL: url}
 }
 
 // DangerBtn creates a danger-styled button.

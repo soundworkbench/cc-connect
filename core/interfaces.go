@@ -503,6 +503,13 @@ type MemoryFileProvider interface {
 	GlobalMemoryFile() string  // user-level instruction file (e.g., ~/.claude/CLAUDE.md)
 }
 
+// ModelPageLinker is an optional platform interface: a link that opens a
+// model picker page, shown as a button on the /model card. An empty link
+// means the platform has none configured.
+type ModelPageLinker interface {
+	ModelPageLink() string
+}
+
 // ModelSwitcher is an optional interface for agents that support runtime model switching.
 // Model changes take effect on the next session (existing sessions keep their model).
 type ModelSwitcher interface {

@@ -182,6 +182,7 @@ type Platform struct {
 	catchupDone      chan struct{}
 	welcome          *welcomer          // first-run welcome to the owner; nil when not due
 	welcomeCancel    context.CancelFunc // stops the welcome schedule
+	modelPageLink    string             // sidebar AppLink to the model page; "" when not configured
 	i18n             atomic.Pointer[core.I18n]
 	dedup            *core.MessageDedup
 	botOpenID        string
@@ -598,6 +599,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	}
 	base.configureP2PCatchup(opts)
 	base.configureTopicMemory(opts)
+	base.configureModelPage(opts)
 	base.configureWelcome(opts)
 	base.configureLiveCards(opts)
 	if !useInteractiveCard {

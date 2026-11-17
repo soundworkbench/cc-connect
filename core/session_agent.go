@@ -82,6 +82,7 @@ func (e *Engine) isolateAgent(base Agent, sessions *SessionManager, key string, 
 			}
 		}
 	}
+	pinProviderModel(agent, model)
 	if model != "" {
 		if switcher, ok := agent.(ModelSwitcher); ok {
 			switcher.SetModel(model)
@@ -103,10 +104,26 @@ func (e *Engine) persistIsolatedModel(agent Agent, model string) bool {
 	for _, entry := range e.sessionAgents {
 		if entry.agent == agent {
 			entry.sessions.setIsolatedModel(entry.key, model)
+			pinProviderModel(agent, model)
 			return true
 		}
 	}
 	return false
+}
+
+// pinProviderModel writes a topic's own model into its agent's provider copy:
+// the active provider's model wins over the agent model at session start.
+func pinProviderModel(agent Agent, model string) {
+	ps, ok := agent.(ProviderSwitcher)
+	if !ok || model == "" {
+		return
+	}
+	active := ps.GetActiveProvider()
+	if active == nil {
+		return
+	}
+	providers, _ := SetProviderModel(ps.ListProviders(), active.Name, model)
+	ps.SetProviders(providers)
 }
 
 func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
