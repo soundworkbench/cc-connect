@@ -479,6 +479,7 @@ const (
 	EventModelSwitch       EventType = "model_switch"       // agent CLI moved the turn to another model on its own (see ModelSwitch)
 	EventRetry             EventType = "retry"              // a model request failed and the agent is retrying it (see RetryStatus)
 	EventTask              EventType = "task"               // lifecycle of a task running beside the turn (see TaskEvent)
+	EventCompacting        EventType = "compacting"         // the agent started compacting the conversation on its own
 )
 
 // ModelSwitch describes a model change the agent CLI made without being asked

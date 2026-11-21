@@ -48,6 +48,7 @@ type Agent struct {
 	disallowedTools   []string
 	maxContextTokens  int // optional: passed as --max-context-tokens when > 0
 	contextWindowTokens int // optional: override the context-window-size heuristic used by the ctx% indicator. When <= 0, fall back to model-name heuristics.
+	contextWindows      *sync.Map // model -> context window Claude Code reported for it (SwitchCompactLine)
 	providers         []core.ProviderConfig
 	activeIdx         int // -1 = no provider set
 	sessionEnv        []string
@@ -334,6 +335,7 @@ func New(opts map[string]any) (core.Agent, error) {
 		disallowedTools:   disallowedTools,
 		maxContextTokens:  maxContextTokens,
 		contextWindowTokens: contextWindowTokens,
+		contextWindows:      &sync.Map{},
 		configEnv:         configEnv,
 		configDirs:        configDirs,
 		activeIdx:         -1,
@@ -648,6 +650,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		return nil, err
 	}
 	cs.firstWriteTimeout = a.firstWriteTimeout
+	cs.onContextWindow = a.rememberContextWindow
 	return cs, nil
 }
 

@@ -165,6 +165,7 @@ type turnWatch struct {
 	waitingTool   bool      // a tool, a permission or the user is what the turn waits on, not the model
 	retry         string    // the retry notice while the agent retries a failed model request
 	thinkingShown bool      // thinking text shows on the card, so it counts as progress
+	compacting    bool      // the agent is compacting the conversation; that is what the turn waits on
 }
 
 func newTurnWatch(enabled, thinkingShown bool) *turnWatch {
@@ -190,7 +191,7 @@ func (w *turnWatch) stop() {
 
 // restart begins the wait of a new turn on a new card in the same loop.
 func (w *turnWatch) restart() {
-	w.waitingTool, w.retry = false, ""
+	w.waitingTool, w.retry, w.compacting = false, "", false
 	w.progress(time.Now())
 }
 
@@ -217,10 +218,15 @@ func (w *turnWatch) arm(d time.Duration) {
 func (w *turnWatch) observe(i *I18n, ev Event) string {
 	now := time.Now()
 	w.retry = ""
+	w.compacting = false
 	switch ev.Type {
 	case EventRetry:
 		w.waitingTool = false
 		w.retry = retryNotice(i, ev.Retry)
+	case EventCompacting:
+		w.waitingTool = false
+		w.compacting = true
+		w.progress(now)
 	case EventToolUse, EventPermissionRequest, EventUserInputRequest:
 		w.waitingTool = true
 		w.progress(now)
@@ -250,6 +256,9 @@ func (w *turnWatch) tick(i *I18n) string {
 func (w *turnWatch) line(i *I18n, now time.Time) string {
 	if w.retry != "" {
 		return w.retry
+	}
+	if w.compacting {
+		return i.T(MsgPreviewCompacting)
 	}
 	if w.waitingTool {
 		return ""
