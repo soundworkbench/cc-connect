@@ -79,6 +79,8 @@ type TaskCardView struct {
 	SessionKey string
 	// Interrupted is what the card should say if a restart cuts it off.
 	Interrupted string
+	// Moved is what the old card says once the card is posted again below.
+	Moved string
 }
 
 // TaskCardRow is one task on a card of several tasks.
@@ -159,8 +161,17 @@ type taskCard struct {
 	platform   TaskCardPlatform
 	replyCtx   any
 	tasks      []*cardTask // in the order they joined
-	handle     any
+	handle     any         // set under both m.mu and writeMu; read under either
 	wake       chan struct{}
+
+	// writeMu orders the card's platform writes: an update never lands on a
+	// card that a move has already folded.
+	writeMu   sync.Mutex
+	followCtx any       // where a move posts the card: the latest reply's context
+	placedAt  time.Time // when the card was posted where it is now
+	below     int       // messages counted below the card since placedAt
+	moving    bool
+	finalDue  bool // settled while pushed up: moves once more when no turn runs
 }
 
 func (c *taskCard) allEnded() bool {
@@ -189,6 +200,8 @@ type taskCardManager struct {
 	tasks    map[string]*cardTask // by session and task ID
 	past     map[string]*cardTask // tasks ended within taskMemory, by session and task ID; outlives m.tasks
 	open     map[string]*taskCard // the live card of each session
+	follow   map[string]*taskCard // the card of each session that may still move down: live, or settled and due its last move
+	busy     map[string]int       // foreground turns running, by session
 	seq      uint64
 	inflight *inflightStore // background tasks in progress, for resume after restart
 
@@ -198,6 +211,9 @@ type taskCardManager struct {
 	idleBeat   time.Duration // a card unchanged this long shows a sign that its tasks are alive
 	summaryGap time.Duration // between two quick-model progress lines of one task
 	cliStale   time.Duration // an agent progress line older than this lets the quick model write
+
+	followAfter int           // messages below a card before it moves down
+	followGap   time.Duration // between two placements of one card
 }
 
 func newTaskCardManager() *taskCardManager {
@@ -205,12 +221,17 @@ func newTaskCardManager() *taskCardManager {
 		tasks:      make(map[string]*cardTask),
 		past:       make(map[string]*cardTask),
 		open:       make(map[string]*taskCard),
+		follow:     make(map[string]*taskCard),
+		busy:       make(map[string]int),
 		openDelay:  10 * time.Second,
 		minGap:     3 * time.Second,
 		tick:       5 * time.Second,
 		idleBeat:   25 * time.Second,
 		summaryGap: 30 * time.Second,
 		cliStale:   60 * time.Second,
+
+		followAfter: taskCardFollowAfter,
+		followGap:   taskCardFollowGap,
 	}
 }
 
@@ -340,6 +361,8 @@ func (m *taskCardManager) refreshLocked(e *Engine, c *taskCard) {
 	}
 	view := m.viewLocked(e, c)
 	go func() {
+		c.writeMu.Lock()
+		defer c.writeMu.Unlock()
 		if err := c.platform.UpdateTaskCard(e.ctx, c.handle, view); err != nil {
 			slog.Warn("task card: update failed", "card", taskCardID(c), "error", err)
 		}
@@ -405,11 +428,12 @@ func (m *taskCardManager) show(e *Engine, t *cardTask) {
 	if c := m.open[t.sessionKey]; c != nil {
 		m.joinLocked(c, t)
 		poke(c.wake)
+		id, n := taskCardID(c), len(c.tasks)
 		m.mu.Unlock()
-		cardEvent("task_card_join", t.sessionKey, taskCardID(c), "task", t.taskID, "tasks", len(c.tasks))
+		cardEvent("task_card_join", t.sessionKey, id, "task", t.taskID, "tasks", n)
 		return
 	}
-	c := &taskCard{sessionKey: t.sessionKey, platform: t.platform, replyCtx: t.replyCtx, wake: make(chan struct{}, 1)}
+	c := &taskCard{sessionKey: t.sessionKey, platform: t.platform, replyCtx: t.replyCtx, followCtx: t.replyCtx, wake: make(chan struct{}, 1)}
 	m.open[t.sessionKey] = c
 	batch := []*cardTask{t}
 	for _, o := range m.tasks {
@@ -438,13 +462,14 @@ func (m *taskCardManager) show(e *Engine, t *cardTask) {
 		slog.Warn("task card: send failed", "task", t.taskID, "error", err)
 		return
 	}
-	c.handle = handle
+	c.handle, c.placedAt = handle, time.Now()
+	m.follow[c.sessionKey] = c
 	for _, o := range c.tasks {
 		m.maybeSummarizeLocked(e, o, false)
 	}
-	n := len(c.tasks)
+	n, id := len(c.tasks), taskCardID(c)
 	m.mu.Unlock()
-	cardEvent("task_card_open", c.sessionKey, taskCardID(c), "task", t.taskID, "tasks", n, "reason", "background_over_open_delay")
+	cardEvent("task_card_open", c.sessionKey, id, "task", t.taskID, "tasks", n, "reason", "background_over_open_delay")
 	go m.run(e, c, view)
 }
 
@@ -500,21 +525,30 @@ func (m *taskCardManager) run(e *Engine, c *taskCard, shown TaskCardView) {
 		if waiting || !final && sameTaskView(view, shown) {
 			continue
 		}
+		c.writeMu.Lock()
 		if err := c.platform.UpdateTaskCard(e.ctx, c.handle, view); err != nil {
 			slog.Warn("task card: update failed", "card", taskCardID(c), "error", err)
 		}
+		id := taskCardID(c)
+		c.writeMu.Unlock()
 		shown, changed = view, time.Now()
 		if final {
-			cardEvent("task_card_end", c.sessionKey, taskCardID(c), "tasks", len(view.Rows), "reason", string(view.State))
+			cardEvent("task_card_end", c.sessionKey, id, "tasks", len(view.Rows), "reason", string(view.State))
+			m.mu.Lock()
+			m.settledLocked(e, c)
+			m.mu.Unlock()
 			return
 		}
-		cardEvent("task_card_update", c.sessionKey, taskCardID(c), "reason", string(view.State))
+		cardEvent("task_card_update", c.sessionKey, id, "reason", string(view.State))
 	}
 }
 
-func taskCardID(c *taskCard) string {
-	if id, ok := c.platform.(PreviewIdentifier); ok && c.handle != nil {
-		return id.PreviewID(c.handle)
+// taskCardID names c's card for logs. Caller holds m.mu or c.writeMu.
+func taskCardID(c *taskCard) string { return cardHandleID(c.platform, c.handle) }
+
+func cardHandleID(p TaskCardPlatform, handle any) string {
+	if id, ok := p.(PreviewIdentifier); ok && handle != nil {
+		return id.PreviewID(handle)
 	}
 	return ""
 }
@@ -634,10 +668,14 @@ func outcomeAfterName(text, name string) string {
 
 // viewLocked renders the card. Caller holds m.mu.
 func (m *taskCardManager) viewLocked(e *Engine, c *taskCard) TaskCardView {
+	var v TaskCardView
 	if len(c.tasks) == 1 {
-		return oneTaskView(e.i18n, c.sessionKey, c.tasks[0])
+		v = oneTaskView(e.i18n, c.sessionKey, c.tasks[0])
+	} else {
+		v = manyTasksView(e.i18n, c.sessionKey, c.tasks)
 	}
-	return manyTasksView(e.i18n, c.sessionKey, c.tasks)
+	v.Moved = e.i18n.T(MsgPreviewMoved)
+	return v
 }
 
 // oneTaskView is the card of a single task: the task's name as the title, its

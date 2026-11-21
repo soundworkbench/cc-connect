@@ -4835,6 +4835,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 						e.send(p, replyCtx, chunk)
 					}
 				}
+				e.taskCards.replied(e, sessionKey, replyCtx, time.Time{}, false, !silent && outbound != "", true)
 
 				// Safety note: concurrent writes to session.History by the
 				// unsolicited reader and a foreground turn cannot overlap.
@@ -5108,6 +5109,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 func (e *Engine) processTurnEvents(automated bool, state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any, lockGen uint64, mutedNotices ...bool) {
 	e.noteTurnStart(sessionKey, session)
 	defer e.noteTurnEnd(sessionKey)
+	e.taskCards.turnBegan(sessionKey)
+	defer e.taskCards.turnEnded(e, sessionKey)
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -6578,6 +6581,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			if elapsed := time.Since(replyStart); elapsed >= slowPlatformSend {
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
 			}
+			e.taskCards.replied(e, sessionKey, replyCtx, turnStart, !automated, !isSilent, false)
 
 			// TTS: async voice reply if enabled (skipped for silent replies)
 			if !isSilent && e.tts != nil && e.tts.Enabled && e.tts.TTS != nil {
