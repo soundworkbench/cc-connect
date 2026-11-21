@@ -65,7 +65,7 @@ func TestBatchOfTasksSharesOneCard(t *testing.T) {
 	// Tasks end one by one: their rows settle, the title counts them.
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "0", Status: "completed", Summary: "纪要整理好了"})
 	waitUntil(t, "first row done", func() bool { return lastView(env).Title == "后台任务：进行中 1/5" })
-	if v := lastView(env); markedRow(v.Rows[0]) != "✓ 整理纪要 · 纪要整理好了 · 用时不到 1 分钟" || v.Rows[1].State != TaskCardRunning {
+	if v := lastView(env); markedRow(v.Rows[0]) != "✅ 整理纪要 · 纪要整理好了 · 用时不到 1 分钟" || v.Rows[1].State != TaskCardRunning {
 		t.Fatalf("after one: %s", rowTexts(v))
 	}
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "1", Status: "failed", Summary: "Background command \"统计\" failed with exit code 2"})
@@ -73,7 +73,7 @@ func TestBatchOfTasksSharesOneCard(t *testing.T) {
 	if r := lastView(env).Rows[1]; markedRow(r) != "✗ 统计目录 · 命令出错（退出码 2），原文在详情里 · 用时不到 1 分钟" || r.FullTitle != "原文" || !strings.Contains(r.Full, "exit code 2") {
 		t.Fatalf("failed row: %+v", r)
 	}
-	if v := lastView(env); v.State != TaskCardRunning || !strings.Contains(v.Interrupted, "\n✓ 整理纪要 · 纪要整理好了 · 用时不到 1 分钟\n✗ 统计目录") {
+	if v := lastView(env); v.State != TaskCardRunning || !strings.Contains(v.Interrupted, "\n✅ 整理纪要 · 纪要整理好了 · 用时不到 1 分钟\n✗ 统计目录") {
 		t.Fatalf("live card with ended rows: %+v", v)
 	}
 	for _, id := range []string{"2", "3", "4"} {
@@ -124,7 +124,7 @@ func TestSettledCardThenNewTaskOpensANewCard(t *testing.T) {
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "a", Status: "completed", Summary: "甲好了"})
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "b", Status: "completed", Summary: "乙好了"})
 	waitUntil(t, "settled", func() bool { return lastView(env).State == TaskCardCompleted })
-	if v := lastView(env); v.Title != "后台任务：已完成" || rowTexts(v) != "✓ 任务甲 · 甲好了 · 用时不到 1 分钟\n✓ 任务乙 · 乙好了 · 用时不到 1 分钟" {
+	if v := lastView(env); v.Title != "后台任务：已完成" || rowTexts(v) != "✅ 任务甲 · 甲好了 · 用时不到 1 分钟\n✅ 任务乙 · 乙好了 · 用时不到 1 分钟" {
 		t.Fatalf("settled: %+v", v)
 	}
 	env.task(TaskEvent{Kind: TaskStarted, TaskID: "c", Description: "任务丙", Background: yes()})
@@ -166,12 +166,12 @@ func TestManyTaskCardInterrupted(t *testing.T) {
 	waitUntil(t, "card", func() bool { sent, _ := env.p.cards(); return len(sent) == 1 })
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "0", Status: "completed", Summary: "甲好了"})
 	waitUntil(t, "one done", func() bool { return lastView(env).Title == "后台任务：进行中 1/3" })
-	if got := lastView(env).Interrupted; got != "后台任务：已中断\n✓ 任务甲 · 甲好了 · 用时不到 1 分钟\n⊘ 任务乙\n⊘ 任务丙" {
+	if got := lastView(env).Interrupted; got != "后台任务：已中断\n✅ 任务甲 · 甲好了 · 用时不到 1 分钟\n⊘ 任务乙\n⊘ 任务丙" {
 		t.Fatalf("restart text %q", got)
 	}
 	env.e.cleanupInteractiveState(env.key)
 	waitUntil(t, "interrupted", func() bool { return lastView(env).State == TaskCardInterrupted })
-	if v := lastView(env); v.Title != "后台任务：已中断" || rowTexts(v) != "✓ 任务甲 · 甲好了 · 用时不到 1 分钟\n⊘ 任务乙 · 用时不到 1 分钟\n⊘ 任务丙 · 用时不到 1 分钟" {
+	if v := lastView(env); v.Title != "后台任务：已中断" || rowTexts(v) != "✅ 任务甲 · 甲好了 · 用时不到 1 分钟\n⊘ 任务乙 · 用时不到 1 分钟\n⊘ 任务丙 · 用时不到 1 分钟" {
 		t.Fatalf("interrupted card: %+v", v)
 	}
 	if tasks, cards := env.heldTasks(); tasks != 0 || cards != 0 {
@@ -293,7 +293,7 @@ func TestProgressAnswerCountsLikeTheCard(t *testing.T) {
 		t.Fatal("progress question woke the agent")
 	}
 	got := env.p.stubPlatformEngine.getSent()[before]
-	want := "后台任务：进行中 1/3\n✓ 整理纪要 · 纪要整理好了 · 用时不到 1 分钟\n◐ 统计目录 · 列目录 · 不到 1 分钟\n◐ 搜索会议 · 查日历 · 不到 1 分钟\n"
+	want := "后台任务：进行中 1/3\n✅ 整理纪要 · 纪要整理好了 · 用时不到 1 分钟\n◐ 统计目录 · 列目录 · 不到 1 分钟\n◐ 搜索会议 · 查日历 · 不到 1 分钟\n"
 	if !strings.Contains(got, want) {
 		t.Fatalf("answer:\n%s\nwant:\n%s", got, want)
 	}

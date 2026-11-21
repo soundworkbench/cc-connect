@@ -85,7 +85,7 @@ type TaskCardView struct {
 type TaskCardRow struct {
 	State     TaskCardState
 	Waiting   bool   // running, but nothing from the task yet: no step, no progress line
-	Mark      string // the sign in front of the row as text: ◐ running, ⏳ waiting, ✓ ✗ ■ ⊘ ended
+	Mark      string // the sign in front of the row as text: ◐ running, ⏳ waiting, ✅ ✗ ■ ⊘ ended
 	Text      string // "<name> · <step or outcome> · <time>"
 	Shown     bool   // on the card's body; otherwise only in the details panel
 	Details   []string
@@ -667,7 +667,7 @@ func oneTaskView(i *I18n, sessionKey string, t *cardTask) TaskCardView {
 func taskMark(s TaskCardState, waiting bool) string {
 	switch s {
 	case TaskCardCompleted:
-		return "✓"
+		return "✅"
 	case TaskCardFailed:
 		return "✗"
 	case TaskCardStopped:

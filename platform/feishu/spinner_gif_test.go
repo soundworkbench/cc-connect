@@ -193,7 +193,7 @@ func TestStepRowsShareIconSlot(t *testing.T) {
 		if icon["tag"] != "custom_icon" || icon["img_key"] != wantIcon[i] {
 			t.Fatalf("element %d icon: %v", i, el)
 		}
-		if strings.Contains(el["content"].(string), "✓") {
+		if strings.Contains(el["content"].(string), "✅") {
 			t.Fatalf("text check beside an icon: %v", el)
 		}
 	}

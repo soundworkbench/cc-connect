@@ -131,12 +131,12 @@ func TestManyTaskCardRows(t *testing.T) {
 	live := core.TaskCardView{
 		State: core.TaskCardRunning, Title: "后台任务：进行中 1/3", DetailsTitle: "详情", SessionKey: "feishu:oc:u",
 		Rows: []core.TaskCardRow{
-			{State: core.TaskCardCompleted, Mark: "✓", Text: "整理纪要 · 纪要整理好了 · 用时 2 分钟", Shown: true, Details: []string{"读纪要"}},
+			{State: core.TaskCardCompleted, Mark: "✅", Text: "整理纪要 · 纪要整理好了 · 用时 2 分钟", Shown: true, Details: []string{"读纪要"}},
 			{State: core.TaskCardFailed, Mark: "✗", Text: "清理目录 · 命令出错（退出码 1），原文在详情里 · 用时 1 分钟", Shown: true, Details: []string{"删除临时文件"}, FullTitle: "原文", Full: "rm: /tmp/x: denied"},
 			{State: core.TaskCardRunning, Mark: "◐", Text: "统计目录 · 列目录 · 3 分钟", Details: []string{"读目录", "列目录"}},
 		},
 		More:        "另有 1 项，见详情",
-		Interrupted: "后台任务：已中断\n✓ 整理纪要 · 纪要整理好了 · 用时 2 分钟\n✗ 清理目录\n⊘ 统计目录",
+		Interrupted: "后台任务：已中断\n✅ 整理纪要 · 纪要整理好了 · 用时 2 分钟\n✗ 清理目录\n⊘ 统计目录",
 	}
 	h, err := p.SendTaskCard(context.Background(), replyContext{chatID: "oc"}, live)
 	if err != nil {
@@ -144,7 +144,7 @@ func TestManyTaskCardRows(t *testing.T) {
 	}
 	text := plainJSON(parsePreviewJSON(t, f.read()[0].body["data"]))
 	els := cardElements(t, text)
-	if len(els) != 4 || rowSign(t, els[0]) != "✓" || rowText(t, els[0]) != "整理纪要 · 纪要整理好了 · 用时 2 分钟" ||
+	if len(els) != 4 || rowSign(t, els[0]) != "✅" || rowText(t, els[0]) != "整理纪要 · 纪要整理好了 · 用时 2 分钟" ||
 		rowSign(t, els[1]) != "✗" || rowText(t, els[1]) != "清理目录 · 命令出错（退出码 1），原文在详情里 · 用时 1 分钟" ||
 		!strings.Contains(els[2]["content"].(string), "另有 1 项，见详情") || els[3]["tag"] != "collapsible_panel" {
 		t.Fatalf("body: %s", text)
@@ -168,7 +168,7 @@ func TestManyTaskCardRows(t *testing.T) {
 	}
 
 	// A task ending changes what a restart leaves; settling clears the record.
-	live.Interrupted = "后台任务：已中断\n✓ 整理纪要 · 纪要整理好了 · 用时 2 分钟\n✗ 清理目录\n✓ 统计目录"
+	live.Interrupted = "后台任务：已中断\n✅ 整理纪要 · 纪要整理好了 · 用时 2 分钟\n✗ 清理目录\n✓ 统计目录"
 	if err := p.UpdateTaskCard(context.Background(), h, live); err != nil {
 		t.Fatal(err)
 	}
@@ -253,9 +253,9 @@ func TestManyTaskCardStaysWithinSize(t *testing.T) {
 
 // A restart leaves a card of several tasks as grey lines, one per task.
 func TestGreyLinesForSeveralTasks(t *testing.T) {
-	text := plainJSON(parsePreviewJSON(t, greyLineCardJSON("后台任务：已中断\n✓ 整理纪要 · 好了 · 用时 2 分钟\n⊘ 统计目录")))
+	text := plainJSON(parsePreviewJSON(t, greyLineCardJSON("后台任务：已中断\n✅ 整理纪要 · 好了 · 用时 2 分钟\n⊘ 统计目录")))
 	for _, want := range []string{`"summary":{"content":"后台任务：已中断"}`,
-		`<font color='grey'>后台任务：已中断</font>\n<font color='grey'>✓ 整理纪要 · 好了 · 用时 2 分钟</font>\n<font color='grey'>⊘ 统计目录</font>`} {
+		`<font color='grey'>后台任务：已中断</font>\n<font color='grey'>✅ 整理纪要 · 好了 · 用时 2 分钟</font>\n<font color='grey'>⊘ 统计目录</font>`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("grey card lacks %s: %s", want, text)
 		}

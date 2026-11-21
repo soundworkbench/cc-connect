@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// 11-12 20:42: a done row read "✓ 统计文档目录 · 统计文档目录任务已完成 · 用时不到 1 分钟".
+// 11-12 20:42: a done row read "✅ 统计文档目录 · 统计文档目录任务已完成 · 用时不到 1 分钟".
 // An outcome that only restates the name and the state is left out; one that
 // starts with the name keeps what follows it.
 func TestOutcomeAfterName(t *testing.T) {
@@ -42,7 +42,7 @@ func TestDoneRowDropsAnOutcomeThatRepeatsTheName(t *testing.T) {
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "c", Status: "completed", Summary: "Background command \"检查链接\" completed (exit code 0)"})
 	waitUntil(t, "settled", func() bool { return lastView(env).State == TaskCardCompleted })
 	v := lastView(env)
-	want := []string{"✓ 统计文档目录 · 用时不到 1 分钟", "✓ 整理纪要 · 8 场会的要点 · 用时不到 1 分钟", "✓ 检查链接 · 用时不到 1 分钟"}
+	want := []string{"✅ 统计文档目录 · 用时不到 1 分钟", "✅ 整理纪要 · 8 场会的要点 · 用时不到 1 分钟", "✅ 检查链接 · 用时不到 1 分钟"}
 	for k, r := range v.Rows {
 		if got := markedRow(r); got != want[k] || r.Full != "" {
 			t.Errorf("row %d=%q full=%q, want %q", k, got, r.Full, want[k])
@@ -88,7 +88,7 @@ func TestTaskReportedAgainAfterItEnded(t *testing.T) {
 	env.task(TaskEvent{Kind: TaskProgress, TaskID: "a1", Step: "再列一遍目录"})
 	env.task(TaskEvent{Kind: TaskEnded, TaskID: "b1", Status: "completed", Summary: "8 场会的要点"})
 	waitUntil(t, "card settled", func() bool { h, c := env.heldTasks(); return h == 0 && c == 0 })
-	if v := lastView(env); v.State != TaskCardCompleted || rowTexts(v) != "✓ 统计文档目录 · 目录统计好了 · 用时不到 1 分钟\n✓ 整理纪要 · 8 场会的要点 · 用时不到 1 分钟" {
+	if v := lastView(env); v.State != TaskCardCompleted || rowTexts(v) != "✅ 统计文档目录 · 目录统计好了 · 用时不到 1 分钟\n✅ 整理纪要 · 8 场会的要点 · 用时不到 1 分钟" {
 		t.Fatalf("settled=%+v", v)
 	}
 
@@ -117,7 +117,7 @@ func TestTaskReportedAgainAfterItEnded(t *testing.T) {
 	waitUntil(t, "row updated", func() bool { _, up := env.p.cards(); return len(up) == len(before)+1 })
 	sent, up := env.p.cards()
 	if last := up[len(up)-1]; last.handle != sent[0].handle || last.view.State != TaskCardCompleted ||
-		rowTexts(last.view) != "✓ 统计文档目录 · 共 52 个目录、318 个文件 · 用时不到 1 分钟\n✓ 整理纪要 · 8 场会的要点 · 用时不到 1 分钟" {
+		rowTexts(last.view) != "✅ 统计文档目录 · 共 52 个目录、318 个文件 · 用时不到 1 分钟\n✅ 整理纪要 · 8 场会的要点 · 用时不到 1 分钟" {
 		t.Fatalf("updated=%+v", last)
 	}
 	if len(sent) != 1 {
