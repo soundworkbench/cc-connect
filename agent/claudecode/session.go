@@ -55,6 +55,14 @@ type claudeSession struct {
 	// reaches the user once.
 	lastModelSwitch atomic.Value // stores string
 
+	// carriedStale is set by a compact_boundary event and cleared by the next
+	// per-call usage: in between, lastUsage still describes the conversation
+	// before the compaction (see CarriedContext).
+	carriedStale atomic.Bool
+	// onContextWindow, when set, receives every context window Claude Code
+	// reports for the session model (Agent.rememberContextWindow).
+	onContextWindow func(model string, window int)
+
 	// usageMu guards lastUsage. Populated from the most recent result event.
 	usageMu   sync.Mutex
 	lastUsage *core.ContextUsage
@@ -806,6 +814,16 @@ func (cs *claudeSession) handleSystem(raw map[string]any) {
 	case "api_retry":
 		cs.emit(core.Event{Type: core.EventRetry, Retry: parseAPIRetry(raw)})
 		return
+	case "status":
+		if status, _ := raw["status"].(string); status == "compacting" {
+			cs.emit(core.Event{Type: core.EventCompacting})
+		}
+		return
+	case "compact_boundary":
+		// The last per-call usage now describes the conversation before the
+		// compaction; CarriedContext reads the boundary from the transcript
+		// until the next call reports a fresh number.
+		cs.carriedStale.Store(true)
 	case "task_started", "task_progress", "task_updated", "task_notification":
 		if ev := parseTaskEvent(subtype, raw); ev != nil {
 			cs.markStoppedTask(ev)
@@ -970,12 +988,24 @@ const transcriptLineCap = 64 << 20 // 64MiB
 // callers only need usage != nil, but the distinction is what lets a test assert
 // the reader actually opened and scanned the file rather than silently bailing.
 func tailUsageFromTranscript(path string, windowBytes int64, override int) (usage *core.ContextUsage, found bool) {
+	found = scanTranscriptTail(path, windowBytes, func(line []byte) bool {
+		usage = claudeUsageFromTranscriptLine(line, override)
+		return usage != nil
+	})
+	return usage, found
+}
+
+// scanTranscriptTail walks the lines of a Claude Code JSONL transcript from
+// the newest backwards until visit returns true, reading a growing tail window
+// (see tailUsageFromTranscript for the sizing). found is false when the file
+// could not be read at all.
+func scanTranscriptTail(path string, windowBytes int64, visit func(line []byte) bool) (found bool) {
 	if path == "" {
-		return nil, false
+		return false
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, false
+		return false
 	}
 	// Read-only handle: a Close error carries nothing actionable, and the
 	// descriptor is released either way. errcheck wants that said explicitly.
@@ -983,11 +1013,11 @@ func tailUsageFromTranscript(path string, windowBytes int64, override int) (usag
 
 	st, err := f.Stat()
 	if err != nil {
-		return nil, false
+		return false
 	}
 	size := st.Size()
 	if size == 0 {
-		return nil, false
+		return false
 	}
 
 	// Start small and grow only when a single line (a tool result embedding a
@@ -1013,15 +1043,16 @@ func tailUsageFromTranscript(path string, windowBytes int64, override int) (usag
 		buf := make([]byte, window)
 		n, err := f.ReadAt(buf, start)
 		if err != nil && err != io.EOF {
-			return nil, false
+			return false
 		}
 		buf = buf[:n]
 
-		// Walk lines from the newest backwards and take the first one that parses.
+		// Walk lines from the newest backwards and take the first one visit
+		// accepts.
 		//
 		// No boundary bookkeeping is needed: a record only ever spans lines
 		// Claude Code finished writing, so a truncated line either fails to parse
-		// or fails the "type":"assistant" check, and the walk simply moves on.
+		// or fails the type check, and the walk simply moves on.
 		// That is what makes the multi-MiB tool-result case fall out for free
 		// instead of needing a carry buffer.
 		end := len(buf)
@@ -1034,10 +1065,8 @@ func tailUsageFromTranscript(path string, windowBytes int64, override int) (usag
 			if nl >= 0 {
 				begin = nl + 1
 			}
-			if line := buf[begin:end]; len(line) > 0 {
-				if u := claudeUsageFromTranscriptLine(line, override); u != nil {
-					return u, true
-				}
+			if line := buf[begin:end]; len(line) > 0 && visit(line) {
+				return true
 			}
 			if nl < 0 {
 				break
@@ -1048,7 +1077,7 @@ func tailUsageFromTranscript(path string, windowBytes int64, override int) (usag
 		if start == 0 || window == limit {
 			// The whole file (or the caller's look-back limit) was searched and
 			// held no record.
-			return nil, true
+			return true
 		}
 		window *= 2
 		if window > limit {
@@ -1056,7 +1085,7 @@ func tailUsageFromTranscript(path string, windowBytes int64, override int) (usag
 		}
 	}
 	// The look-back limit was reached without a usable record.
-	return nil, true
+	return true
 }
 
 // recoverUsageFromTranscript restores the exact context-usage numbers from the
@@ -1194,6 +1223,7 @@ func (cs *claudeSession) handleAssistant(raw map[string]any) {
 			}
 			cs.usageSource = "event"
 			cs.usageMu.Unlock()
+			cs.carriedStale.Store(false)
 		}
 		// used == 0 means the usage block is present but empty — measured on
 		// MiniMax-M3, which sends {"input_tokens":0,...} on every assistant
@@ -1498,6 +1528,9 @@ func (cs *claudeSession) handleResult(raw map[string]any) {
 	// suffix (claude-opus-5-5 reports contextWindow 1000000).
 	if w := claudeModelUsageContextWindow(raw, cs.GetModel()); w > 0 {
 		cs.reportedCtxWindow.Store(int64(w))
+		if cs.onContextWindow != nil {
+			cs.onContextWindow(cs.GetModel(), w)
+		}
 	}
 
 	// Path 2: consult the transcript when the in-process snapshot is absent.

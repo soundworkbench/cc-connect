@@ -158,6 +158,7 @@ func (sp *streamPreview) setNotice(text string) {
 type turnWatch struct {
 	timer       *time.Timer
 	waitingTool bool // a tool, a permission or the user is what the turn waits on, not the model
+	compacting  bool // the agent is compacting the conversation; that is what the turn waits on
 }
 
 func newTurnWatch(enabled bool) *turnWatch {
@@ -193,10 +194,15 @@ func (w *turnWatch) observe(i *I18n, ev Event) string {
 		}
 		w.timer.Reset(silenceNoticeAfter)
 	}
+	w.compacting = false
 	switch ev.Type {
 	case EventRetry:
 		w.waitingTool = false
 		return retryNotice(i, ev.Retry)
+	case EventCompacting:
+		w.waitingTool = false
+		w.compacting = true
+		return i.T(MsgPreviewCompacting)
 	case EventToolUse, EventPermissionRequest, EventUserInputRequest:
 		w.waitingTool = true
 	default:
@@ -210,6 +216,9 @@ func (w *turnWatch) observe(i *I18n, ev Event) string {
 func (w *turnWatch) silent(i *I18n) string {
 	if w.waitingTool {
 		return ""
+	}
+	if w.compacting {
+		return i.T(MsgPreviewCompacting)
 	}
 	return i.T(MsgPreviewWaitingModel)
 }

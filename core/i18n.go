@@ -219,6 +219,8 @@ const (
 	MsgPreviewRetryingBare       MsgKey = "preview_retrying_bare"
 	MsgPreviewUsageLimitWait     MsgKey = "preview_usage_limit_wait"
 	MsgPreviewWaitingModel       MsgKey = "preview_waiting_model"
+	MsgPreviewCompacting         MsgKey = "preview_compacting"
+	MsgSwitchCompacting          MsgKey = "switch_compacting"
 	MsgPreviewInterrupted        MsgKey = "preview_interrupted"
 	MsgPreviewMoved              MsgKey = "preview_moved"
 	MsgTurnFailed                MsgKey = "turn_failed"
@@ -827,6 +829,8 @@ var messages = map[MsgKey]map[Language]string{
 	MsgPreviewRetryingBare:   {LangEnglish: "Can't reach the model service, retrying", LangChinese: "模型服务连不上，正在重试", LangTraditionalChinese: "模型服務連不上，正在重試", LangJapanese: "モデルサービスに接続できません。再試行中", LangSpanish: "No se puede conectar con el modelo, reintentando"},
 	MsgPreviewUsageLimitWait: {LangEnglish: "Model usage limit reached, waiting", LangChinese: "模型用量到了上限，正在等待", LangTraditionalChinese: "模型用量到了上限，正在等待", LangJapanese: "モデルの利用上限に達しました。待機中", LangSpanish: "Se alcanzó el límite de uso del modelo, esperando"},
 	MsgPreviewWaitingModel:   {LangEnglish: "Still waiting for the model to respond", LangChinese: "还在等模型响应", LangTraditionalChinese: "還在等模型回應", LangJapanese: "モデルの応答を待っています", LangSpanish: "Todavía esperando la respuesta del modelo"},
+	MsgPreviewCompacting:     {LangEnglish: "Long conversation, tidying it up", LangChinese: "对话较长，正在整理", LangTraditionalChinese: "對話較長，正在整理", LangJapanese: "会話が長いため整理しています", LangSpanish: "La conversación es larga, se está resumiendo"},
+	MsgSwitchCompacting:      {LangEnglish: "Long conversation, tidying it up before switching models", LangChinese: "对话较长，正在整理后切换", LangTraditionalChinese: "對話較長，正在整理後切換", LangJapanese: "会話が長いため、整理してからモデルを切り替えます", LangSpanish: "La conversación es larga, se resume antes de cambiar de modelo"},
 	MsgPreviewInterrupted:    {LangEnglish: "Interrupted", LangChinese: "已中断", LangTraditionalChinese: "已中斷", LangJapanese: "中断されました", LangSpanish: "Interrumpido"},
 	MsgTurnFailed:            {LangEnglish: "This didn't go through", LangChinese: "这次没做成", LangTraditionalChinese: "這次沒做成", LangJapanese: "今回は完了できませんでした", LangSpanish: "Esta vez no se pudo completar"},
 	MsgTurnFailedModel:       {LangEnglish: "This didn't go through: the model service is unreachable for now", LangChinese: "这次没做成：模型服务暂时连不上", LangTraditionalChinese: "這次沒做成：模型服務暫時連不上", LangJapanese: "今回は完了できませんでした：モデルサービスに一時的に接続できません", LangSpanish: "Esta vez no se pudo completar: el servicio del modelo no responde por ahora"},

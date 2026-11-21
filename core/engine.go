@@ -439,6 +439,10 @@ type Engine struct {
 	baseWorkDir                  string
 	projectState                 *ProjectStateStore
 
+	// switchCompactTried remembers, per interactive key, the carried context a
+	// model-switch compaction was last attempted for (compactCarriedContext).
+	switchCompactTried sync.Map
+
 	// Auto-compress settings
 	autoCompressEnabled   bool
 	autoCompressMaxTokens int
@@ -3530,10 +3534,16 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
+	notifySwitch := isHumanTurn(msg) && !msg.scheduledMute
+	turnAgent := agent
+	if turnAgent == nil {
+		turnAgent = e.agent
+	}
 	var state *interactiveState
 	if msg.preflightSent {
 		state = msg.executionState
 	} else {
+		e.compactBeforeModelRecycle(interactiveKey, turnAgent, session, admittedPreview, p, msg.ReplyCtx, notifySwitch)
 		state = e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg.executionState)
 	}
 	if state == nil || state.isStopped() {
@@ -3618,6 +3628,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	state.mu.Unlock()
 	if needResync {
 		drainEvents(turnAgentSession.Events())
+	}
+	if !msg.preflightSent {
+		e.compactCarriedContext(interactiveKey, turnAgent, state, turnAgentSession, session, admittedPreview, p, msg.ReplyCtx, notifySwitch)
 	}
 
 	promptContent := e.buildSenderPrompt(msg.Content, msg.UserID, msg.UserName, msg.Platform, msg.SessionKey, msg.ChannelKey)
@@ -10322,7 +10335,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.persistWorkspaceModelOverride(interactiveKey, msg.SessionKey, agent, target)
-	e.cleanupInteractiveState(interactiveKey)
+	e.retireAfterModelSwitch(interactiveKey, sessions.GetOrCreateActive(msg.SessionKey))
 
 	// Keep the existing agent session ID so the next StartSession uses
 	// --resume <id> --model <new>, which lets the CLI agent restore context

@@ -520,6 +520,26 @@ type ModelSwitcher interface {
 	AvailableModels(ctx context.Context) []ModelOption
 }
 
+// SwitchContextBudget is an optional Agent interface for agents that resume a
+// conversation on another model. SwitchCompactLine returns the carried
+// context size (tokens) at or above which the conversation is compacted
+// before it continues on model, so the new model starts well inside its
+// window instead of overflowing it or compacting mid-turn on a cold cache.
+// 0 means unknown: never compact for a switch.
+type SwitchContextBudget interface {
+	SwitchCompactLine(model string) int
+}
+
+// CarriedContextReporter is an optional AgentSession interface: the prompt
+// size the session's conversation carries and the model that produced that
+// number. Unlike ContextUsageReporter it also answers for a process that has
+// not run a turn yet, from the agent's own transcript, and it reflects a
+// compaction as soon as one completes. tokens is 0 when unknown; model is ""
+// when the source does not name one.
+type CarriedContextReporter interface {
+	CarriedContext() (tokens int, model string)
+}
+
 // ReasoningEffortSwitcher is an optional interface for agents that support
 // runtime switching of reasoning effort.
 type ReasoningEffortSwitcher interface {
