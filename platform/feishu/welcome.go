@@ -138,7 +138,11 @@ func (p *Platform) newWelcomer(owner, custom, dir string, chatted func() (bool, 
 		usedNotice: func() string { return p.welcomeI18n().T(core.MsgWelcomeCardUsed) },
 		chatted:    chatted,
 		send: func(ctx context.Context, text string) error {
-			return p.sendToOpenID(ctx, owner, text)
+			msgType, content, err := p.welcomeContent(text)
+			if err != nil {
+				return err
+			}
+			return p.sendToOpenID(ctx, owner, msgType, content)
 		},
 		sendCard: func(ctx context.Context, card *core.Card) error {
 			return p.sendCardToOpenID(ctx, owner, card)
@@ -156,20 +160,27 @@ func (p *Platform) newWelcomer(owner, custom, dir string, chatted func() (bool, 
 		if clicked != "" {
 			sent = p.welcomeI18n().Tf(core.MsgWelcomeCardSent, clicked)
 		}
-		return welcomeCard(body, w.buttons(), sent)
+		var extra []core.CardButton
+		if p.modelPageLink != "" {
+			extra = append(extra, core.LinkBtn(p.welcomeI18n().T(core.MsgCardTitleModel), p.modelPageLink))
+		}
+		return welcomeCard(body, w.buttons(), sent, extra...)
 	}
 	return w
 }
 
 // welcomeCard is the greeting with one button per example request. sent, once
 // a button was tapped, greys the buttons out and shows as a note.
-func welcomeCard(body string, buttons []string, sent string) *core.Card {
+func welcomeCard(body string, buttons []string, sent string, extra ...core.CardButton) *core.Card {
 	cb := core.NewCard().Markdown(body)
 	for _, text := range buttons {
 		btn := core.Btn(text, "default", welcomeActionPrefix+text)
 		if sent != "" {
 			btn.Disabled, btn.DisabledTip = true, sent
 		}
+		cb.Buttons(btn)
+	}
+	for _, btn := range extra {
 		cb.Buttons(btn)
 	}
 	cb.Note(sent)
@@ -305,13 +316,26 @@ func (p *Platform) hasConversation(sessionStore, project string) (bool, error) {
 	return false, nil
 }
 
-// sendToOpenID sends a private text message to a user by open_id.
-func (p *Platform) sendToOpenID(ctx context.Context, openID, text string) error {
-	content, err := json.Marshal(map[string]string{"text": text})
-	if err != nil {
-		return fmt.Errorf("%s: welcome: encode: %w", p.tag(), err)
+// welcomeContent returns the welcome message: a card with a model button when
+// a model page is configured, plain text otherwise.
+func (p *Platform) welcomeContent(text string) (string, string, error) {
+	if p.modelPageLink == "" {
+		content, err := json.Marshal(map[string]string{"text": text})
+		if err != nil {
+			return "", "", fmt.Errorf("%s: welcome: encode: %w", p.tag(), err)
+		}
+		return larkim.MsgTypeText, string(content), nil
 	}
-	return p.sendOpenIDMessage(ctx, openID, larkim.MsgTypeText, string(content))
+	card := core.NewCard().
+		Markdown(text).
+		Buttons(core.LinkBtn(p.welcomeI18n().T(core.MsgCardTitleModel), p.modelPageLink)).
+		Build()
+	return larkim.MsgTypeInteractive, renderCard(card, ""), nil
+}
+
+// sendToOpenID sends a private message to a user by open_id.
+func (p *Platform) sendToOpenID(ctx context.Context, openID, msgType, content string) error {
+	return p.sendOpenIDMessage(ctx, openID, msgType, content)
 }
 
 // sendCardToOpenID sends a private card message to a user by open_id.

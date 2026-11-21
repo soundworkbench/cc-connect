@@ -624,6 +624,7 @@ type interactiveState struct {
 	sideText                 string
 	deleteMode               *deleteModeState
 	modelSwitch              *modelSwitchState
+	modelStale               bool // the default model changed; restart the live process at the next turn
 	pendingProviderAdd       *pendingProviderAddState
 	lastAutoCompressAt       time.Time
 	lastAutoCompressTokens   int
@@ -3870,7 +3871,13 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		// If wantID is empty (/new, cleared session) but the process already has
 		// a concrete ID, reusing would keep --resume context — recycle (#238).
 		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
-		if !needRecycle {
+		// After a default model change the process restarts with --resume on
+		// the new model, unless background work started by the last turn is
+		// still running there.
+		state.mu.Lock()
+		modelStale := state.modelStale && !hasBackgroundWork(state.agentSession)
+		state.mu.Unlock()
+		if !needRecycle && !modelStale {
 			state.mu.Lock()
 			state.busySession = session
 			state.mu.Unlock()
@@ -3881,6 +3888,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			"session_key", sessionKey,
 			"want_agent_session", wantID,
 			"have_agent_session", currentID,
+			"model_stale", modelStale,
 		)
 		e.stopUnsolicitedReader(state)
 		state.markStopped()
@@ -13774,10 +13782,16 @@ func (e *Engine) renderModelCard(sessionKey string) *Card {
 		}
 	}
 
+	buttons := []CardButton{e.cardBackButton()}
+	if linker, ok := e.platformForName(extractPlatformName(sessionKey)).(ModelPageLinker); ok {
+		if link := linker.ModelPageLink(); link != "" {
+			buttons = append([]CardButton{LinkBtn(e.i18n.T(MsgCardTitleModel), link)}, buttons...)
+		}
+	}
 	cb := NewCard().Title(e.i18n.T(MsgCardTitleModel), "indigo").
 		Markdown(sb.String()).
 		Select(e.i18n.T(MsgModelSelectPlaceholder), opts, initVal).
-		Buttons(e.cardBackButton())
+		Buttons(buttons...)
 	cb.Note(e.i18n.T(MsgModelUsage))
 	return cb.Build()
 }

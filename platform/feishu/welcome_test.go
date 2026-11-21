@@ -367,7 +367,11 @@ func TestSendToOpenID_UsesOpenIDReceiver(t *testing.T) {
 	p := &Platform{platformName: "feishu"}
 	p.client = lark.NewClient("cli_welcome", "test-secret", lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client()))
 	text := core.NewI18n(core.LangChinese).T(core.MsgFirstRunWelcome)
-	if err := p.sendToOpenID(context.Background(), "ou_owner", text); err != nil {
+	msgType, content, err := p.welcomeContent(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.sendToOpenID(context.Background(), "ou_owner", msgType, content); err != nil {
 		t.Fatal(err)
 	}
 	if gotType != "open_id" || gotID != "ou_owner" || gotMsgType != "text" || gotText != text {
