@@ -25,23 +25,24 @@ import (
 var switchCompactTimeout = 15 * time.Minute
 
 // retireAfterModelSwitch ends the live process's run on the previous model
-// after a /model switch. An idle process is kept until the next turn, which
-// restarts it on the new model with --resume (getOrCreateInteractiveStateWith)
-// after compactBeforeModelRecycle had the chance to compact on the previous
-// model. A busy process, or one with background work, is closed now.
-func (e *Engine) retireAfterModelSwitch(iKey string, session *Session) {
+// after a /model switch. The process is kept until its current turn (if any)
+// ends; the next turn, queued or new, restarts it on the new model with
+// --resume (getOrCreateInteractiveStateWith, drainPendingMessages) after
+// compactBeforeModelRecycle had the chance to compact on the previous model.
+// A process with background work, or none at all, is closed now.
+func (e *Engine) retireAfterModelSwitch(iKey string) {
 	e.interactiveMu.Lock()
 	state := e.interactiveStates[iKey]
 	e.interactiveMu.Unlock()
-	if state != nil && session != nil && !session.Busy() {
+	if state != nil {
 		state.mu.Lock()
 		as := state.agentSession
-		idle := as != nil && as.Alive() && !state.stopped && state.pending == nil && !hasBackgroundWork(as)
-		if idle {
+		keep := as != nil && as.Alive() && !state.stopped && !hasBackgroundWork(as)
+		if keep {
 			state.modelStale = true
 		}
 		state.mu.Unlock()
-		if idle {
+		if keep {
 			return
 		}
 	}
@@ -222,6 +223,12 @@ func (e *Engine) clearSwitchNotice(sp *streamPreview) {
 	if sp != nil {
 		sp.setNotice("")
 	}
+}
+
+// modelStaleLocked reports whether state's process should hand its next turn
+// to a process on the new model. Caller holds state.mu.
+func modelStaleLocked(state *interactiveState, as AgentSession) bool {
+	return state.modelStale && as != nil && as.Alive() && !hasBackgroundWork(as)
 }
 
 func agentModel(agent Agent) string {

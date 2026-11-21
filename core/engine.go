@@ -3860,6 +3860,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	if len(expected) > 0 && expected[0] != nil && (state != expected[0] || state.isStopped()) {
 		return expected[0]
 	}
+	var carriedQueue *interactiveState
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
 		// Verify the running agent session matches the current active session.
 		// After /new or /switch the active session changes, but the old agent
@@ -3898,6 +3899,11 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		// continues outputting while new agent starts (issue #327).
 		e.closeAgentSessionWithTimeout(sessionKey, state.agentSession, state.platform, state.replyCtx)
 		delete(e.interactiveStates, sessionKey)
+		if modelStale && !needRecycle {
+			// Same conversation on a new model: messages queued behind the
+			// old process belong to the new one.
+			carriedQueue = state
+		}
 		ok = false // prevent reading stale settings below
 	}
 
@@ -4027,6 +4033,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 				Error:      fmt.Sprintf("failed to start session: %v", err),
 			})
 			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true, busySession: session}
+			if carriedQueue != nil {
+				adoptPendingFromPlaceholder(carriedQueue, newState)
+			}
 			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 			state = newState
 			state.queueKey = sessionKey
@@ -4072,6 +4081,9 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		replyCtx:         replyCtx,
 		agent:            agent,
 		eventsNeedResync: true,
+	}
+	if carriedQueue != nil {
+		adoptPendingFromPlaceholder(carriedQueue, newState)
 	}
 	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
 	state = newState
@@ -6622,7 +6634,9 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 					"dropped", droppedStale,
 				)
 			}
-			if len(state.pendingMessages) > 0 {
+			// After a model switch the queue moves to a process on the new
+			// model (drainPendingMessages), not to this one.
+			if len(state.pendingMessages) > 0 && !modelStaleLocked(state, turnAgentSession) {
 				queued, ok := e.popQueuedBatchLocked(state)
 				if !ok {
 					state.mu.Unlock()
@@ -7055,6 +7069,18 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		if !ok {
 			state.mu.Unlock()
 			return false
+		}
+		if modelStaleLocked(state, state.agentSession) {
+			// The model changed after this process started: run the queued
+			// turn as a fresh one, which compacts if needed and restarts the
+			// process on the new model. It owns the session lock from here.
+			agent, workspaceDir := state.agent, state.workspaceDir
+			state.mu.Unlock()
+			e.acknowledgeQueuedBatch(queued)
+			msg := queuedInput(queued)
+			msg.humanBatch = isHumanQueuedTurn(queued)
+			e.processInteractiveMessageWith(queued.platform, msg, session, agent, sessions, sessionKey, workspaceDir, queued.msgSessionKey, lockGen)
+			return true
 		}
 		state.platform = queued.platform
 		state.replyCtx = queued.replyCtx
@@ -10335,7 +10361,7 @@ func (e *Engine) cmdModel(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.persistWorkspaceModelOverride(interactiveKey, msg.SessionKey, agent, target)
-	e.retireAfterModelSwitch(interactiveKey, sessions.GetOrCreateActive(msg.SessionKey))
+	e.retireAfterModelSwitch(interactiveKey)
 
 	// Keep the existing agent session ID so the next StartSession uses
 	// --resume <id> --model <new>, which lets the CLI agent restore context

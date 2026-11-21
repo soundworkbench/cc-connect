@@ -345,3 +345,42 @@ func TestModelSwitch_NoticeShowsOnCard(t *testing.T) {
 		t.Fatalf("notice also sent as a message: %s", sent)
 	}
 }
+
+func TestModelSwitch_DuringTurnQueuedMessageRunsOnNewModel(t *testing.T) {
+	// /model arrives while a turn runs and the next message queues behind it:
+	// the running turn finishes on the old model, the queued one runs on the
+	// new model after compacting on the old one, and nothing is dropped.
+	agent := newSwitchCtxAgent(150_000, "alpha")
+	agent.delayMs = 300
+	env := newSwitchCtxEnv(t, agent)
+
+	env.p.clearSent()
+	env.e.ReceiveMessage(env.p, &Message{SessionKey: switchKey, Platform: "test", UserID: "user", Content: "long task", ReplyCtx: switchKey})
+	env.waitFor("turn started", 2*time.Second, func() bool { _, procs := agent.snapshot(); return len(procs) == 1 })
+	env.e.ReceiveMessage(env.p, &Message{SessionKey: switchKey, Platform: "test", UserID: "user", Content: "/model switch beta", ReplyCtx: switchKey})
+	env.waitFor("model switched", 2*time.Second, func() bool { return agent.GetModel() == "beta" })
+	env.e.ReceiveMessage(env.p, &Message{SessionKey: switchKey, Platform: "test", UserID: "user", Content: "queued question", ReplyCtx: switchKey})
+
+	env.waitFor("both replies", 5*time.Second, func() bool {
+		got := strings.Join(env.p.getSent(), "\n")
+		return strings.Contains(got, "MODEL=alpha") && strings.Contains(got, "MODEL=beta")
+	})
+	env.waitFor("idle", 3*time.Second, func() bool { return !env.e.sessions.GetOrCreateActive(switchKey).Busy() })
+	got := strings.Join(env.p.getSent(), "\n")
+	if strings.Index(got, "MODEL=alpha") > strings.Index(got, "MODEL=beta") {
+		t.Fatalf("running turn should answer on alpha first: %s", got)
+	}
+	if !strings.Contains(got, switchNoticeEN) {
+		t.Fatalf("no switch notice: %s", got)
+	}
+	compacted, procs := agent.snapshot()
+	if strings.Join(compacted, ",") != "alpha" {
+		t.Fatalf("compacted on %v, want the previous model", compacted)
+	}
+	if len(procs) != 2 || !procs[0].closed.Get() {
+		t.Fatalf("procs=%d, want the alpha process recycled", len(procs))
+	}
+	if p := procs[1].prompts(); len(p) != 1 || !strings.Contains(p[0], "queued question") {
+		t.Fatalf("beta prompts = %q", p)
+	}
+}
