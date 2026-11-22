@@ -480,7 +480,16 @@ const (
 	EventRetry             EventType = "retry"              // a model request failed and the agent is retrying it (see RetryStatus)
 	EventTask              EventType = "task"               // lifecycle of a task running beside the turn (see TaskEvent)
 	EventCompacting        EventType = "compacting"         // the agent started compacting the conversation on its own
+	EventNotice            EventType = "notice"             // a line the live card shows for the rest of the turn (see Notice)
 )
+
+// Notice is a line the agent asks the engine to show on the turn's live card,
+// e.g. that the conversation moved to another agent CLI. The engine renders
+// it in the user's language; platforms without a card line get a message.
+type Notice struct {
+	Key  MsgKey
+	Args []any
+}
 
 // ModelSwitch describes a model change the agent CLI made without being asked
 // to, e.g. Claude Code re-running a request that the primary model's
@@ -540,6 +549,7 @@ type Event struct {
 	ModelSwitch              *ModelSwitch   // populated for EventModelSwitch
 	Retry                    *RetryStatus   // populated for EventRetry
 	Task                     *TaskEvent     // populated for EventTask
+	Notice                   *Notice        // populated for EventNotice
 }
 
 // HistoryEntry is one turn in a conversation.

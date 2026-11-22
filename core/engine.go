@@ -5590,6 +5590,13 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 		case EventModelSwitch:
 			e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
 
+		case EventNotice:
+			// The card line (turnWatch) carries it; without one, a person
+			// gets it as a message, as with showSwitchNotice.
+			if event.Notice != nil && !automated && !sp.showsNotice() {
+				e.send(p, replyCtx, e.i18n.Tf(event.Notice.Key, event.Notice.Args...))
+			}
+
 		case EventHookRejected:
 			// Claude Code emits this between a Stop-hook-rejected draft and its
 			// rewritten answer. Discard only per-segment assistant text state so

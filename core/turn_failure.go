@@ -131,6 +131,12 @@ func retryNotice(i *I18n, r *RetryStatus) string {
 	return i.T(MsgPreviewRetryingBare)
 }
 
+// showsNotice reports whether the live card has a notice line.
+func (sp *streamPreview) showsNotice() bool {
+	_, ok := sp.segmented.(PreviewNoticeSetter)
+	return ok
+}
+
 // setNotice shows text in place of the running step; "" restores the step.
 func (sp *streamPreview) setNotice(text string) {
 	setter, ok := sp.segmented.(PreviewNoticeSetter)
@@ -166,6 +172,7 @@ type turnWatch struct {
 	retry         string    // the retry notice while the agent retries a failed model request
 	thinkingShown bool      // thinking text shows on the card, so it counts as progress
 	compacting    bool      // the agent is compacting the conversation; that is what the turn waits on
+	notice        string    // an agent notice (EventNotice) kept for the rest of the turn
 }
 
 func newTurnWatch(enabled, thinkingShown bool) *turnWatch {
@@ -234,6 +241,10 @@ func (w *turnWatch) observe(i *I18n, ev Event) string {
 		w.waitingTool = false
 		w.compacting = true
 		w.progress(now)
+	case EventNotice:
+		if ev.Notice != nil {
+			w.notice = i.Tf(ev.Notice.Key, ev.Notice.Args...)
+		}
 	case EventToolUse, EventPermissionRequest, EventUserInputRequest:
 		w.waitingTool = true
 		w.progress(now)
@@ -268,11 +279,11 @@ func (w *turnWatch) line(i *I18n, now time.Time) string {
 		return i.T(MsgPreviewCompacting)
 	}
 	if w.waitingTool {
-		return ""
+		return w.notice
 	}
 	n := waitedUnits(w.since, now)
 	if n < 1 {
-		return ""
+		return w.notice
 	}
 	return i.T(MsgStillWorking) + " · " + waitPhrase(i, n)
 }

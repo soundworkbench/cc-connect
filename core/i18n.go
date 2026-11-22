@@ -223,6 +223,9 @@ const (
 	MsgModelSlowWaited           MsgKey = "model_slow_waited"
 	MsgPreviewCompacting         MsgKey = "preview_compacting"
 	MsgSwitchCompacting          MsgKey = "switch_compacting"
+	MsgShellSwitchedCarried      MsgKey = "shell_switched_carried"
+	MsgShellSwitched             MsgKey = "shell_switched"
+	MsgShellSwitchFailed         MsgKey = "shell_switch_failed"
 	MsgPreviewInterrupted        MsgKey = "preview_interrupted"
 	MsgPreviewMoved              MsgKey = "preview_moved"
 	MsgTurnFailed                MsgKey = "turn_failed"
@@ -845,6 +848,9 @@ var messages = map[MsgKey]map[Language]string{
 	MsgModelSlowWaited:       {LangEnglish: "the model is responding slowly, waited %d min", LangChinese: "模型响应较慢，已等待 %d 分钟", LangTraditionalChinese: "模型回應較慢，已等待 %d 分鐘", LangJapanese: "モデルの応答が遅れています、待ち時間 %d 分", LangSpanish: "el modelo responde con lentitud, esperando %d min"},
 	MsgPreviewCompacting:     {LangEnglish: "Long conversation, tidying it up", LangChinese: "对话较长，正在整理", LangTraditionalChinese: "對話較長，正在整理", LangJapanese: "会話が長いため整理しています", LangSpanish: "La conversación es larga, se está resumiendo"},
 	MsgSwitchCompacting:      {LangEnglish: "Long conversation, tidying it up before switching models", LangChinese: "对话较长，正在整理后切换", LangTraditionalChinese: "對話較長，正在整理後切換", LangJapanese: "会話が長いため、整理してからモデルを切り替えます", LangSpanish: "La conversación es larga, se resume antes de cambiar de modelo"},
+	MsgShellSwitchedCarried:  {LangEnglish: "Switched to %s, with the recent conversation", LangChinese: "换到 %s，已带上最近对话", LangTraditionalChinese: "換到 %s，已帶上最近對話", LangJapanese: "%s に切り替え、直近の会話を引き継ぎました", LangSpanish: "Cambiado a %s, con la conversación reciente"},
+	MsgShellSwitched:         {LangEnglish: "Switched to %s", LangChinese: "已换到 %s", LangTraditionalChinese: "已換到 %s", LangJapanese: "%s に切り替えました", LangSpanish: "Cambiado a %s"},
+	MsgShellSwitchFailed:     {LangEnglish: "%s did not start; back on %s (%s)", LangChinese: "%s 没能启动，已回到 %s（%s）", LangTraditionalChinese: "%s 沒能啟動，已回到 %s（%s）", LangJapanese: "%s を起動できませんでした。%s（%s）に戻りました", LangSpanish: "%s no arrancó; de vuelta en %s (%s)"},
 	MsgPreviewInterrupted:    {LangEnglish: "Interrupted", LangChinese: "已中断", LangTraditionalChinese: "已中斷", LangJapanese: "中断されました", LangSpanish: "Interrumpido"},
 	MsgTurnFailed:            {LangEnglish: "This didn't go through", LangChinese: "这次没做成", LangTraditionalChinese: "這次沒做成", LangJapanese: "今回は完了できませんでした", LangSpanish: "Esta vez no se pudo completar"},
 	MsgTurnFailedModel:       {LangEnglish: "This didn't go through: the model service is unreachable for now", LangChinese: "这次没做成：模型服务暂时连不上", LangTraditionalChinese: "這次沒做成：模型服務暫時連不上", LangJapanese: "今回は完了できませんでした：モデルサービスに一時的に接続できません", LangSpanish: "Esta vez no se pudo completar: el servicio del modelo no responde por ahora"},
