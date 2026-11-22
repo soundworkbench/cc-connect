@@ -40,11 +40,12 @@ var sharedKeys = []string{"work_dir", "run_as_user", "run_as_env", "cc_data_dir"
 
 // Agent routes sessions to the shell of the current model.
 type Agent struct {
-	shells   map[string]core.Agent
-	names    map[string]string
-	patterns []string
-	store    *store
-	state    map[string]any // cc_data_dir, cc_project: where the store lives
+	shells     map[string]core.Agent
+	names      map[string]string
+	patterns   []string
+	store      *store
+	state      map[string]any // cc_data_dir, cc_project: where the store lives
+	handoffMax int            // size limit of a handoff, in characters
 
 	mu        sync.Mutex
 	providers []core.ProviderConfig
@@ -58,6 +59,7 @@ type Agent struct {
 //
 //	model          initial model (optional)
 //	claude_models  globs of model ids that run in Claude Code (optional)
+//	handoff_max_chars  size limit of the handoff, in characters (default 20000)
 //	[claudecode]   options of the Claude Code agent, as for type "claudecode"
 //	[acp]          options of the ACP agent, as for type "acp"
 //
@@ -93,6 +95,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	model, _ := opts["model"].(string)
 	r := newRouter(cc, acp, stringList(opts["claude_models"]), strings.TrimSpace(model), openStore(dir))
 	r.state = map[string]any{"cc_data_dir": dataDir, "cc_project": project}
+	r.handoffMax = intOpt(opts["handoff_max_chars"], defaultHandoffChars)
 	return r, nil
 }
 
@@ -104,13 +107,14 @@ func newRouter(cc, acp core.Agent, patterns []string, model string, st *store) *
 		patterns[i] = strings.ToLower(strings.TrimSpace(p))
 	}
 	r := &Agent{
-		shells:    map[string]core.Agent{shellClaude: cc, shellACP: acp},
-		names:     map[string]string{shellClaude: "Claude Code", shellACP: displayName(acp, "ACP")},
-		patterns:  patterns,
-		store:     st,
-		activeIdx: -1,
-		lastModel: map[string]string{},
-		applied:   map[string]string{},
+		shells:     map[string]core.Agent{shellClaude: cc, shellACP: acp},
+		names:      map[string]string{shellClaude: "Claude Code", shellACP: displayName(acp, "ACP")},
+		patterns:   patterns,
+		store:      st,
+		activeIdx:  -1,
+		handoffMax: defaultHandoffChars,
+		lastModel:  map[string]string{},
+		applied:    map[string]string{},
 	}
 	if model == "" {
 		if ms, ok := cc.(core.ModelSwitcher); ok {
@@ -162,6 +166,23 @@ func safeName(s string) string {
 		return "default"
 	}
 	return s
+}
+
+// intOpt reads a positive integer option (TOML gives int64, JSON float64).
+func intOpt(v any, def int) int {
+	var n int
+	switch x := v.(type) {
+	case int:
+		n = x
+	case int64:
+		n = int(x)
+	case float64:
+		n = int(x)
+	}
+	if n <= 0 {
+		return def
+	}
+	return n
 }
 
 func stringList(v any) []string {
@@ -299,7 +320,7 @@ func (r *Agent) handoffFor(ctx context.Context, th *thread, from, to string, res
 		// before this router): read its own history.
 		entries = append(r.historyOf(ctx, from, snap.IDs[from], snap.Left[to], resumed), entries...)
 	}
-	text := buildHandoff(r.names[from], entries, resumed, handoffBudget(r.windowOf(to)))
+	text := buildHandoff(r.names[from], entries, resumed, handoffBudget(r.windowOf(to), r.handoffMax))
 	key := core.MsgShellSwitched
 	if text != "" {
 		key = core.MsgShellSwitchedCarried
@@ -658,6 +679,7 @@ func (r *Agent) WorkspaceAgentOptions() map[string]any {
 	if m := r.GetModel(); m != "" {
 		opts["model"] = m
 	}
+	opts["handoff_max_chars"] = r.handoffMax
 	return opts
 }
 

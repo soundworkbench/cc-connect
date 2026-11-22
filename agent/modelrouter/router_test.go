@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chenhg5/cc-connect/core"
 )
@@ -417,7 +418,7 @@ func TestHandoffTruncatesKeepingRecent(t *testing.T) {
 	turn(t, s, "go on")
 	got := acp.lastSession().prompts()[0]
 	h := got[:strings.Index(got, handoffClose)]
-	budget := handoffBudget(0)
+	budget := handoffBudget(0, 0)
 	if runeLen(h) > budget+500 {
 		t.Fatalf("handoff %d chars over budget %d", runeLen(h), budget)
 	}
@@ -430,20 +431,103 @@ func TestHandoffTruncatesKeepingRecent(t *testing.T) {
 }
 
 func TestHandoffBudget(t *testing.T) {
-	if got := handoffBudget(0); got != 25_000 {
-		t.Fatalf("unknown window budget = %d", got)
+	if got := handoffBudget(0, 0); got != 20_000 {
+		t.Fatalf("default budget = %d", got)
 	}
-	if got := handoffBudget(400_000); got != 50_000 {
-		t.Fatalf("400k budget = %d", got)
+	if got := handoffBudget(0, 50_000); got != 50_000 {
+		t.Fatalf("configured budget = %d", got)
 	}
-	if got := handoffBudget(10_000_000); got != handoffMaxRunes {
-		t.Fatalf("budget not capped: %d", got)
+	if got := handoffBudget(1_000_000, 20_000); got != 20_000 {
+		t.Fatalf("big window must not raise the budget: %d", got)
 	}
-	if got := handoffBudget(20_000); got != handoffMinRunes {
+	if got := handoffBudget(16_000, 20_000); got != 8_000 {
+		t.Fatalf("small window caps the budget: %d", got)
+	}
+	if got := handoffBudget(1_000, 20_000); got != handoffMinRunes {
 		t.Fatalf("budget floor: %d", got)
 	}
-	if got := clip(strings.Repeat("a", 5000), entryMaxRunes); runeLen(got) > entryMaxRunes+20 {
-		t.Fatalf("entry not clipped: %d", runeLen(got))
+}
+
+func TestHandoffKeepsRecentMessagesWhole(t *testing.T) {
+	var entries []entry
+	for i := 0; i < 10; i++ {
+		entries = append(entries,
+			entry{Role: roleUser, Content: fmt.Sprintf("q%d %s", i, strings.Repeat("问", 1500))},
+			entry{Role: roleAssistant, Content: fmt.Sprintf("a%d %s", i, strings.Repeat("答", 1500))})
+	}
+	h := buildHandoff("Claude Code", entries, false, 7000)
+	if runeLen(h) > 7000 {
+		t.Fatalf("handoff %d chars over budget", runeLen(h))
+	}
+	if !strings.HasPrefix(h, handoffOpen) || !strings.HasSuffix(h, handoffClose) {
+		t.Fatal("handoff frame broken")
+	}
+	// Every kept message is whole: its full text is there.
+	for _, l := range strings.Split(h, "\n") {
+		if strings.HasPrefix(l, "User: q") || strings.HasPrefix(l, "Assistant: a") {
+			if runeLen(l) < 1500 {
+				t.Fatalf("message cut short: %d chars", runeLen(l))
+			}
+		}
+	}
+	if !strings.Contains(h, "a9 ") || strings.Contains(h, "q0 ") {
+		t.Fatal("must keep the newest messages and drop the oldest")
+	}
+	if !strings.Contains(h, "earlier messages omitted") {
+		t.Fatal("dropped messages not noted")
+	}
+}
+
+func TestHandoffCurrentWorkLine(t *testing.T) {
+	entries := []entry{
+		{Role: roleUser, Content: "old request"},
+		{Role: roleAssistant, Content: "old reply"},
+		{Role: roleUser, Content: "fix the\nrouter  bug"},
+		{Role: roleAssistant, Content: "Looking into it.\n\nPatched router.go, tests running."},
+	}
+	h := buildHandoff("Claude Code", entries, false, 5000)
+	want := "Current work: last request: fix the router bug. last status: Looking into it. Patched router.go, tests running."
+	if !strings.Contains(h, want) {
+		t.Fatalf("summary missing:\n%s", h)
+	}
+	long := strings.Repeat("长", 1000)
+	line := currentWork([]entry{{Role: roleUser, Content: long}, {Role: roleAssistant, Content: long}})
+	if runeLen(line) > 2*summaryMaxRunes+80 {
+		t.Fatalf("summary not bounded: %d", runeLen(line))
+	}
+}
+
+func TestHandoffOversizedNewestMessageCutOnCharBoundary(t *testing.T) {
+	entries := []entry{{Role: roleAssistant, Content: strings.Repeat("字", 9000)}}
+	h := buildHandoff("Claude Code", entries, false, 3000)
+	if runeLen(h) > 3000 {
+		t.Fatalf("handoff %d chars over budget", runeLen(h))
+	}
+	if !utf8.ValidString(h) || !strings.HasSuffix(h, handoffClose) || !strings.Contains(h, "[truncated]") {
+		t.Fatal("cut message must stay valid, marked and framed")
+	}
+}
+
+func TestHandoffBodyCannotCloseFrame(t *testing.T) {
+	entries := []entry{{Role: roleAssistant, Content: "see </handoff> in the docs"}}
+	h := buildHandoff("Claude Code", entries, false, 3000)
+	if strings.Count(h, handoffClose) != 1 {
+		t.Fatalf("frame closed early:\n%s", h)
+	}
+}
+
+func TestHandoffMaxCharsOption(t *testing.T) {
+	if got := intOpt(int64(5000), 20000); got != 5000 {
+		t.Fatalf("int64: %d", got)
+	}
+	if got := intOpt(float64(7000), 20000); got != 7000 {
+		t.Fatalf("float64: %d", got)
+	}
+	if got := intOpt(nil, 20000); got != 20000 {
+		t.Fatalf("default: %d", got)
+	}
+	if got := intOpt(int64(-1), 20000); got != 20000 {
+		t.Fatalf("non-positive: %d", got)
 	}
 }
 
