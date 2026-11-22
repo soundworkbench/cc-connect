@@ -285,6 +285,9 @@ const (
 	MsgMessageSteerWriteFailed   MsgKey = "message_steer_write_failed"
 	MsgSteerWriteInterrupted     MsgKey = "message_steer_write_interrupted"
 	MsgSteerJoinsRunningWork     MsgKey = "message_steer_joins_running_work"
+	MsgAutoCardBackground        MsgKey = "auto_card_background"
+	MsgAutoCardForwarded         MsgKey = "auto_card_forwarded"
+	MsgAutoCardScheduled         MsgKey = "auto_card_scheduled"
 	MsgMessageSteered            MsgKey = "message_steered"
 	MsgMessageSteerUnconfirmed   MsgKey = "message_steer_unconfirmed"
 	MsgQueueBatchMarker          MsgKey = "queue_batch_marker"
@@ -1007,6 +1010,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "正在處理其他事，完成後一起回覆你。",
 		LangJapanese:           "別の作業を処理中です。終わったらまとめて返信します。",
 		LangSpanish:            "Estoy con otra tarea; te respondo junto con ella cuando termine.",
+	},
+	MsgAutoCardBackground: {
+		LangEnglish:            "Handling background task results",
+		LangChinese:            "处理后台任务结果",
+		LangTraditionalChinese: "處理背景任務結果",
+		LangJapanese:           "バックグラウンドタスクの結果を処理中",
+		LangSpanish:            "Procesando los resultados de tareas en segundo plano",
+	},
+	MsgAutoCardForwarded: {
+		LangEnglish:            "Handling something another assistant passed on",
+		LangChinese:            "处理其他助理转来的事",
+		LangTraditionalChinese: "處理其他助理轉來的事",
+		LangJapanese:           "他のアシスタントから回ってきた件を処理中",
+		LangSpanish:            "Atendiendo un asunto que pasó otro asistente",
+	},
+	MsgAutoCardScheduled: {
+		LangEnglish:            "Running a scheduled task",
+		LangChinese:            "执行定时任务",
+		LangTraditionalChinese: "執行定時任務",
+		LangJapanese:           "スケジュールされたタスクを実行中",
+		LangSpanish:            "Ejecutando una tarea programada",
 	},
 	MsgMessageSteerWriteFailed: {
 		LangEnglish:            "The extra message could not enter the current task; queued for the next turn.",

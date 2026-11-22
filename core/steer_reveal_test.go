@@ -17,6 +17,46 @@ type revealPlatform struct {
 	cardCtxs []any
 	cardIDs  []int
 	msgs     []revealMsg
+	rows     map[int][]string // progress rows per card id
+	folded   []int            // cards collapsed to their steps
+}
+
+func (p *revealPlatform) AddPreviewProgress(_ context.Context, id any, text string) error {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	if p.rows == nil {
+		p.rows = make(map[int][]string)
+	}
+	p.rows[id.(int)] = append(p.rows[id.(int)], text)
+	return nil
+}
+
+func (p *revealPlatform) CollapsePreview(_ context.Context, id any) error {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	p.folded = append(p.folded, id.(int))
+	return nil
+}
+
+// firstRow returns the first progress row of the n-th card.
+func (p *revealPlatform) firstRow(n int) string {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	if n >= len(p.cardIDs) || len(p.rows[p.cardIDs[n]]) == 0 {
+		return ""
+	}
+	return p.rows[p.cardIDs[n]][0]
+}
+
+func (p *revealPlatform) collapsed(n int) bool {
+	p.rmu.Lock()
+	defer p.rmu.Unlock()
+	for _, id := range p.folded {
+		if n < len(p.cardIDs) && id == p.cardIDs[n] {
+			return true
+		}
+	}
+	return false
 }
 
 type revealMsg struct {

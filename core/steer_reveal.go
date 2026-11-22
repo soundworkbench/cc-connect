@@ -46,7 +46,7 @@ func (sp *streamPreview) isHidden() bool {
 func (sp *streamPreview) unhide(replyCtx any) {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
-	sp.hidden = false
+	sp.hidden, sp.autoCard = false, false
 	sp.replyCtx = replyCtx
 }
 
@@ -59,12 +59,14 @@ func (sp *streamPreview) hasCardOrPendingAck() bool {
 // showSteeredMessageLocked answers a person's message that was steered into the
 // running turn. state.mu must be held.
 //   - The turn already shows a card: the card follows the person (unchanged).
-//   - The turn is automated and hidden: its event loop opens the turn card.
-//   - A background turn holds the session: one line says the reply will come.
+//   - The turn is automated: its event loop opens the turn card, or hands over
+//     the card the turn opened on its own.
+//   - A background turn holds the session: its card, or one line, says the
+//     reply will come.
 func (e *Engine) showSteeredMessageLocked(state *interactiveState, p Platform, msg *Message) {
 	sp := state.activePreview
 	switch {
-	case sp != nil && !sp.isHidden():
+	case sp != nil && sp.personCard():
 		sp.followUser(msg.SessionKey, msg.ReplyCtx)
 	case !isHumanTurn(msg):
 		// Automation joining a hidden turn stays hidden.
@@ -73,9 +75,18 @@ func (e *Engine) showSteeredMessageLocked(state *interactiveState, p Platform, m
 		case state.revealChLocked() <- steerReveal{platform: p, replyCtx: msg.ReplyCtx, content: msg.Content}:
 		default:
 		}
+		if sp.isAutoCard() {
+			sp.followUser(msg.SessionKey, msg.ReplyCtx) // the turn's own card becomes theirs
+		}
 	case state.backgroundTurnLease:
-		// The background turn's reply goes to the person's message.
+		// The background turn's reply goes to the person's message: on its card
+		// when it has one, otherwise after one line saying so.
 		state.platform, state.replyCtx = p, msg.ReplyCtx
+		if bg := state.backgroundCard; bg != nil {
+			bg.unhide(msg.ReplyCtx)
+			bg.followUser(msg.SessionKey, msg.ReplyCtx)
+			return
+		}
 		replyCtx := msg.ReplyCtx
 		go e.reply(p, replyCtx, e.i18n.T(MsgSteerJoinsRunningWork))
 	}
