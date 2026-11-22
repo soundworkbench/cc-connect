@@ -284,6 +284,7 @@ const (
 	MsgQueueFull                 MsgKey = "queue_full"
 	MsgMessageSteerWriteFailed   MsgKey = "message_steer_write_failed"
 	MsgSteerWriteInterrupted     MsgKey = "message_steer_write_interrupted"
+	MsgSteerJoinsRunningWork     MsgKey = "message_steer_joins_running_work"
 	MsgMessageSteered            MsgKey = "message_steered"
 	MsgMessageSteerUnconfirmed   MsgKey = "message_steer_unconfirmed"
 	MsgQueueBatchMarker          MsgKey = "queue_batch_marker"
@@ -999,6 +1000,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "補充訊息寫入中斷，未自動重發。",
 		LangJapanese:           "追加メッセージの書き込みが中断されました。自動再送はしていません。",
 		LangSpanish:            "La escritura del mensaje adicional se interrumpió; no se reenvió automáticamente.",
+	},
+	MsgSteerJoinsRunningWork: {
+		LangEnglish:            "Working on something else right now; I'll reply to this together when it's done.",
+		LangChinese:            "正在处理其他事，完成后一起回复你。",
+		LangTraditionalChinese: "正在處理其他事，完成後一起回覆你。",
+		LangJapanese:           "別の作業を処理中です。終わったらまとめて返信します。",
+		LangSpanish:            "Estoy con otra tarea; te respondo junto con ella cuando termine.",
 	},
 	MsgMessageSteerWriteFailed: {
 		LangEnglish:            "The extra message could not enter the current task; queued for the next turn.",

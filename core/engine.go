@@ -613,6 +613,7 @@ type interactiveState struct {
 	agent                    Agent
 	mu                       sync.Mutex
 	stopCh                   chan struct{}
+	reveal                   chan steerReveal
 	stopped                  bool
 	backgroundTurnLease      bool
 	backgroundTurnLeaseGen   uint64 // busy-lock generation owned by the background turn lease
@@ -5111,6 +5112,8 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 	defer e.noteTurnEnd(sessionKey)
 	e.taskCards.turnBegan(sessionKey)
 	defer e.taskCards.turnEnded(e, sessionKey)
+	revealCh := state.revealSignal()
+	dropStaleReveal(revealCh)
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -5329,6 +5332,16 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 	}
 	watch := newTurnWatch(!automated && sp.segmented != nil, e.display.ThinkingMessages && !e.display.appendProgress())
 	defer watch.stop()
+	// A person who writes into a hidden automated turn gets its card: from then
+	// on the turn runs as theirs and the final reply lands on that card.
+	applyReveal := func(r steerReveal) {
+		if !automated {
+			return
+		}
+		automated, muteScheduledNotices = false, false
+		replyCtx = r.replyCtx
+		e.revealHiddenTurn(state, session, sessionKey, sp, watch, r, streamCard != nil)
+	}
 	stopCh := state.stopSignal()
 	for {
 		var event Event
@@ -5340,6 +5353,9 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			return
 		case <-watch.C():
 			sp.setNotice(watch.tick(e.i18n))
+			continue
+		case r := <-revealCh:
+			applyReveal(r)
 			continue
 		case event, ok = <-events:
 			if !ok {
@@ -6164,6 +6180,11 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				)
 				continue
 			}
+			select {
+			case r := <-revealCh:
+				applyReveal(r) // steered just before the result: the reply still goes on its card
+			default:
+			}
 			cp.Finalize(ProgressCardStateCompleted)
 			// Use turnAgentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id
@@ -6755,6 +6776,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
+				dropStaleReveal(revealCh)
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, e.maskStreaming(queuedRenderer))
 				sp.hidden = automated
 				watch.restart()
