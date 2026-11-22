@@ -2108,6 +2108,60 @@ app_secret = "your-feishu-app-secret"
 # token = "your-telegram-bot-token"
 
 # =============================================================================
+# Project: model router (Claude Code + an ACP agent) / 按模型换外壳
+# =============================================================================
+# One conversation, two agent CLIs ("shells"), picked by the current model:
+# Claude models run in Claude Code, every other model in the ACP agent
+# (e.g. Antigravity via `agy acp`). /model and the model API switch shells.
+# Each shell keeps its own session; when the conversation moves, the first
+# message in the other shell starts with what happened since (user messages,
+# final replies, one line per tool call), as part of the user message.
+# A shell that does not start leaves the conversation where it was.
+# 同一对话两个外壳，按当前模型选：Claude 模型用 Claude Code，其余模型用 ACP
+# agent（如 Antigravity）。/model 和模型 API 跨家族时换外壳；两边各留会话，
+# 切过去时在第一条用户消息前带上另一边的对话。新外壳起不来就留在原外壳。
+#
+# [[projects]]
+# name = "assistant"
+#
+# [projects.agent]
+# type = "model_router"
+#
+# [projects.agent.options]
+# work_dir = "/path/to/project"          # both shells
+# # model = "claude-opus-5-5"            # initial model; else the provider's or Claude Code's
+# # claude_models = ["claude*", "opus*", "sonnet*", "haiku*", "fable*"]  # default
+#
+# [projects.agent.options.claudecode]    # options of type = "claudecode"
+# mode = "default"
+# # cmd = "claude"
+#
+# [projects.agent.options.acp]           # options of type = "acp"
+# cmd = "/path/to/agy"
+# args = ["acp"]
+# display_name = "Antigravity"
+# # env = { HTTPS_PROXY = "socks5://127.0.0.1:1080" }
+#
+# # The model list for /model; models of the ACP agent are added after its
+# # first session. Aliases work for both shells.
+# # /model 的模型列表；ACP agent 的模型在它第一次启动后自动补上。
+# [[projects.agent.providers]]
+# name = "models"
+# model = "claude-opus-5-5"
+# [[projects.agent.providers.models]]
+# model = "claude-opus-5-5"
+# alias = "opus"
+# [[projects.agent.providers.models]]
+# model = "gemini-4-neon"
+# alias = "neon"
+#
+# [[projects.platforms]]
+# type = "feishu"
+# [projects.platforms.options]
+# app_id = "your-app-id"
+# app_secret = "your-app-secret"
+
+# =============================================================================
 # Project: ACP (Agent Client Protocol) agent / 使用 ACP 子进程
 # =============================================================================
 # Runs any binary that speaks ACP over stdio (newline-delimited JSON-RPC 2.0).

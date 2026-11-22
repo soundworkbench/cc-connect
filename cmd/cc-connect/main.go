@@ -2010,8 +2010,9 @@ func buildAgentOptions(dataDir string, proj config.ProjectConfig) map[string]any
 	opts["cc_data_dir"] = dataDir
 	opts["cc_project"] = proj.Name
 	// Feishu streaming cards show the block being written: default it on for
-	// Claude Code projects that have a Feishu/Lark platform; false still turns it off.
-	if _, set := opts["stream_partial_text"]; !set && proj.Agent.Type == "claudecode" {
+	// Claude Code projects (model_router hands it to its Claude Code shell)
+	// that have a Feishu/Lark platform; false still turns it off.
+	if _, set := opts["stream_partial_text"]; !set && (proj.Agent.Type == "claudecode" || proj.Agent.Type == "model_router") {
 		for _, pc := range proj.Platforms {
 			if pc.Type == "feishu" || pc.Type == "lark" {
 				opts["stream_partial_text"] = true
