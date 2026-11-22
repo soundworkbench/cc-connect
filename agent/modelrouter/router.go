@@ -61,7 +61,9 @@ type Agent struct {
 //	claude_models  globs of model ids that run in Claude Code (optional)
 //	handoff_max_chars  size limit of the handoff, in characters (default 20000)
 //	[claudecode]   options of the Claude Code agent, as for type "claudecode"
+//	               (reasoning_effort seeds --effort)
 //	[acp]          options of the ACP agent, as for type "acp"
+//	               (reasoning_effort seeds thought_level when the agent has one)
 //
 // work_dir, run_as_user and run_as_env apply to both shells.
 func New(opts map[string]any) (core.Agent, error) {
@@ -572,31 +574,40 @@ func (r *Agent) SwitchCompactLine(model string) int {
 
 // ── reasoning effort, mode, compaction: the current shell's ──
 
+// Reasoning effort belongs to the shell the conversation runs in: Claude
+// Code takes it as --effort at the next process start, the ACP agent through
+// its thought_level option (set live), and only when the agent publishes one.
+// Each shell keeps its own value across model switches.
+
+func (r *Agent) effortShell() (core.ReasoningEffortSwitcher, bool) {
+	s, ok := r.current().(core.ReasoningEffortSwitcher)
+	return s, ok
+}
+
 func (r *Agent) SetReasoningEffort(effort string) {
-	if s, ok := r.claude().(core.ReasoningEffortSwitcher); ok {
+	if s, ok := r.effortShell(); ok {
 		s.SetReasoningEffort(effort)
 	}
 }
 
 func (r *Agent) GetReasoningEffort() string {
-	if r.currentShell() != shellClaude {
-		return ""
-	}
-	if s, ok := r.claude().(core.ReasoningEffortSwitcher); ok {
+	if s, ok := r.effortShell(); ok {
 		return s.GetReasoningEffort()
 	}
 	return ""
 }
 
 func (r *Agent) AvailableReasoningEfforts() []string {
-	if r.currentShell() != shellClaude {
-		return nil
-	}
-	if s, ok := r.claude().(core.ReasoningEffortSwitcher); ok {
+	if s, ok := r.effortShell(); ok {
 		return s.AvailableReasoningEfforts()
 	}
 	return nil
 }
+
+// KeepsSessionOnReasoningChange tells the engine the conversation survives a
+// reasoning change: Claude Code resumes it with the new --effort, the ACP
+// agent reloads it with the new thought level.
+func (r *Agent) KeepsSessionOnReasoningChange() bool { return true }
 
 func (r *Agent) SetMode(mode string) {
 	if s, ok := r.current().(core.ModeSwitcher); ok {

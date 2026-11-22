@@ -10726,13 +10726,28 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 
 	switcher.SetReasoningEffort(target)
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	e.resetAfterReasoningChange(agent, sessions, msg.SessionKey)
 
-	s := sessions.GetOrCreateActive(msg.SessionKey)
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
+}
+
+// reasoningSessionKeeper is implemented by agents that carry the conversation
+// across a reasoning-effort change (the next process resumes it with the new
+// effort), so the engine need not start a fresh one.
+type reasoningSessionKeeper interface {
+	KeepsSessionOnReasoningChange() bool
+}
+
+// resetAfterReasoningChange starts a fresh conversation after a reasoning
+// change, unless the agent keeps the current one.
+func (e *Engine) resetAfterReasoningChange(agent Agent, sessions *SessionManager, sessionKey string) {
+	if k, ok := agent.(reasoningSessionKeeper); ok && k.KeepsSessionOnReasoningChange() {
+		return
+	}
+	s := sessions.GetOrCreateActive(sessionKey)
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
 	sessions.Save()
-
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
 }
 
 func (e *Engine) reasoningUsage(efforts []string) string {
@@ -13172,10 +13187,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			if effort == target {
 				switcher.SetReasoningEffort(target)
 				e.cleanupInteractiveState(interactiveKey)
-				s := sessions.GetOrCreateActive(sessionKey)
-				s.SetAgentSessionID("", "")
-				s.ClearHistory()
-				sessions.Save()
+				e.resetAfterReasoningChange(agent, sessions, sessionKey)
 				return
 			}
 		}

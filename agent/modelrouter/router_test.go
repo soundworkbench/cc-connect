@@ -730,7 +730,7 @@ func TestProvidersKeepClaudeModelsForClaudeCode(t *testing.T) {
 		t.Fatal("only same-shell switches compact")
 	}
 	if r.AvailableReasoningEfforts() != nil {
-		t.Fatal("no reasoning efforts while the ACP agent runs")
+		t.Fatal("no reasoning efforts while the ACP agent does not publish any")
 	}
 }
 
@@ -761,4 +761,60 @@ func TestStripHandoff(t *testing.T) {
 	if buildHandoff("X", nil, false, 1000) != "" {
 		t.Fatal("empty handoff expected")
 	}
+}
+
+// effortShell records the reasoning effort it was given.
+type effortShell struct {
+	levels []string
+	effort string
+}
+
+func (e *effortShell) SetReasoningEffort(v string)         { e.effort = v }
+func (e *effortShell) GetReasoningEffort() string          { return e.effort }
+func (e *effortShell) AvailableReasoningEfforts() []string { return e.levels }
+
+func TestReasoningEffortFollowsCurrentShell(t *testing.T) {
+	ccBase := &fakeClaude{&fakeShell{name: shellClaude, window: 400_000, history: map[string][]core.HistoryEntry{}}}
+	acpBase := &fakeACP{&fakeShell{name: shellACP}}
+	cc := &effortClaudeShell{fakeClaude: ccBase, effortShell: &effortShell{levels: []string{"low", "high", "max"}}}
+	acp := &effortACPShell{fakeACP: acpBase, effortShell: &effortShell{levels: []string{"low", "high"}}}
+	r := newRouter(cc, acp, nil, "claude-opus-5-5", newStore(""))
+
+	if got := r.AvailableReasoningEfforts(); len(got) != 3 {
+		t.Fatalf("claude levels = %v", got)
+	}
+	r.SetReasoningEffort("low")
+	if cc.effort != "low" || acp.effort != "" {
+		t.Fatalf("claude=%q acp=%q", cc.effort, acp.effort)
+	}
+
+	r.SetModel("gemini-4-neon")
+	if got := r.AvailableReasoningEfforts(); len(got) != 2 {
+		t.Fatalf("acp levels = %v", got)
+	}
+	r.SetReasoningEffort("high")
+	if acp.effort != "high" || cc.effort != "low" {
+		t.Fatalf("each shell keeps its own value: claude=%q acp=%q", cc.effort, acp.effort)
+	}
+	if r.GetReasoningEffort() != "high" {
+		t.Fatalf("get = %q", r.GetReasoningEffort())
+	}
+
+	r.SetModel("claude-opus-5-5")
+	if r.GetReasoningEffort() != "low" {
+		t.Fatalf("claude value lost: %q", r.GetReasoningEffort())
+	}
+	if !r.KeepsSessionOnReasoningChange() {
+		t.Fatal("router must keep the conversation on a reasoning change")
+	}
+}
+
+type effortClaudeShell struct {
+	*fakeClaude
+	*effortShell
+}
+
+type effortACPShell struct {
+	*fakeACP
+	*effortShell
 }
