@@ -145,6 +145,7 @@ func mapToolCall(sessionID string, update json.RawMessage) []core.Event {
 		ToolName:  toolName,
 		ToolInput: toolInput,
 		SessionID: sessionID,
+		Metadata:  acpToolProgressMeta(u.Kind, u.Title, u.RawInput),
 	}}
 }
 

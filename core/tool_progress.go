@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 func (d DisplayCfg) toolProgressLimit() int {
@@ -64,6 +66,42 @@ func publicToolProgress(event Event) string {
 		}
 	}
 	return NewI18n(LangChinese).T(key)
+}
+
+// ProgressBasename is the card label for a file path: its base name, if
+// SafeProgressLabel accepts it.
+func ProgressBasename(value string) string {
+	return SafeProgressLabel(path.Base(strings.ReplaceAll(value, `\`, "/")))
+}
+
+// SafeProgressLabel vets an optional card label. It rejects suspicious names
+// rather than echoing arbitrary input, shell syntax, credentials or opaque
+// token-like strings into cards.
+func SafeProgressLabel(value string) string {
+	if value == "" || value == "." || value == ".." || utf8.RuneCountInString(value) > 64 {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	for _, sensitive := range []string{".env", "secret", "token", "password", "credential", "api_key", "apikey", "sk-", "ghp_", "bearer", "id_rsa", "id_ed25519"} {
+		if strings.Contains(lower, sensitive) {
+			return ""
+		}
+	}
+	run := 0
+	for _, r := range value {
+		if !(unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("._-", r)) {
+			return ""
+		}
+		if r < 128 && (unicode.IsLetter(r) || unicode.IsDigit(r)) {
+			run++
+		} else {
+			run = 0
+		}
+		if run >= 24 {
+			return ""
+		}
+	}
+	return value
 }
 
 // stepToolLabel is the row text for a tool call in the step-list card: the
