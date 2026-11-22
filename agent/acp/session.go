@@ -1052,27 +1052,18 @@ func summarizeACPToolInput(kind string, raw json.RawMessage) string {
 	if len(m) == 0 {
 		return ""
 	}
+	// Key names vary by agent (command, CommandLine, file_path, Path).
+	cmd := inputString(m, "command", "commandLine")
+	if desc := inputString(m, "description", "toolSummary"); cmd != "" && desc != "" {
+		cmd = "# " + desc + "\n" + cmd
+	}
 	switch strings.ToLower(kind) {
-	case "bash", "shell", "terminal", "execute":
-		if cmd, ok := m["command"].(string); ok {
-			if desc, ok := m["description"].(string); ok && desc != "" {
-				return "# " + desc + "\n" + cmd
-			}
-			return cmd
-		}
 	case "read", "write", "edit":
-		if fp, ok := m["file_path"].(string); ok {
-			return fp
-		}
-		if fp, ok := m["path"].(string); ok {
+		if fp := inputString(m, "file_path", "path"); fp != "" {
 			return fp
 		}
 	}
-	// Fallback: try extracting command with description before formatting JSON.
-	if cmd, ok := m["command"].(string); ok {
-		if desc, ok := m["description"].(string); ok && desc != "" {
-			return "# " + desc + "\n" + cmd
-		}
+	if cmd != "" {
 		return cmd
 	}
 	b, _ := json.MarshalIndent(m, "", "  ")
