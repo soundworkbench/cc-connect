@@ -189,6 +189,13 @@ func (w *turnWatch) stop() {
 	}
 }
 
+// enable starts the waiting line for a turn that became visible mid-turn.
+func (w *turnWatch) enable() {
+	if w.timer == nil {
+		w.timer = time.NewTimer(waitUnit)
+	}
+}
+
 // restart begins the wait of a new turn on a new card in the same loop.
 func (w *turnWatch) restart() {
 	w.waitingTool, w.retry, w.compacting = false, "", false

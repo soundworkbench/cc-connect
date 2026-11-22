@@ -155,6 +155,7 @@ type streamPreview struct {
 	// its state for the final reply but never creates a platform message, so
 	// a turn that ends silent sends nothing and recalls nothing.
 	hidden    bool
+	autoCard  bool // a card an automated or background turn opened on its own (auto_card.go)
 	segmented SegmentedPreviewer
 	notice    string // status line shown in place of the running step (see setNotice)
 

@@ -613,6 +613,8 @@ type interactiveState struct {
 	agent                    Agent
 	mu                       sync.Mutex
 	stopCh                   chan struct{}
+	reveal                   chan steerReveal
+	backgroundCard           *streamPreview
 	stopped                  bool
 	backgroundTurnLease      bool
 	backgroundTurnLeaseGen   uint64 // busy-lock generation owned by the background turn lease
@@ -3520,7 +3522,12 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	e.i18n.DetectAndSet(msg.Content)
 	var admittedPreview *streamPreview
-	if e.streamPreview.Segmented && isHumanTurn(msg) && !msg.scheduledMute {
+	if bg := e.adoptBackgroundCardFor(msg, interactiveKey); bg != nil {
+		// A background turn's card carries the person's turn from here on.
+		admittedPreview = bg
+		e.startQuickLine(bg, msg.Content, session.GetHistory(quickLineHistoryTurns))
+		defer bg.discard()
+	} else if e.streamPreview.Segmented && isHumanTurn(msg) && !msg.scheduledMute {
 		preview := newStreamPreview(e.streamPreview, p, msg.ReplyCtx, e.ctx, e.maskStreaming(func(text string) string {
 			return e.renderOutgoingContentForWorkspace(p, text, workspaceDir)
 		}))
@@ -4674,6 +4681,11 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 
 	var textParts []string
 	var toolsUsed []string
+	// A background turn that runs past autoCardDelay and has called a tool
+	// opens a card (auto_card.go); one still open when the reader stops
+	// collapses to its steps.
+	bg := &backgroundCard{e: e, state: state, sessionKey: sessionKey, workspaceDir: workspaceDir}
+	defer bg.collapse()
 
 	// flushPartial relays text already accumulated for an unsolicited turn
 	// that will not reach its EventResult through this reader (a new
@@ -4724,6 +4736,12 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 			// channel state is clean because it just took ownership.
 			flushPartial("cancelled")
 			return
+
+		case <-bg.delayC():
+			bg.delayPassed()
+
+		case <-bg.watchC():
+			bg.tick()
 
 		case event, ok := <-events:
 			if !ok {
@@ -4785,7 +4803,9 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				}
 				slog.Info("unsolicited events detected, relaying to platform",
 					"session", sessionKey)
+				bg.begin()
 			}
+			bg.observe(event)
 
 			state.mu.Lock()
 			p := state.platform
@@ -4827,13 +4847,24 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				// Background completions follow the same NO_REPLY contract as
 				// foreground turns; history below still keeps the original text.
 				outbound, silent := resolveSilentReply(e.cleanAgentReply(fullResponse))
+				card := bg.take()
 				if silent {
 					slog.Info("silent reply suppressed", "session", sessionKey, "unsolicited", true)
 				} else if outbound != "" {
 					outbound = e.chineseOutbound(sessionKey, outbound, false)
-					for _, chunk := range SplitMessageCodeFenceAware(outbound, maxPlatformMessageLen) {
-						e.send(p, replyCtx, chunk)
+					if card != nil {
+						card.deliverFinal(outbound, "", func(p Platform, rc any, text string) error {
+							return e.sendWithErrorForWorkspace(p, rc, text, workspaceDir)
+						}, e.i18n.T(MsgFinalDeliveryFailed))
+						card = nil
+					} else {
+						for _, chunk := range SplitMessageCodeFenceAware(outbound, maxPlatformMessageLen) {
+							e.send(p, replyCtx, chunk)
+						}
 					}
+				}
+				if card != nil {
+					card.collapseQuiet()
 				}
 				e.taskCards.replied(e, sessionKey, replyCtx, time.Time{}, false, !silent && outbound != "", true)
 
@@ -5006,6 +5037,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				// A turn can fail while the persistent session and its background
 				// tasks keep running. Deliver buffered text before the error and
 				// keep consuming the live stream instead of abandoning its events.
+				bg.collapse()
 				if partial := strings.Join(textParts, ""); strings.TrimSpace(partial) != "" {
 					for _, chunk := range SplitMessageCodeFenceAware(partial, maxPlatformMessageLen) {
 						e.send(p, replyCtx, chunk)
@@ -5111,6 +5143,8 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 	defer e.noteTurnEnd(sessionKey)
 	e.taskCards.turnBegan(sessionKey)
 	defer e.taskCards.turnEnded(e, sessionKey)
+	revealCh := state.revealSignal()
+	dropStaleReveal(revealCh)
 	if msgID != "" {
 		state.mu.Lock()
 		state.currentMessageID = msgID
@@ -5329,6 +5363,57 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 	}
 	watch := newTurnWatch(!automated && sp.segmented != nil, e.display.ThinkingMessages && !e.display.appendProgress())
 	defer watch.stop()
+	// A person who writes into a hidden automated turn gets its card: from then
+	// on the turn runs as theirs and the final reply lands on that card.
+	applyReveal := func(r steerReveal) {
+		if !automated {
+			return
+		}
+		automated, muteScheduledNotices = false, false
+		replyCtx = r.replyCtx
+		e.revealHiddenTurn(state, session, sessionKey, sp, watch, r, streamCard != nil)
+	}
+	// An automated turn that runs past autoCardDelay and has called a tool
+	// opens its card, its first row saying why it runs (auto_card.go).
+	var autoCardTimer *time.Timer
+	var autoCardC <-chan time.Time
+	autoCardDue := false
+	var autoCause MsgKey
+	armAutoCard := func() {
+		if autoCardTimer != nil {
+			autoCardTimer.Stop()
+		}
+		autoCardTimer, autoCardC, autoCardDue, autoCause = nil, nil, false, ""
+		state.mu.Lock()
+		input := state.turnInput
+		state.mu.Unlock()
+		if automated && sp.segmented != nil {
+			autoCause = autoCardCause(input, muteScheduledNotices)
+		}
+		if autoCause != "" {
+			autoCardTimer = time.NewTimer(autoCardDelay)
+			autoCardC = autoCardTimer.C
+		}
+	}
+	openAutoCard := func() {
+		autoCardC, autoCardDue = nil, false
+		if !automated || autoCause == "" {
+			return
+		}
+		state.mu.Lock()
+		p := state.platform
+		state.mu.Unlock()
+		if e.openAutoCard(sp, p, replyCtx, autoCause) {
+			watch.enable()
+			slog.Info("automated turn opened its card", "session", sessionKey)
+		}
+	}
+	armAutoCard()
+	defer func() {
+		if autoCardTimer != nil {
+			autoCardTimer.Stop()
+		}
+	}()
 	stopCh := state.stopSignal()
 	for {
 		var event Event
@@ -5340,6 +5425,17 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			return
 		case <-watch.C():
 			sp.setNotice(watch.tick(e.i18n))
+			continue
+		case r := <-revealCh:
+			applyReveal(r)
+			continue
+		case <-autoCardC:
+			autoCardC = nil
+			if toolCount > 0 {
+				openAutoCard()
+			} else {
+				autoCardDue = true
+			}
 			continue
 		case event, ok = <-events:
 			if !ok {
@@ -5457,6 +5553,10 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			if elapsed := time.Since(waitStart); elapsed >= slowAgentFirstEvent {
 				slog.Warn("slow agent first event", "elapsed", elapsed, "session", sessionKey, "event_type", event.Type)
 			}
+		}
+
+		if event.Type == EventToolUse && autoCardDue {
+			openAutoCard()
 		}
 
 		state.mu.Lock()
@@ -6164,6 +6264,11 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				)
 				continue
 			}
+			select {
+			case r := <-revealCh:
+				applyReveal(r) // steered just before the result: the reply still goes on its card
+			default:
+			}
 			cp.Finalize(ProgressCardStateCompleted)
 			// Use turnAgentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id
@@ -6456,8 +6561,13 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			} else if isSilent {
 				// Silent reply: drop any in-flight preview and skip all send paths.
 				// sp.discard() clears previewMsgID so sp.needsDoneReaction() also returns false,
-				// preventing a stray done_emoji push.
-				sp.discard()
+				// preventing a stray done_emoji push. A card an automated turn
+				// opened on its own collapses to its steps instead of being recalled.
+				if sp.isAutoCard() {
+					sp.collapseQuiet()
+				} else {
+					sp.discard()
+				}
 				// Rich mode: cardMessageID is tracked independently of sp.previewMsgID,
 				// so sp.discard() doesn't reach it. Without explicit handling the rich
 				// card would stay frozen in "Working" / "Thinking" header state forever
@@ -6755,6 +6865,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				queuedRenderer := func(content string) string {
 					return e.renderOutgoingContentForWorkspace(queued.platform, content, workspaceDir)
 				}
+				dropStaleReveal(revealCh)
 				sp = newStreamPreview(e.streamPreview, queued.platform, queued.replyCtx, e.ctx, e.maskStreaming(queuedRenderer))
 				sp.hidden = automated
 				watch.restart()
@@ -6791,6 +6902,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 					e.acknowledgeTurnStart(queued.platform, queued.replyCtx, sp, streamCard != nil)
 					e.startQuickLine(sp, queued.content, session.GetHistory(quickLineHistoryTurns))
 				}
+				armAutoCard()
 
 				session.AddHistory("user", queued.content)
 				// Persist queued user message immediately (mirror of the
