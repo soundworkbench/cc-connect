@@ -31,7 +31,8 @@ func TestBackgroundTurnOpensCardAfterDelayWithTools(t *testing.T) {
 	finishFirstTurn(t, p, s, receive)
 
 	s.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "ls"}
-	waitUntil(t, "background card", func() bool { return len(p.cards()) == 2 })
+	// The card opens before its first row is written.
+	waitUntil(t, "background card", func() bool { return len(p.cards()) == 2 && p.firstRow(1) != "" })
 	if got := p.firstRow(1); got != "处理后台任务结果" {
 		t.Fatalf("first row %q", got)
 	}
@@ -68,7 +69,7 @@ func TestWebhookTurnOpensCardAfterDelayWithTools(t *testing.T) {
 	receive(&Message{UserID: "webhook", UserName: "webhook", Content: "butler:websearch-down", ReplyCtx: "ctx-hook"})
 	waitPrompt(t, s)
 	s.events <- Event{Type: EventToolUse, ToolName: "Bash", ToolInput: "curl"}
-	waitUntil(t, "webhook card", func() bool { return len(p.cards()) == 1 })
+	waitUntil(t, "webhook card", func() bool { return len(p.cards()) == 1 && p.firstRow(0) != "" })
 	if got := p.cards(); got[0] != "ctx-hook" {
 		t.Fatalf("card under %v", got[0])
 	}

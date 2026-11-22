@@ -41,7 +41,9 @@ func cc17Fixture(t *testing.T) (*APIServer, *Engine, *scheduledTestSession, *htt
 		return (&net.Dialer{}).DialContext(ctx, "unix", api.SocketPath())
 	}}
 	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
-	t.Cleanup(func() { e.cancel(); api.Stop(); transport.CloseIdleConnections() })
+	// Stop waits for the engine's goroutines, which may still be saving
+	// sessions.json into the test's TempDir.
+	t.Cleanup(func() { e.cancel(); api.Stop(); transport.CloseIdleConnections(); _ = e.Stop() })
 	return api, e, as, client, key
 }
 func cc17Post(t *testing.T, c *http.Client, path string, req assistantRequest) (int, map[string]any) {

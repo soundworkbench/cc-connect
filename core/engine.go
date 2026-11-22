@@ -7233,6 +7233,11 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			return false
 		}
 
+		// The turn that queued this message may already have started the
+		// unsolicited reader for the idle period. Take the Events channel
+		// back before sending, or the reader can consume this turn's result
+		// and leave it waiting with the session locked.
+		e.stopUnsolicitedReader(state)
 		drainEvents(as.Events())
 
 		session.AddHistory("user", queued.content)
@@ -7256,6 +7261,17 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		e.processTurnEvents(!isHumanQueuedTurn(queued), state, session, sessions, sessionKey, queued.messageID, time.Now(), stopTyping, sendDone, queued.replyCtx, lockGen, queued.scheduledMute)
 		if restoreMode != nil {
 			restoreMode()
+		}
+
+		// Hand the Events channel back to the unsolicited reader while the
+		// session is still locked, as after any foreground turn: the next
+		// turn must lock the session and stop the reader before it sends.
+		state.mu.Lock()
+		alive := state.agentSession == as && as.Alive() && !state.stopped && !state.eventsNeedResync
+		workspaceDir := state.workspaceDir
+		state.mu.Unlock()
+		if alive {
+			e.startUnsolicitedReader(state, session, sessions, sessionKey, workspaceDir)
 		}
 	}
 }
