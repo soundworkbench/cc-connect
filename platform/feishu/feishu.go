@@ -2921,7 +2921,7 @@ func (p *Platform) resolveBotSenderName(appID string) string {
 // fetchSingleMessage retrieves one message by ID from the Feishu API and
 // returns its extracted content as a chainMessage. Returns nil on any failure.
 func (p *Platform) fetchSingleMessage(ctx context.Context, messageID string) *chainMessage {
-	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=raw_card_content", messageID)
+	apiPath := fmt.Sprintf("/open-apis/im/v1/messages/%s?card_msg_content_type=user_card_content", messageID)
 	apiResp, err := p.client.Get(ctx, apiPath, nil, larkcore.AccessTokenTypeTenant)
 	if err != nil {
 		slog.Debug(p.tag()+": fetch single message failed", "message_id", messageID, "error", err)

@@ -136,3 +136,64 @@ func TestParseMergeForward_CardTextAndResources(t *testing.T) {
 		}
 	}
 }
+
+// Replying to a bot card: the quote must carry the card's own text, which
+// Feishu only returns with card_msg_content_type=user_card_content.
+func TestFetchSingleMessage_QuotedCardText(t *testing.T) {
+	const msgID = "om_quoted_card"
+	card, err := json.Marshal(map[string]any{
+		"schema": "2.0",
+		"header": map[string]any{"title": map[string]any{"tag": "plain_text", "content": "周报"}},
+		"body": map[string]any{"elements": []any{
+			map[string]any{"tag": "markdown", "content": "本周上线了模型切换"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	downgraded := `{"title":null,"elements":[[{"tag":"img","image_key":"img_upgrade_placeholder"},{"tag":"text","text":"请升级至最新版本客户端，以查看内容"},{"tag":"text","text":""}]]}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "tenant_access_token"):
+			writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "tenant-token"})
+		case r.URL.Path == "/open-apis/im/v1/messages/"+msgID:
+			content := downgraded
+			if r.URL.Query().Get("card_msg_content_type") == "user_card_content" {
+				content = string(card)
+			}
+			writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"items": []map[string]any{{
+				"message_id":  msgID,
+				"msg_type":    "interactive",
+				"create_time": "1795310040000",
+				"sender":      map[string]any{"id": "cli_peer", "id_type": "app_id", "sender_type": "app"},
+				"body":        map[string]any{"content": content},
+			}}}})
+		default:
+			t.Errorf("unexpected API %s", r.URL.String())
+			writeJSON(t, w, map[string]any{"code": 1})
+		}
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu",
+		domain:       srv.URL,
+		peerBots:     map[string]string{"cli_peer": "伙伴助理"},
+		client:       lark.NewClient("mock-app", "mock-secret", lark.WithOpenBaseUrl(srv.URL)),
+	}
+
+	msg := p.fetchSingleMessage(context.Background(), msgID)
+	if msg == nil {
+		t.Fatal("fetchSingleMessage returned nil")
+	}
+	for _, want := range []string{"周报", "本周上线了模型切换"} {
+		if !strings.Contains(msg.text, want) {
+			t.Errorf("text missing %q: %q", want, msg.text)
+		}
+	}
+	if strings.Contains(msg.text, "请升级") {
+		t.Errorf("text is the downgraded placeholder: %q", msg.text)
+	}
+}
