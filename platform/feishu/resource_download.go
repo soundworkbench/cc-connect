@@ -102,6 +102,13 @@ func (p *Platform) downloadResourceChunked(ctx context.Context, messageID, fileK
 // resourceDownloadStream executes the actual download. Split out so the
 // helper's preflight (validation, token, defaults) stays readable.
 func (p *Platform) resourceDownloadStream(ctx context.Context, token, messageID, fileKey, resType string) ([]byte, error) {
+	// The resource API does not support Range for type=image: it answers the
+	// bytes=0-0 probe with 400 or a 206 lacking Content-Range. Images are
+	// downloaded whole.
+	if resType == "image" {
+		return p.resourceSingleGet(ctx, token, messageID, fileKey, resType)
+	}
+
 	probeCtx, cancel := context.WithTimeout(ctx, resourceRangeProbeTimeout)
 	defer cancel()
 

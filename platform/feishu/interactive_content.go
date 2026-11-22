@@ -116,16 +116,14 @@ func parseInteractiveCard(content string) (string, []string) {
 	return strings.Join(parts, "\n"), keys
 }
 
-// The root remains the outermost forward, including through nested forwards.
-// Identical IDs (direct cards) and duplicate image keys are attempted once.
-func interactiveCardContent(content, messageID, rootID, sender string, download func(string, string) ([]byte, string, error)) (string, []core.ImageAttachment) {
+// messageID is the message that owns the card's resources: the card itself
+// when received directly, or the outermost forward for a forwarded card.
+// Duplicate image keys are attempted once.
+func interactiveCardContent(content, messageID, sender string, download func(string, string) ([]byte, string, error)) (string, []core.ImageAttachment) {
 	text, keys := parseInteractiveCard(content)
 	var images []core.ImageAttachment
 	for _, key := range keys {
 		data, mime, err := download(messageID, key)
-		if err != nil && rootID != "" && rootID != messageID {
-			data, mime, err = download(rootID, key)
-		}
 		if err == nil {
 			images = append(images, core.ImageAttachment{MimeType: mime, Data: data})
 		} else {

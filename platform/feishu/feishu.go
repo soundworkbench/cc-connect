@@ -2446,7 +2446,7 @@ func (p *Platform) dispatchMessageWithHistory(ctx context.Context, msgType, cont
 		if senderName == "" {
 			senderName = userID
 		}
-		text, images := interactiveCardContent(content, messageID, messageID, senderName, p.downloadImage)
+		text, images := interactiveCardContent(content, messageID, senderName, p.downloadImage)
 		text = stripMentions(text, mentions, p.getBotOpenID())
 		p.flushImageBatchForSession(sessionKey)
 		p.dispatchCoreMessage(&core.Message{
@@ -3447,10 +3447,15 @@ func extractCardListItems(itemsRaw json.RawMessage, parts *[]string) {
 // parseMergeForward fetches sub-messages of a merge_forward message via the
 // GET /open-apis/im/v1/messages/{message_id} API, then formats them into
 // readable text. Returns combined text, images, and files from the sub-messages.
+//
+// Cards are requested as the original card JSON (user_card_content). The
+// default format downgrades most cards to a placeholder image plus
+// "请升级至最新版本客户端，以查看内容", which drops all of the card's text.
 func (p *Platform) parseMergeForward(rootMessageID string) (string, []core.ImageAttachment, []core.FileAttachment) {
 	resp, err := p.client.Im.Message.Get(context.Background(),
 		larkim.NewGetMessageReqBuilder().
 			MessageId(rootMessageID).
+			CardMsgContentType("user_card_content").
 			Build())
 	if err != nil {
 		slog.Error(p.tag()+": fetch merge_forward sub-messages failed", "error", err)
@@ -3523,6 +3528,11 @@ func replaceMentions(text string, mentions []*larkim.Mention) string {
 }
 
 // formatMergeForwardTree recursively formats the sub-message tree.
+//
+// Resources (images, files, post and card images) inside a forward are
+// downloaded with rootMessageID, the forward message the bot received.
+// Feishu rejects a sub-message ID on the resource API (234003 "File not in
+// msg."), while the same file_key resolves under the outer forward.
 func (p *Platform) formatMergeForwardTree(parentID, rootMessageID string, childrenMap map[string][]*larkim.Message, nameMap map[string]string, sb *strings.Builder, images *[]core.ImageAttachment, files *[]core.FileAttachment, depth int) {
 	if depth > 10 {
 		sb.WriteString(strings.Repeat("    ", depth) + "[nested forwarding truncated]\n")
@@ -3576,7 +3586,7 @@ func (p *Platform) formatMergeForwardTree(parentID, rootMessageID string, childr
 			}
 
 		case "post":
-			textParts, postImages := p.parsePostContent(msgID, content)
+			textParts, postImages := p.parsePostContent(rootMessageID, content)
 			*images = append(*images, postImages...)
 			text := replaceMentions(strings.Join(textParts, "\n"), item.Mentions)
 			if text != "" {
@@ -3587,7 +3597,7 @@ func (p *Platform) formatMergeForwardTree(parentID, rootMessageID string, childr
 			}
 
 		case "interactive":
-			text, cardImages := interactiveCardContent(content, msgID, rootMessageID, senderName, p.downloadImage)
+			text, cardImages := interactiveCardContent(content, rootMessageID, senderName, p.downloadImage)
 			*images = append(*images, cardImages...)
 			sb.WriteString(fmt.Sprintf("%s[%s] %s:\n", indent, ts, senderName))
 			for _, line := range strings.Split(replaceMentions(text, item.Mentions), "\n") {
@@ -3599,7 +3609,7 @@ func (p *Platform) formatMergeForwardTree(parentID, rootMessageID string, childr
 				ImageKey string `json:"image_key"`
 			}
 			if err := json.Unmarshal([]byte(content), &imgBody); err == nil && imgBody.ImageKey != "" {
-				imgData, mimeType, err := p.downloadImage(msgID, imgBody.ImageKey)
+				imgData, mimeType, err := p.downloadImage(rootMessageID, imgBody.ImageKey)
 				if err != nil {
 					slog.Error(p.tag()+": download merge_forward image failed", "error", err)
 					sb.WriteString(fmt.Sprintf("%s[%s] %s: [image - download failed]\n", indent, ts, senderName))
@@ -3615,7 +3625,7 @@ func (p *Platform) formatMergeForwardTree(parentID, rootMessageID string, childr
 				FileName string `json:"file_name"`
 			}
 			if err := json.Unmarshal([]byte(content), &fileBody); err == nil && fileBody.FileKey != "" {
-				fileData, err := p.downloadResource(msgID, fileBody.FileKey, "file")
+				fileData, err := p.downloadResource(rootMessageID, fileBody.FileKey, "file")
 				if err != nil {
 					slog.Error(p.tag()+": download merge_forward file failed", "error", err)
 					sb.WriteString(fmt.Sprintf("%s[%s] %s: [file: %s - download failed]\n", indent, ts, senderName, fileBody.FileName))
@@ -3870,11 +3880,9 @@ func buildFeishuFileMessageContent(msgType, fileKey string) (string, error) {
 }
 
 func (p *Platform) downloadImage(messageID, imageKey string) ([]byte, string, error) {
-	// Issue #1741: large image bodies suffer the same code=234037 truncation
-	// as files when fetched through the larkim SDK (which cannot set Range
-	// headers). Route image downloads through the same chunked helper used
-	// for files so a 20-MiB screenshot lands whole instead of being capped
-	// at the SDK's ~2 MiB streaming ceiling.
+	// Images share the raw resource helper with files (issue #1741) but are
+	// fetched with a single GET: the resource API does not support Range for
+	// type=image.
 	data, err := p.downloadResourceChunked(context.Background(), messageID, imageKey, "image")
 	if err != nil {
 		return nil, "", fmt.Errorf("%s: image download: %w", p.tag(), err)
