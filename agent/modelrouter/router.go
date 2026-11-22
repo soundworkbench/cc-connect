@@ -440,16 +440,17 @@ func (r *Agent) sync() {
 	}
 }
 
-// AvailableModels lists the configured models, else Claude Code's, followed
-// by the ACP agent's models that run there.
+// AvailableModels lists the configured models. Without a configured list it
+// falls back to Claude Code's models followed by the ACP agent's that run there.
 func (r *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	r.mu.Lock()
 	models := append([]core.ModelOption(nil), core.GetProviderModels(r.providers, r.activeIdx)...)
 	r.mu.Unlock()
-	if len(models) == 0 {
-		if ms, ok := r.claude().(core.ModelSwitcher); ok {
-			models = append(models, ms.AvailableModels(ctx)...)
-		}
+	if len(models) > 0 {
+		return models
+	}
+	if ms, ok := r.claude().(core.ModelSwitcher); ok {
+		models = append(models, ms.AvailableModels(ctx)...)
 	}
 	if ms, ok := r.shells[shellACP].(core.ModelSwitcher); ok {
 		models = r.appendACPModels(models, ms.AvailableModels(ctx))
@@ -463,6 +464,9 @@ func (r *Agent) ConfiguredModels() []core.ModelOption {
 	r.mu.Lock()
 	models := append([]core.ModelOption(nil), core.GetProviderModels(r.providers, r.activeIdx)...)
 	r.mu.Unlock()
+	if len(models) > 0 {
+		return models
+	}
 	if ms, ok := r.shells[shellACP].(core.ModelSwitcher); ok {
 		// The ACP agent only reports what its last handshake listed.
 		models = r.appendACPModels(models, ms.AvailableModels(context.Background()))

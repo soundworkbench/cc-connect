@@ -67,7 +67,7 @@ func (f *fakeShell) activeIdxLocked() int {
 }
 func (f *fakeShell) AvailableModels(context.Context) []core.ModelOption {
 	if f.name == shellACP {
-		return []core.ModelOption{{Name: "gemini-4-neon", Alias: "Neon"}, {Name: "claude-opus-5-5"}}
+		return []core.ModelOption{{Name: "gemini-4-neon", Alias: "Neon"}, {Name: "gemini-3.8-flash"}, {Name: "claude-opus-5-5"}}
 	}
 	return []core.ModelOption{{Name: "opus"}}
 }
@@ -615,7 +615,7 @@ func TestTranscriptTrim(t *testing.T) {
 
 func TestProvidersKeepClaudeModelsForClaudeCode(t *testing.T) {
 	r, cc, acp := newTestRouter(t, "")
-	r.SetProviders([]core.ProviderConfig{{Name: "main", Model: "claude-opus-5-5", Models: []core.ModelOption{{Name: "claude-opus-5-5", Alias: "opus"}}}})
+	r.SetProviders([]core.ProviderConfig{{Name: "main", Model: "claude-opus-5-5", Models: []core.ModelOption{{Name: "claude-opus-5-5", Alias: "opus"}, {Name: "gemini-4-neon", Alias: "neon"}}}})
 	r.SetActiveProvider("main")
 	if cc.GetModel() != "claude-opus-5-5" {
 		t.Fatalf("claude model = %q", cc.GetModel())
@@ -633,9 +633,14 @@ func TestProvidersKeepClaudeModelsForClaudeCode(t *testing.T) {
 		t.Fatalf("Claude Code must not get a Gemini model, got %q", cc.GetModel())
 	}
 
+	// The configured list is the whole menu: models the ACP agent reports
+	// beyond it (gemini-3.8-flash) are not added.
 	models := r.AvailableModels(context.Background())
 	if len(models) != 2 || models[0].Name != "claude-opus-5-5" || models[1].Name != "gemini-4-neon" {
 		t.Fatalf("models = %+v", models)
+	}
+	if cm := r.ConfiguredModels(); len(cm) != 2 {
+		t.Fatalf("configured models = %+v", cm)
 	}
 	if r.SwitchCompactLine("gemini-4-neon") != 0 || r.SwitchCompactLine("claude-opus-5-5") == 0 {
 		t.Fatal("only same-shell switches compact")
