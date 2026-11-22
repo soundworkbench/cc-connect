@@ -54,36 +54,28 @@ func TestInteractiveCard_DisplayFieldsAndPlaceholder(t *testing.T) {
 	}
 }
 
-func TestInteractiveCard_SampleDownloadFallback(t *testing.T) {
+func TestInteractiveCard_SampleDownload(t *testing.T) {
 	items := sampleCard(t)
 	content := *items[1].Body.Content
-	root, sub := *items[0].MessageId, *items[1].MessageId
+	root := *items[0].MessageId
 	_, keys := parseInteractiveCard(content)
-	for _, mode := range []string{"fail", "sub", "root", "direct"} {
-		t.Run(mode, func(t *testing.T) {
+	for _, ok := range []bool{false, true} {
+		t.Run(map[bool]string{false: "fail", true: "ok"}[ok], func(t *testing.T) {
 			var calls []string
-			rootID := root
-			if mode == "direct" {
-				rootID = sub
-			}
-			text, images := interactiveCardContent(content, sub, rootID, "Alice", func(id, key string) ([]byte, string, error) {
+			text, images := interactiveCardContent(content, root, "Alice", func(id, key string) ([]byte, string, error) {
 				if key != keys[0] {
 					t.Fatalf("key=%s", key)
 				}
 				calls = append(calls, id)
-				if mode == "sub" || (mode == "root" && id == root) {
+				if ok {
 					return []byte("image-bytes"), "image/png", nil
 				}
 				return nil, "", errors.New("234003 File not in msg. secret-token")
 			})
-			wantCalls := []string{sub}
-			if mode == "fail" || mode == "root" {
-				wantCalls = append(wantCalls, root)
-			}
-			if !reflect.DeepEqual(calls, wantCalls) {
+			if !reflect.DeepEqual(calls, []string{root}) {
 				t.Fatalf("calls=%v", calls)
 			}
-			if mode == "fail" || mode == "direct" {
+			if !ok {
 				want := "[卡片图片无法下载：飞书限制跨应用卡片图片｜发送方 Alice ｜image_key=" + keys[0] + "]"
 				if text != want || len(images) != 0 {
 					t.Fatalf("text=%q images=%v", text, images)
@@ -114,11 +106,10 @@ func TestInteractiveCard_IncomingDirectAndNestedForward(t *testing.T) {
 					if r.URL.Query().Get("type") != "image" {
 						t.Errorf("type=%s", r.URL.RawQuery)
 					}
-					// Upstream's chunked downloader probes with a Range request
-					// before a plain GET; count one call per download attempt.
-					if success || r.Header.Get("Range") == "" {
-						calls = append(calls, r.URL.Path)
+					if r.Header.Get("Range") != "" {
+						t.Errorf("image download sent Range %q", r.Header.Get("Range"))
 					}
+					calls = append(calls, r.URL.Path)
 					if success {
 						w.Header().Set("Content-Type", "image/png")
 						_, _ = w.Write([]byte("image-bytes"))
@@ -159,14 +150,13 @@ func TestInteractiveCard_IncomingDirectAndNestedForward(t *testing.T) {
 			p.formatMergeForwardTree(root, root, map[string][]*larkim.Message{root: {nested}, mid: {items[1]}}, map[string]string{*items[1].Sender.Id: "Alice"}, &sb, &images, &files, 0)
 			mu.Lock()
 			defer mu.Unlock()
-			want := 1
-			if !success {
-				want = 2
-				if (len(calls) != 2 || !strings.Contains(calls[1], "/"+root+"/resources/")) || !strings.Contains(sb.String(), "发送方 Alice") {
-					t.Fatalf("calls=%v text=%s", calls, sb.String())
-				}
+			if len(calls) != 1 || !strings.Contains(calls[0], "/"+root+"/resources/") {
+				t.Fatalf("forwarded card image must be fetched once under the root forward: calls=%v", calls)
 			}
-			if len(calls) != want || strings.Contains(sb.String(), "[interactive message]") || strings.Contains(sb.String(), "请升级") {
+			if !success && !strings.Contains(sb.String(), "发送方 Alice") {
+				t.Fatalf("text=%s", sb.String())
+			}
+			if strings.Contains(sb.String(), "[interactive message]") || strings.Contains(sb.String(), "请升级") {
 				t.Fatalf("calls=%v text=%s", calls, sb.String())
 			}
 			if success && len(images) != 1 {
