@@ -54,6 +54,7 @@ type acpSession struct {
 	usageMu        sync.RWMutex
 	lastUsage      core.ContextUsage
 	haveUsage      bool
+	turnUsed       int // latest usage_update "used" seen during the current prompt
 	availableModes []acpModeInfo
 	currentMode    string
 
@@ -576,6 +577,7 @@ func (s *acpSession) maybeAbsorbUsageUpdate(params json.RawMessage) {
 	s.usageMu.Lock()
 	s.lastUsage.UsedTokens = u.Used
 	s.lastUsage.ContextWindow = u.Size
+	s.turnUsed = u.Used
 	s.haveUsage = true
 	s.usageMu.Unlock()
 }
@@ -868,6 +870,9 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 	if sid == "" {
 		return fmt.Errorf("acp: no agent session id")
 	}
+	s.usageMu.Lock()
+	s.turnUsed = 0
+	s.usageMu.Unlock()
 
 	promptBlocks := []any{
 		map[string]any{"type": "text", "text": prompt},
@@ -887,26 +892,28 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 	}
 	slog.Debug("acp: session/prompt response", "session_id", sid, "response_len", len(res), "response", string(res))
 
-	// Absorb per-turn usage (esp. cachedReadTokens) into the context snapshot.
-	var pr struct {
-		Usage struct {
-			InputTokens      int `json:"inputTokens"`
-			OutputTokens     int `json:"outputTokens"`
-			TotalTokens      int `json:"totalTokens"`
-			CachedReadTokens int `json:"cachedReadTokens"`
-		} `json:"usage"`
-	}
-	if json.Unmarshal(res, &pr) == nil && (pr.Usage.InputTokens > 0 || pr.Usage.TotalTokens > 0) {
-		s.usageMu.Lock()
-		if pr.Usage.CachedReadTokens > 0 {
-			s.lastUsage.CachedInputTokens = pr.Usage.CachedReadTokens
+	// Absorb per-turn usage into the context snapshot and the result event.
+	tu, haveTU := parsePromptUsage(res)
+	s.usageMu.Lock()
+	if haveTU {
+		if tu.CachedRead > 0 {
+			s.lastUsage.CachedInputTokens = tu.CachedRead
 		}
-		s.lastUsage.InputTokens = pr.Usage.InputTokens
-		s.lastUsage.OutputTokens = pr.Usage.OutputTokens
-		s.lastUsage.TotalTokens = pr.Usage.TotalTokens
+		if tu.CachedWrite > 0 {
+			s.lastUsage.CacheCreationInputTokens = tu.CachedWrite
+		}
+		s.lastUsage.InputTokens = tu.Input
+		s.lastUsage.OutputTokens = tu.Output + tu.Thought
+		s.lastUsage.ReasoningOutputTokens = tu.Thought
+		s.lastUsage.TotalTokens = tu.Total
 		s.haveUsage = true
-		s.usageMu.Unlock()
+	} else if s.turnUsed > 0 {
+		// No final usage: the last usage_update is the only figure for this
+		// turn (context size, no input/output split). Count it once.
+		tu = promptUsage{Input: s.turnUsed}
 	}
+	s.turnUsed = 0
+	s.usageMu.Unlock()
 
 	// Text was streamed via session/update; engine aggregates EventText.
 	// Keep the in-flight mark until after EventResult is queued so a text
@@ -916,6 +923,11 @@ func (s *acpSession) Send(prompt string, messageID string, images []core.ImageAt
 		Type:      core.EventResult,
 		SessionID: sid,
 		Done:      true,
+
+		InputTokens:              tu.Input,
+		OutputTokens:             tu.Output + tu.Thought,
+		CacheCreationInputTokens: tu.CachedWrite,
+		CacheReadInputTokens:     tu.CachedRead,
 	})
 	s.promptInFlight.Add(-1)
 	return nil
