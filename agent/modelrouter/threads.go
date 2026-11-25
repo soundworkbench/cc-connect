@@ -130,6 +130,16 @@ func (s *store) load() {
 			_ = os.Remove(s.transcriptPath(th.ID))
 			continue
 		}
+		// omitempty drops empty maps on save, so they come back nil.
+		if th.IDs == nil {
+			th.IDs = map[string]string{}
+		}
+		if th.Seen == nil {
+			th.Seen = map[string]string{}
+		}
+		if th.Left == nil {
+			th.Left = map[string]time.Time{}
+		}
 		s.index(th)
 	}
 }
