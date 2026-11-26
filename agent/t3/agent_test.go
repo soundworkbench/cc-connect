@@ -974,3 +974,31 @@ func TestRuntimeModeAppliesToNewAndResumedThreads(t *testing.T) {
 		t.Fatalf("default runtime mode = %q", m)
 	}
 }
+
+func TestToolStepsAreDescribedWithoutCommandLines(t *testing.T) {
+	cases := []struct {
+		item  map[string]any
+		label string
+	}{
+		{map[string]any{"type": "command_execution", "status": "running", "input": "cd /srv/x && FOO=1 python3 -m http.server 8000"}, "运行命令 python3"},
+		{map[string]any{"type": "dynamic_tool", "status": "running", "toolName": "Read", "input": map[string]any{"Path": "/srv/x/notes/plan.md"}}, "读取文件 plan.md"},
+		{map[string]any{"type": "file_change", "status": "completed", "fileName": "/srv/x/报告/4-AI落地.md"}, "修改文件 4-AI落地.md"},
+		{map[string]any{"type": "file_search", "status": "completed", "pattern": `"T3 Code" plugin`}, `联网搜索 "T3 Code" plugin`},
+		{map[string]any{"type": "subagent", "status": "running", "title": "重构研究站第四章"}, "派子代理 重构研究站第四章"},
+		{map[string]any{"type": "dynamic_tool", "status": "completed", "toolName": "t3-code.t3_thread_read", "input": map[string]any{}}, "调用工具 t3_thread_read"},
+		{map[string]any{"type": "command_execution", "status": "running", "input": "curl -H 'Authorization: Bearer abc' https://x"}, "运行命令 curl"},
+	}
+	for i, c := range cases {
+		var st t3Step
+		b, _ := json.Marshal(c.item)
+		_ = json.Unmarshal(b, &st)
+		ev, ok := stepEvent(fmt.Sprint(i), st)
+		if !ok || ev.Metadata["public_tool_progress"] != c.label || ev.ToolInput != c.label {
+			t.Errorf("%d: ok=%v label=%v input=%q, want %q", i, ok, ev.Metadata["public_tool_progress"], ev.ToolInput, c.label)
+		}
+	}
+	// A bare item is held back until T3 fills it in.
+	if _, ok := stepEvent("x", t3Step{Type: "command_execution", Status: "running"}); ok {
+		t.Error("bare command step emitted")
+	}
+}

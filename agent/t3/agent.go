@@ -633,13 +633,13 @@ func (s *Session) emitItem(payload, item json.RawMessage, runID string) {
 		if delta := s.itemDelta(v.ID, v.Text); delta != "" {
 			s.emit(core.Event{Type: core.EventThinking, Content: delta})
 		}
-	case "command_execution":
-		if s.firstSight(v.ID) {
-			s.emit(core.Event{Type: core.EventToolUse, ProgressID: v.ID, ToolName: "command", ToolInput: "execution"})
+	case "command_execution", "dynamic_tool", "file_change", "file_search", "subagent":
+		var st t3Step
+		if json.Unmarshal(raw, &st) != nil {
+			return
 		}
-	case "dynamic_tool":
-		if s.firstSight(v.ID) {
-			s.emit(core.Event{Type: core.EventToolUse, ProgressID: v.ID, ToolName: v.ToolName, ToolInput: "tool call"})
+		if ev, ok := stepEvent(v.ID, st); ok && s.firstSight(v.ID) {
+			s.emit(ev)
 		}
 	case "approval_request":
 		if requestSettled(v.Status) || !s.firstRequest(v.RequestID) {
