@@ -448,6 +448,34 @@ type AgentSession interface {
 	Close() error
 }
 
+// TurnOriginSetter is an optional capability for agents that need to route a
+// message according to whether it came from a person or an automation source.
+// The engine calls it immediately before Send. Implementations should treat a
+// missing call as non-human when a safe fallback is required.
+type TurnOriginSetter interface {
+	SetTurnHuman(human bool)
+}
+
+// TurnShellPreserver is an optional capability for control messages such as
+// compaction and /ps. These operations should stay on the shell already
+// selected by the session, regardless of the preceding turn's origin.
+type TurnShellPreserver interface {
+	SetTurnShellCurrent()
+}
+
+// TurnOriginRouter is an optional capability for agents and sessions whose shell choice
+// must follow the source of each queued turn. Queue batching stops at a
+// human/automation boundary when it is enabled.
+type TurnOriginRouter interface {
+	RoutesByTurnOrigin() bool
+}
+
+// PermissionApprovalAll is an optional capability for sessions whose backend
+// does not support a persistent "allow all" permission decision.
+type PermissionApprovalAll interface {
+	SupportsPermissionApprovalAll() bool
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

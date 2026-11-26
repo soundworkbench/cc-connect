@@ -3115,6 +3115,24 @@ func TestSendPermissionPrompt_CardPlatform(t *testing.T) {
 	}
 }
 
+func TestSendPermissionPrompt_WithoutApproveAll(t *testing.T) {
+	e := newTestEngine()
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+
+	e.sendPermissionPrompt(p, "ctx", "full prompt text", "write_file", "/tmp/test.txt", false)
+	buttons := p.sentCards[0].CollectButtons()
+	if len(buttons) != 1 || len(buttons[0]) != 2 {
+		t.Fatalf("permission buttons = %+v, want allow and deny only", buttons)
+	}
+	for _, row := range buttons {
+		for _, button := range row {
+			if button.Data == "perm:allow_all" {
+				t.Fatal("approve-all button should be omitted")
+			}
+		}
+	}
+}
+
 func TestSendPermissionPrompt_InlineButtonPlatform(t *testing.T) {
 	e := newTestEngine()
 	p := &stubInlineButtonPlatform{stubPlatformEngine: stubPlatformEngine{n: "telegram"}}

@@ -43,6 +43,30 @@ func TestQueueBatch_QueuedMessagesSendOnceInOrder(t *testing.T) {
 	}
 }
 
+type originRoutingTestSession struct {
+	*queuedLifecycleSession
+	route bool
+}
+
+func (s *originRoutingTestSession) RoutesByTurnOrigin() bool { return s.route }
+
+func TestQueueBatch_RoutesOriginsAtBoundary(t *testing.T) {
+	e, p, _ := batchEngine(t)
+	messages := []queuedMessage{
+		{content: "scheduled", source: "cron", scheduledPrompt: true, platform: p},
+		{content: "human one", source: "human", userID: "user", platform: p},
+		{content: "human two", source: "human", userID: "user", platform: p},
+	}
+	s := &originRoutingTestSession{queuedLifecycleSession: queueTestSession(), route: true}
+	if got := e.queuedBatchSize(messages, s); got != 1 {
+		t.Fatalf("origin-aware batch size = %d, want 1", got)
+	}
+	s.route = false
+	if got := e.queuedBatchSize(messages, s); got != 3 {
+		t.Fatalf("ordinary batch size = %d, want 3", got)
+	}
+}
+
 type batchDelivery struct {
 	prompt, id string
 	images     []ImageAttachment
@@ -468,5 +492,28 @@ func TestQueueBatch_CompletedScheduledReplayDoesNotHoldSession(t *testing.T) {
 	}
 	if len(s.deliveries) != 0 {
 		t.Fatal("completed occurrence replayed")
+	}
+}
+
+type originRoutingTestAgent struct{ *controllableAgent }
+
+func (a *originRoutingTestAgent) RoutesByTurnOrigin() bool { return true }
+
+func TestQueueBatch_RoutesOriginsBeforeSessionExists(t *testing.T) {
+	p := &batchPlatform{stubPlatformEngine: stubPlatformEngine{n: "test"}, routes: make(chan any, 100), merged: make(chan any, 100)}
+	agent := &originRoutingTestAgent{&controllableAgent{nextSession: &batchSession{cujAgentSession: newCUJAgentSession(), deliveries: make(chan batchDelivery, 100)}}}
+	e := NewEngine("batch", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangChinese)
+	e.SetDataDir(t.TempDir())
+	t.Cleanup(func() { e.cancel(); _ = e.Stop() })
+	state := &interactiveState{queueKey: "test:user", pendingMessages: []queuedMessage{
+		{content: "resume", source: "cron", scheduledPrompt: true, platform: p},
+		{content: "human one", source: "human", userID: "user", platform: p},
+	}}
+	q, ok := e.popQueuedBatchLocked(state)
+	if !ok {
+		t.Fatal("no queued message popped")
+	}
+	if q.content != "resume" || len(state.pendingMessages) != 1 {
+		t.Fatalf("popped %q with %d left, want the automated turn alone", q.content, len(state.pendingMessages))
 	}
 }

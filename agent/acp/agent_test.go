@@ -6,6 +6,19 @@ import (
 	"github.com/chenhg5/cc-connect/core"
 )
 
+func TestClientVersionUsesBridgeVersion(t *testing.T) {
+	old := core.CurrentVersion
+	t.Cleanup(func() { core.CurrentVersion = old })
+	core.CurrentVersion = "v2.3.0"
+	if got := clientVersion(); got != "v2.3.0" {
+		t.Fatalf("client version = %q", got)
+	}
+	core.CurrentVersion = ""
+	if got := clientVersion(); got != "dev" {
+		t.Fatalf("empty bridge version = %q, want dev", got)
+	}
+}
+
 func TestNew_DisplayNameDefault(t *testing.T) {
 	a, err := New(map[string]any{"command": "true"})
 	if err != nil {

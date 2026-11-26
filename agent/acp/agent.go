@@ -33,7 +33,8 @@ type Agent struct {
 	// mode is the pending permission mode to apply to new sessions.
 	// When set, StartSession applies it via session/set_mode right after
 	// session/new. Empty means "use whatever the agent selects by default".
-	mode string
+	mode            string
+	preferAllowOnce bool
 
 	// listUnsupported caches a negative result after we probe the agent
 	// for sessionCapabilities.list once. Eliminates spawn cost on
@@ -60,6 +61,19 @@ type Agent struct {
 	// revert the user's choice.
 	modelOverride string
 
+	// thoughtMu guards the reasoning-effort state of agents that expose a
+	// `thought_level` config option (published by CodeBuddy over ACP).
+	// Kept separate from modelsMu because the two options are refreshed by
+	// the same absorbConfigOptions call but consumed independently.
+	thoughtMu           sync.RWMutex
+	thoughtLevels       []string
+	currentThoughtLevel string
+	// thoughtLevelOverride mirrors modelOverride for /reasoning: a
+	// user-initiated switch must survive session restarts, otherwise the
+	// next session/load reports the level persisted at creation time and
+	// silently reverts the choice.
+	thoughtLevelOverride string
+
 	activeSession atomic.Pointer[acpSession]
 
 	mu sync.RWMutex
@@ -73,6 +87,7 @@ type sessionCallbacks interface {
 	reportModes(block acpModesBlock)
 	reportListSupported(supported bool)
 	reportModels(current string, models []core.ModelOption)
+	reportThoughtLevels(current string, levels []string)
 	reportActiveSession(s *acpSession)
 }
 
@@ -108,17 +123,28 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	mode, _ := opts["mode"].(string)
 	mode = strings.TrimSpace(mode)
+	preferAllowOnce, _ := opts["prefer_allow_once"].(bool)
+
+	// reasoning_effort reuses the option name the Claude Code adapter uses,
+	// so a project can switch between the two without rewriting config.
+	// For ACP it seeds the `thought_level` config option when the agent
+	// advertises one.
+	effort, _ := opts["reasoning_effort"].(string)
+	effort = strings.TrimSpace(effort)
 
 	return &Agent{
-		workDir:      workDir,
-		cmd:          cmdStr,
-		cliExtraArgs: cliExtraArgs,
-		args:         args,
-		staticEnv:    staticEnv,
-		extraEnv:     extra,
-		authMethod:   authMethod,
-		displayName:  displayName,
-		mode:         mode,
+		workDir:         workDir,
+		cmd:             cmdStr,
+		cliExtraArgs:    cliExtraArgs,
+		args:            args,
+		staticEnv:       staticEnv,
+		extraEnv:        extra,
+		authMethod:      authMethod,
+		displayName:     displayName,
+		mode:            mode,
+		preferAllowOnce: preferAllowOnce,
+
+		thoughtLevelOverride: effort,
 	}, nil
 }
 
@@ -228,6 +254,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	if a.displayName != "" {
 		opts["display_name"] = a.displayName
 	}
+	if a.preferAllowOnce {
+		opts["prefer_allow_once"] = true
+	}
 	return opts
 }
 
@@ -252,16 +281,22 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	pendingModel := a.modelOverride
 	a.modelsMu.RUnlock()
 
+	a.thoughtMu.RLock()
+	pendingThought := a.thoughtLevelOverride
+	a.thoughtMu.RUnlock()
+
 	return newACPSession(ctx, acpSessionConfig{
-		command:         command,
-		args:            allArgs,
-		extraEnv:        extra,
-		workDir:         workDir,
-		resumeSessionID: sessionID,
-		authMethod:      authMethod,
-		initialMode:     pendingMode,
-		initialModel:    pendingModel,
-		callbacks:       a,
+		command:             command,
+		args:                allArgs,
+		extraEnv:            extra,
+		workDir:             workDir,
+		resumeSessionID:     sessionID,
+		authMethod:          authMethod,
+		initialMode:         pendingMode,
+		initialModel:        pendingModel,
+		initialThoughtLevel: pendingThought,
+		preferAllowOnce:     a.preferAllowOnce,
+		callbacks:           a,
 	})
 }
 
@@ -471,3 +506,61 @@ func (a *Agent) AvailableModels(_ context.Context) []core.ModelOption {
 }
 
 var _ core.ModelSwitcher = (*Agent)(nil)
+
+func (a *Agent) reportThoughtLevels(current string, levels []string) {
+	if len(levels) == 0 {
+		return
+	}
+	a.thoughtMu.Lock()
+	a.thoughtLevels = levels
+	// A server-reported current value (e.g. restored by session/load after
+	// a restart) must not clobber an explicit /reasoning override.
+	if current != "" && a.thoughtLevelOverride == "" {
+		a.currentThoughtLevel = current
+	}
+	a.thoughtMu.Unlock()
+}
+
+// -- ReasoningEffortSwitcher --
+//
+// Some ACP agents publish a `thought_level` config option next to `model`
+// (CodeBuddy Code reports the levels "high" and "enabled"). Exposing it
+// through the interface the engine already uses for reasoning effort makes
+// /reasoning work without touching core.
+
+func (a *Agent) GetReasoningEffort() string {
+	a.thoughtMu.RLock()
+	defer a.thoughtMu.RUnlock()
+	if a.currentThoughtLevel != "" {
+		return a.currentThoughtLevel
+	}
+	if len(a.thoughtLevels) > 0 {
+		return a.thoughtLevels[0]
+	}
+	return ""
+}
+
+func (a *Agent) SetReasoningEffort(effort string) {
+	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return
+	}
+	a.thoughtMu.Lock()
+	a.currentThoughtLevel = effort
+	a.thoughtLevelOverride = effort
+	a.thoughtMu.Unlock()
+
+	if sess := a.activeSession.Load(); sess != nil {
+		sess.SetLiveThoughtLevel(effort)
+	}
+}
+
+func (a *Agent) AvailableReasoningEfforts() []string {
+	a.thoughtMu.RLock()
+	defer a.thoughtMu.RUnlock()
+	out := make([]string, len(a.thoughtLevels))
+	copy(out, a.thoughtLevels)
+	return out
+}
+
+var _ core.ReasoningEffortSwitcher = (*Agent)(nil)

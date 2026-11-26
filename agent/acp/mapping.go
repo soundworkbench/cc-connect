@@ -145,6 +145,7 @@ func mapToolCall(sessionID string, update json.RawMessage) []core.Event {
 		ToolName:  toolName,
 		ToolInput: toolInput,
 		SessionID: sessionID,
+		Metadata:  acpToolProgressMeta(u.Kind, u.Title, u.RawInput),
 	}}
 }
 
@@ -361,11 +362,18 @@ type permissionOption struct {
 	Kind     string `json:"kind"`
 }
 
-func pickPermissionOptionID(allow bool, options []permissionOption) string {
+func pickPermissionOptionID(allow bool, options []permissionOption, preferAllowOnce ...bool) string {
 	if len(options) == 0 {
 		return ""
 	}
 	if allow {
+		if len(preferAllowOnce) > 0 && preferAllowOnce[0] {
+			for _, o := range options {
+				if strings.EqualFold(strings.TrimSpace(o.Kind), "allow_once") {
+					return o.OptionID
+				}
+			}
+		}
 		for _, o := range options {
 			if strings.Contains(strings.ToLower(o.Kind), "allow") {
 				return o.OptionID

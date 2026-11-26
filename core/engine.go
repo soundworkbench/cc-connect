@@ -3140,7 +3140,7 @@ found:
 
 	lower := strings.ToLower(strings.TrimSpace(content))
 
-	if isApproveAllResponse(lower) {
+	if isApproveAllResponse(lower) && permissionApprovalAllAllowed(state.agentSession) {
 		state.mu.Lock()
 		state.approveAll = true
 		state.mu.Unlock()
@@ -3672,6 +3672,9 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 			if as == nil {
 				sendDone <- fmt.Errorf("agent session became nil")
 				return
+			}
+			if origin, ok := as.(TurnOriginSetter); ok {
+				origin.SetTurnHuman(isHumanTurn(msg))
 			}
 			sendDone <- as.Send(promptContent, msg.MessageID, msg.Images, msg.Files)
 		}()
@@ -4969,6 +4972,8 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 				state.mu.Lock()
 				autoApprove := state.approveAll
 				state.mu.Unlock()
+				allowAll := permissionApprovalAllAllowed(agentSession)
+				autoApprove = autoApprove && allowAll
 
 				if autoApprove {
 					result := PermissionResult{Behavior: "allow", UpdatedInput: event.ToolInputRaw}
@@ -5012,7 +5017,7 @@ func (e *Engine) runUnsolicitedReader(ctx context.Context, cancel context.Cancel
 					permLimit = permLimit * 8 / 5
 				}
 				toolInput := truncateIf(event.ToolInput, permLimit)
-				e.sendPermissionPrompt(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput), event.ToolName, toolInput)
+				e.sendPermissionPrompt(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput), event.ToolName, toolInput, allowAll)
 
 				select {
 				case <-pending.Resolved:
@@ -5590,6 +5595,13 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 		case EventModelSwitch:
 			e.relayModelSwitch(p, replyCtx, sessionKey, event.ModelSwitch)
 
+		case EventNotice:
+			// The card line (turnWatch) carries it; without one, a person
+			// gets it as a message, as with showSwitchNotice.
+			if event.Notice != nil && !automated && !sp.showsNotice() {
+				e.send(p, replyCtx, e.i18n.Tf(event.Notice.Key, event.Notice.Args...))
+			}
+
 		case EventHookRejected:
 			// Claude Code emits this between a Stop-hook-rejected draft and its
 			// rewritten answer. Discard only per-segment assistant text state so
@@ -6158,6 +6170,8 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 			state.mu.Lock()
 			autoApprove := state.approveAll
 			state.mu.Unlock()
+			allowAll := permissionApprovalAllAllowed(turnAgentSession)
+			autoApprove = autoApprove && allowAll
 
 			if autoApprove && !isAskQuestion {
 				slog.Debug("auto-approving (approve-all)", "request_id", event.RequestID, "tool", event.ToolName)
@@ -6221,7 +6235,7 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 				}
 				toolInput := truncateIf(event.ToolInput, permLimit)
 				prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
-				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
+				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput, allowAll)
 			}
 
 			// Stop idle timer while waiting for user permission response;
@@ -6820,6 +6834,9 @@ func (e *Engine) processTurnEvents(automated bool, state *interactiveState, sess
 						nextSend <- fmt.Errorf("agent session became nil")
 						return
 					}
+					if origin, ok := as.(TurnOriginSetter); ok {
+						origin.SetTurnHuman(isHumanQueuedTurn(queued))
+					}
 					nextSend <- as.Send(queuedPrompt, queued.messageID, queued.images, queued.files)
 				}()
 				pendingSend = nextSend
@@ -7249,6 +7266,9 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 				sendDone <- fmt.Errorf("agent session became nil")
 				return
 			}
+			if origin, ok := as.(TurnOriginSetter); ok {
+				origin.SetTurnHuman(isHumanQueuedTurn(queued))
+			}
 			sendDone <- as.Send(prompt, queued.messageID, queued.images, queued.files)
 		}()
 
@@ -7353,6 +7373,9 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	if session := sessions.GetOrCreateActive(msg.SessionKey); !session.Busy() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
+	}
+	if preserve, ok := state.agentSession.(TurnShellPreserver); ok {
+		preserve.SetTurnShellCurrent()
 	}
 	if err := state.agentSession.Send(text, "", nil, nil); err != nil {
 		slog.Error("ps: send failed", "error", err)
@@ -10719,13 +10742,28 @@ func (e *Engine) cmdReasoning(p Platform, msg *Message, args []string) {
 
 	switcher.SetReasoningEffort(target)
 	e.cleanupInteractiveState(e.interactiveKeyForSessionKey(msg.SessionKey))
+	e.resetAfterReasoningChange(agent, sessions, msg.SessionKey)
 
-	s := sessions.GetOrCreateActive(msg.SessionKey)
+	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
+}
+
+// reasoningSessionKeeper is implemented by agents that carry the conversation
+// across a reasoning-effort change (the next process resumes it with the new
+// effort), so the engine need not start a fresh one.
+type reasoningSessionKeeper interface {
+	KeepsSessionOnReasoningChange() bool
+}
+
+// resetAfterReasoningChange starts a fresh conversation after a reasoning
+// change, unless the agent keeps the current one.
+func (e *Engine) resetAfterReasoningChange(agent Agent, sessions *SessionManager, sessionKey string) {
+	if k, ok := agent.(reasoningSessionKeeper); ok && k.KeepsSessionOnReasoningChange() {
+		return
+	}
+	s := sessions.GetOrCreateActive(sessionKey)
 	s.SetAgentSessionID("", "")
 	s.ClearHistory()
 	sessions.Save()
-
-	e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgReasoningChanged, target))
 }
 
 func (e *Engine) reasoningUsage(efforts []string) string {
@@ -11215,6 +11253,9 @@ func (e *Engine) runCompress(state *interactiveState, session *Session, sessions
 	}
 
 	cmd := compressor.CompressCommand()
+	if preserve, ok := state.agentSession.(TurnShellPreserver); ok {
+		preserve.SetTurnShellCurrent()
+	}
 	if err := state.agentSession.Send(cmd, "", nil, nil); err != nil {
 		if !auto {
 			e.reply(p, replyCtx, fmt.Sprintf(e.i18n.T(MsgError), err))
@@ -12477,7 +12518,18 @@ func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments 
 
 // sendPermissionPrompt sends a permission prompt with interactive buttons when
 // the platform supports them. Fallback chain: InlineButtonSender → CardSender → plain text.
-func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string) {
+func permissionApprovalAllAllowed(session AgentSession) bool {
+	if capability, ok := session.(PermissionApprovalAll); ok {
+		return capability.SupportsPermissionApprovalAll()
+	}
+	return true
+}
+
+func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string, approvalAll ...bool) {
+	allowAll := true
+	if len(approvalAll) > 0 {
+		allowAll = approvalAll[0]
+	}
 	e.hooks.Emit(HookEvent{
 		Event:    HookEventPermissionRequested,
 		Platform: p.Name(),
@@ -12487,14 +12539,12 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 
 	// Try inline buttons first (Telegram)
 	if bs, ok := p.(InlineButtonSender); ok {
-		buttons := [][]ButtonOption{
-			{
-				{Text: e.i18n.T(MsgPermBtnAllow), Data: "perm:allow"},
-				{Text: e.i18n.T(MsgPermBtnDeny), Data: "perm:deny"},
-			},
-			{
-				{Text: e.i18n.T(MsgPermBtnAllowAll), Data: "perm:allow_all"},
-			},
+		buttons := [][]ButtonOption{{
+			{Text: e.i18n.T(MsgPermBtnAllow), Data: "perm:allow"},
+			{Text: e.i18n.T(MsgPermBtnDeny), Data: "perm:deny"},
+		}}
+		if allowAll {
+			buttons = append(buttons, []ButtonOption{{Text: e.i18n.T(MsgPermBtnAllowAll), Data: "perm:allow_all"}})
 		}
 		if err := e.waitOutgoing(p); err != nil {
 			slog.Warn("sendPermissionPrompt: outgoing wait cancelled", "platform", p.Name(), "error", err)
@@ -12521,15 +12571,15 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
 			Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllow), "green")}
 		denyBtn := CardButton{Text: e.i18n.T(MsgPermBtnDeny), Type: "danger", Value: "perm:deny",
 			Extra: extra("❌ "+e.i18n.T(MsgPermBtnDeny), "red")}
-		allowAllBtn := CardButton{Text: e.i18n.T(MsgPermBtnAllowAll), Type: "default", Value: "perm:allow_all",
-			Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllowAll), "green")}
-
-		card := NewCard().
+		cardBuilder := NewCard().
 			Markdown("**"+e.i18n.T(MsgPermCardTitle)+"**\n"+body).
-			ButtonsEqual(allowBtn, denyBtn).
-			Buttons(allowAllBtn).
-			Note(e.i18n.T(MsgPermCardNote)).
-			Build()
+			ButtonsEqual(allowBtn, denyBtn)
+		if allowAll {
+			allowAllBtn := CardButton{Text: e.i18n.T(MsgPermBtnAllowAll), Type: "default", Value: "perm:allow_all",
+				Extra: extra("✅ "+e.i18n.T(MsgPermBtnAllowAll), "green")}
+			cardBuilder = cardBuilder.Buttons(allowAllBtn)
+		}
+		card := cardBuilder.Note(e.i18n.T(MsgPermCardNote)).Build()
 		e.sendWithCard(p, replyCtx, card)
 		return
 	}
@@ -13165,10 +13215,7 @@ func (e *Engine) executeCardAction(cmd, args, sessionKey string) {
 			if effort == target {
 				switcher.SetReasoningEffort(target)
 				e.cleanupInteractiveState(interactiveKey)
-				s := sessions.GetOrCreateActive(sessionKey)
-				s.SetAgentSessionID("", "")
-				s.ClearHistory()
-				sessions.Save()
+				e.resetAfterReasoningChange(agent, sessions, sessionKey)
 				return
 			}
 		}
@@ -16084,6 +16131,9 @@ func (e *Engine) HandleRelay(ctx context.Context, fromProject, sourceSessionKey,
 
 	saveRelaySessionID(agentSession.CurrentSessionID(), false)
 
+	if origin, ok := agentSession.(TurnOriginSetter); ok {
+		origin.SetTurnHuman(false)
+	}
 	if err := agentSession.Send(message, "", nil, nil); err != nil {
 		agentSession.Close()
 		return "", fmt.Errorf("send relay message: %w", err)
