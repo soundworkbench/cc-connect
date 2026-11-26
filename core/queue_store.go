@@ -211,7 +211,12 @@ func (e *Engine) popQueuedLocked(state *interactiveState, batch bool) (queuedMes
 	old := state.pendingMessages
 	n := 1
 	if batch {
-		n = e.queuedBatchSize(old, state.agentSession)
+		// Before a session exists (restart, /new, /stop) ask the agent itself.
+		var router any = state.agentSession
+		if state.agentSession == nil {
+			router = e.agent
+		}
+		n = e.queuedBatchSize(old, router)
 	}
 	q := e.mergeQueuedMessages(old[:n])
 	state.pendingMessages = old[n:]

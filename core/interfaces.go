@@ -463,7 +463,7 @@ type TurnShellPreserver interface {
 	SetTurnShellCurrent()
 }
 
-// TurnOriginRouter is an optional capability for sessions whose shell choice
+// TurnOriginRouter is an optional capability for agents and sessions whose shell choice
 // must follow the source of each queued turn. Queue batching stops at a
 // human/automation boundary when it is enabled.
 type TurnOriginRouter interface {

@@ -422,6 +422,12 @@ func (s *session) SupportsPermissionApprovalAll() bool {
 	return shell != shellACP
 }
 
+// RoutesByTurnOrigin lets queue batching split human and automated turns
+// before any session exists.
+func (r *Agent) RoutesByTurnOrigin() bool {
+	return r.acpHumanOnly && r.currentShell() == shellACP
+}
+
 func (s *session) RoutesByTurnOrigin() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

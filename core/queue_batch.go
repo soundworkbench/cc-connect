@@ -302,12 +302,12 @@ func (e *Engine) batchContent(messages []queuedMessage) string {
 	return b.String()
 }
 
-func (e *Engine) queuedBatchSize(messages []queuedMessage, session AgentSession) int {
+func (e *Engine) queuedBatchSize(messages []queuedMessage, router any) int {
 	if !e.queueBatch.Enabled || !batchable(messages[0]) {
 		return 1
 	}
 	routeOrigins := false
-	if capability, ok := session.(TurnOriginRouter); ok {
+	if capability, ok := router.(TurnOriginRouter); ok {
 		routeOrigins = capability.RoutesByTurnOrigin()
 	}
 	human := isHumanQueuedTurn(messages[0])
