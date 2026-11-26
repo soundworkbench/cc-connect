@@ -368,6 +368,11 @@ func pickPermissionOptionID(allow bool, options []permissionOption) string {
 	}
 	if allow {
 		for _, o := range options {
+			if strings.EqualFold(strings.TrimSpace(o.Kind), "allow_once") {
+				return o.OptionID
+			}
+		}
+		for _, o := range options {
 			if strings.Contains(strings.ToLower(o.Kind), "allow") {
 				return o.OptionID
 			}

@@ -69,6 +69,11 @@ type acpSession struct {
 	callbacks sessionCallbacks // may be nil (tests, integration harness)
 }
 
+// ACP permission options are per-request. A persistent approve-all choice
+// would bypass the server's allow_once/allow_always distinction, so the
+// bridge keeps asking for every request.
+func (*acpSession) SupportsPermissionApprovalAll() bool { return false }
+
 type permState struct {
 	RPCID   json.RawMessage
 	Options []permissionOption
@@ -95,6 +100,13 @@ type acpSessionConfig struct {
 	// `thought_level` config option that some agents publish (CodeBuddy).
 	initialThoughtLevel string
 	callbacks           sessionCallbacks // may be nil
+}
+
+func clientVersion() string {
+	if version := strings.TrimSpace(core.CurrentVersion); version != "" {
+		return version
+	}
+	return "dev"
 }
 
 func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, error) {
@@ -228,7 +240,7 @@ func (s *acpSession) handshake(resumeSessionID string, authMethod string) error 
 		},
 		"clientInfo": map[string]any{
 			"name":    "cc-connect",
-			"version": "1.0.0",
+			"version": clientVersion(),
 		},
 	}
 	res, err := s.tr.call(s.ctx, "initialize", initParams)

@@ -161,6 +161,9 @@ func (e *Engine) runSwitchCompact(agent Agent, state *interactiveState, as Agent
 		return errors.New("agent has no compact command")
 	}
 	cmd := compressor.CompressCommand()
+	if preserve, ok := as.(TurnShellPreserver); ok {
+		preserve.SetTurnShellCurrent()
+	}
 	if err := as.Send(cmd, "", nil, nil); err != nil {
 		return fmt.Errorf("send %s: %w", cmd, err)
 	}

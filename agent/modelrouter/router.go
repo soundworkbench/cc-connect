@@ -40,12 +40,14 @@ var sharedKeys = []string{"work_dir", "run_as_user", "run_as_env", "cc_data_dir"
 
 // Agent routes sessions to the shell of the current model.
 type Agent struct {
-	shells     map[string]core.Agent
-	names      map[string]string
-	patterns   []string
-	store      *store
-	state      map[string]any // cc_data_dir, cc_project: where the store lives
-	handoffMax int            // size limit of a handoff, in characters
+	shells       map[string]core.Agent
+	names        map[string]string
+	patterns     []string
+	store        *store
+	state        map[string]any // cc_data_dir, cc_project: where the store lives
+	handoffMax   int            // size limit of a handoff, in characters
+	acpHumanOnly bool           // automated turns use Claude when the model is ACP
+	handoffToACP bool           // include handoff text when entering the ACP shell
 
 	mu        sync.Mutex
 	providers []core.ProviderConfig
@@ -98,6 +100,11 @@ func New(opts map[string]any) (core.Agent, error) {
 	r := newRouter(cc, acp, stringList(opts["claude_models"]), strings.TrimSpace(model), openStore(dir))
 	r.state = map[string]any{"cc_data_dir": dataDir, "cc_project": project}
 	r.handoffMax = intOpt(opts["handoff_max_chars"], defaultHandoffChars)
+	r.acpHumanOnly, _ = opts["acp_human_only"].(bool)
+	r.handoffToACP = true
+	if v, ok := opts["handoff_to_acp"].(bool); ok {
+		r.handoffToACP = v
+	}
 	return r, nil
 }
 
@@ -109,14 +116,15 @@ func newRouter(cc, acp core.Agent, patterns []string, model string, st *store) *
 		patterns[i] = strings.ToLower(strings.TrimSpace(p))
 	}
 	r := &Agent{
-		shells:     map[string]core.Agent{shellClaude: cc, shellACP: acp},
-		names:      map[string]string{shellClaude: "Claude Code", shellACP: displayName(acp, "ACP")},
-		patterns:   patterns,
-		store:      st,
-		activeIdx:  -1,
-		handoffMax: defaultHandoffChars,
-		lastModel:  map[string]string{},
-		applied:    map[string]string{},
+		shells:       map[string]core.Agent{shellClaude: cc, shellACP: acp},
+		names:        map[string]string{shellClaude: "Claude Code", shellACP: displayName(acp, "ACP")},
+		patterns:     patterns,
+		store:        st,
+		activeIdx:    -1,
+		handoffMax:   defaultHandoffChars,
+		handoffToACP: true,
+		lastModel:    map[string]string{},
+		applied:      map[string]string{},
 	}
 	if model == "" {
 		if ms, ok := cc.(core.ModelSwitcher); ok {
@@ -253,16 +261,21 @@ func (r *Agent) claude() core.Agent { return r.shells[shellClaude] }
 func (r *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	th := r.store.threadFor(sessionID, r.ownerOf(ctx, sessionID))
 	target := r.currentShell()
-	r.store.setActive(th, target)
+	if r.store.snapshot(th).Active == "" {
+		r.store.setActive(th, target)
+	}
 	snap := r.store.snapshot(th)
 	from := snap.Active
+	if r.acpHumanOnly {
+		return r.wrap(nil, th, target, nil, ctx), nil
+	}
 
 	if from == target {
 		inner, err := r.shells[target].StartSession(ctx, snap.IDs[target])
 		if err != nil {
 			return nil, err
 		}
-		return r.wrap(inner, th, target, nil), nil
+		return r.wrap(inner, th, target, nil, ctx), nil
 	}
 
 	inner, resumed, err := r.startForHandoff(ctx, target, snap.IDs[target])
@@ -270,7 +283,7 @@ func (r *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		h := r.handoffFor(ctx, th, from, target, resumed)
 		slog.Info("model_router: conversation moves to another shell",
 			"from", from, "to", target, "resumed", resumed, "handoff_chars", runeLen(h.text))
-		return r.wrap(inner, th, target, h), nil
+		return r.wrap(inner, th, target, h, ctx), nil
 	}
 
 	slog.Warn("model_router: shell did not start, staying on the previous one",
@@ -281,7 +294,7 @@ func (r *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 	model := r.revertTo(from)
 	notice := &core.Notice{Key: core.MsgShellSwitchFailed, Args: []any{r.names[target], r.names[from], model}}
-	return r.wrap(back, th, from, &handoff{notice: notice}), nil
+	return r.wrap(back, th, from, &handoff{notice: notice}, ctx), nil
 }
 
 // startForHandoff resumes id on shell, or starts a new session when there is
@@ -323,6 +336,9 @@ func (r *Agent) handoffFor(ctx context.Context, th *thread, from, to string, res
 		entries = append(r.historyOf(ctx, from, snap.IDs[from], snap.Left[to], resumed), entries...)
 	}
 	text := buildHandoff(r.names[from], entries, resumed, handoffBudget(r.windowOf(to), r.handoffMax))
+	if to == shellACP && !r.handoffToACP {
+		text = ""
+	}
 	key := core.MsgShellSwitched
 	if text != "" {
 		key = core.MsgShellSwitchedCarried
@@ -691,6 +707,12 @@ func (r *Agent) WorkspaceAgentOptions() map[string]any {
 		opts["model"] = m
 	}
 	opts["handoff_max_chars"] = r.handoffMax
+	if r.acpHumanOnly {
+		opts["acp_human_only"] = true
+	}
+	if !r.handoffToACP {
+		opts["handoff_to_acp"] = false
+	}
 	return opts
 }
 

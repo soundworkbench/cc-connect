@@ -314,6 +314,55 @@ func TestSessionsRouteByModel(t *testing.T) {
 	}
 }
 
+func TestACPHumanOnlyRoutesAutomationToClaude(t *testing.T) {
+	r, cc, acp := newTestRouter(t, "gemini-4-neon")
+	r.acpHumanOnly = true
+	s := start(t, r, "")
+	if len(cc.startedWith()) != 0 || len(acp.startedWith()) != 0 {
+		t.Fatalf("lazy start violated: cc=%v acp=%v", cc.startedWith(), acp.startedWith())
+	}
+
+	if origin, ok := s.(core.TurnOriginSetter); ok {
+		origin.SetTurnHuman(false)
+	} else {
+		t.Fatal("router session does not expose turn origin")
+	}
+	turn(t, s, "scheduled task")
+	if len(cc.startedWith()) != 1 || len(acp.startedWith()) != 0 {
+		t.Fatalf("automation starts: cc=%v acp=%v", cc.startedWith(), acp.startedWith())
+	}
+
+	s.(core.TurnOriginSetter).SetTurnHuman(true)
+	turn(t, s, "Jason message")
+	if len(acp.startedWith()) != 1 {
+		t.Fatalf("human message should start ACP once: acp=%v", acp.startedWith())
+	}
+
+	s.(core.TurnOriginSetter).SetTurnHuman(false)
+	turn(t, s, "another scheduled task")
+	if len(cc.startedWith()) != 2 || len(acp.startedWith()) != 1 {
+		t.Fatalf("later automation starts: cc=%v acp=%v", cc.startedWith(), acp.startedWith())
+	}
+}
+
+func TestHandoffToACPCanBeDisabled(t *testing.T) {
+	r, _, acp := newTestRouter(t, "claude-opus-5-5")
+	r.handoffToACP = false
+	s := start(t, r, "")
+	turn(t, s, "before switch")
+	ccID := s.CurrentSessionID()
+	_ = s.Close()
+
+	r.SetModel("gemini-4-neon")
+	s = start(t, r, ccID)
+	s.(core.TurnOriginSetter).SetTurnHuman(true)
+	turn(t, s, "after switch")
+	prompt := acp.lastSession().prompts()[0]
+	if prompt != "after switch" {
+		t.Fatalf("ACP prompt contains disabled handoff: %q", prompt)
+	}
+}
+
 func TestHandoffBothWaysOnlyIncrements(t *testing.T) {
 	r, cc, acp := newTestRouter(t, "claude-opus-5-5")
 
