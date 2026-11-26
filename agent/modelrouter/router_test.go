@@ -215,6 +215,20 @@ func newTestRouter(t *testing.T, model string) (*Agent, *fakeClaude, *fakeACP) {
 	return r, cc, acp
 }
 
+func newT3TestRouter(t *testing.T, model string) (*Agent, *fakeClaude, *fakeACP) {
+	t.Helper()
+	cc := &fakeClaude{&fakeShell{name: shellClaude, window: 400_000, history: map[string][]core.HistoryEntry{}}}
+	t3 := &fakeACP{&fakeShell{name: shellT3}}
+	r := newRouter(cc, t3, nil, model, newStore(""))
+	delete(r.shells, shellACP)
+	r.shells[shellT3] = t3
+	r.names[shellT3] = "T3 Code"
+	r.googleShell = shellT3
+	r.acpHumanOnly = true
+	r.sync()
+	return r, cc, t3
+}
+
 // turn sends prompt and reads events up to the result; it returns the
 // notices seen.
 func turn(t *testing.T, s core.AgentSession, prompt string) []*core.Notice {
@@ -346,6 +360,42 @@ func TestACPHumanOnlyRoutesAutomationToClaude(t *testing.T) {
 	turn(t, s, "another scheduled task")
 	if len(cc.startedWith()) != 2 || len(acp.startedWith()) != 1 {
 		t.Fatalf("later automation starts: cc=%v acp=%v", cc.startedWith(), acp.startedWith())
+	}
+}
+
+func TestT3HumanOnlyRoutesAutomationToClaude(t *testing.T) {
+	r, cc, t3 := newT3TestRouter(t, "gemini-4-neon")
+	s := start(t, r, "")
+	if r.RoutesByTurnOrigin() == false {
+		t.Fatal("T3 human-only router must advertise origin routing")
+	}
+	if origin, ok := s.(core.TurnOriginSetter); ok {
+		origin.SetTurnHuman(false)
+	} else {
+		t.Fatal("router session does not expose turn origin")
+	}
+	turn(t, s, "scheduled task")
+	if len(cc.startedWith()) != 1 || len(t3.startedWith()) != 0 {
+		t.Fatalf("automation starts: claude=%v t3=%v", cc.startedWith(), t3.startedWith())
+	}
+	s.(core.TurnOriginSetter).SetTurnHuman(true)
+	turn(t, s, "Jason message")
+	if len(t3.startedWith()) != 1 {
+		t.Fatalf("human message should start T3 once: t3=%v", t3.startedWith())
+	}
+	if capability, ok := s.(core.PermissionApprovalAll); !ok || capability.SupportsPermissionApprovalAll() {
+		t.Fatal("T3 shell must expose allow-once permission semantics")
+	}
+}
+
+func TestT3HumanOnlyAdvertisesMixedBatchBoundary(t *testing.T) {
+	r, _, _ := newT3TestRouter(t, "gemini-4-neon")
+	s := start(t, r, "")
+	if !r.RoutesByTurnOrigin() {
+		t.Fatal("router must split mixed human and automation batches")
+	}
+	if routed, ok := s.(core.TurnOriginRouter); !ok || !routed.RoutesByTurnOrigin() {
+		t.Fatal("T3 session must split mixed human and automation batches")
 	}
 }
 
