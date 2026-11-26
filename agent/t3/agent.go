@@ -228,6 +228,7 @@ type Session struct {
 	questions   map[string][]t3Question
 	runsOpen    map[string]bool
 	runsEnded   map[string]bool
+	baselined   bool // runs finished before this session are recorded as ended
 	runReason   map[string]string
 	evMu        sync.RWMutex
 	evClosed    bool
@@ -550,6 +551,16 @@ func (s *Session) settleFromSnapshot(b []byte) {
 		return
 	}
 	s.turnMu.Lock()
+	if !s.baselined {
+		// Runs already finished when this session first sees the thread
+		// belong to earlier turns, possibly of an earlier bridge process.
+		s.baselined = true
+		for _, r := range snap.Projection.Runs {
+			if runTerminal(r.Status) && !s.runsOpen[r.ID] {
+				s.runsEnded[r.ID] = true
+			}
+		}
+	}
 	waiting := s.turnOpen
 	latest, latestOrd := "", -1
 	var settle []string
@@ -883,10 +894,12 @@ func (s *Session) consumeStream(p *pending, rid string, first chan<- error) {
 				}
 				return
 			}
-			report(nil)
+			// Handle the chunk before reporting the subscription live, so the
+			// opening snapshot is applied before the caller can send.
 			for _, v := range ch.Values {
 				s.handleEvent(v)
 			}
+			report(nil)
 			if ch.Tag == "Chunk" {
 				s.ack(rid)
 			}

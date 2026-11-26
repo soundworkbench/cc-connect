@@ -773,6 +773,41 @@ func TestDropBeforeFirstEventResumesFromSnapshot(t *testing.T) {
 	}
 }
 
+// A restarted bridge must not take the last finished run of the resumed
+// thread for the end of the next turn.
+func TestResumedThreadIgnoresEarlierRuns(t *testing.T) {
+	e := newEnv(t)
+	first := e.start(t, "")
+	th := first.CurrentSessionID()
+	_ = first.Send("before restart", "m1", nil, nil)
+	e.f.emit(th, item(map[string]any{"id": "a1", "type": "assistant_message", "text": "old"}))
+	e.f.emit(th, runUpdate("r1", "completed"))
+	for ev := nextEvent(t, first); ev.Type != core.EventResult; ev = nextEvent(t, first) {
+	}
+	_ = first.Close()
+
+	s := e.start(t, th)
+	_ = s.Send("after restart", "m2", nil, nil)
+	noEvent(t, s)
+
+	// A reconnect before the new run shows up must not settle the old one either.
+	e.f.mu.Lock()
+	e.f.snapshotOnResume = true
+	e.f.mu.Unlock()
+	e.f.dropAll()
+	noEvent(t, s)
+
+	e.f.emit(th, item(map[string]any{"id": "a2", "type": "assistant_message", "text": "fresh"}))
+	e.f.emit(th, runUpdate("r2", "completed"))
+	if ev := nextEvent(t, s); ev.Type != core.EventText || ev.Content != "fresh" {
+		t.Fatalf("first event = %+v", ev)
+	}
+	if ev := nextEvent(t, s); ev.Type != core.EventResult {
+		t.Fatalf("end = %+v", ev)
+	}
+	noEvent(t, s)
+}
+
 func TestResumeMissingThreadStartsNewOne(t *testing.T) {
 	e := newEnv(t)
 	s := e.start(t, "thread-deleted")
