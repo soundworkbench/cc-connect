@@ -79,6 +79,8 @@ type fakeT3 struct {
 	// snapshotOnResume answers a resubscribe with a snapshot instead of a
 	// replay, as T3 does when too many events were missed.
 	snapshotOnResume bool
+	// folderOwner is the project that already owns the workspace folder.
+	folderOwner string
 }
 
 type fakeRequest struct {
@@ -214,7 +216,14 @@ func (f *fakeT3) handleWS(w http.ResponseWriter, r *http.Request) {
 func (f *fakeT3) handleRPC(c *websocket.Conn, rpc, id string, p map[string]any) {
 	switch rpc {
 	case "projects.mutate":
-		f.failError(c, id, "ProjectAlreadyExists", "project exists")
+		f.mu.Lock()
+		owner := f.folderOwner
+		f.mu.Unlock()
+		if owner != "" {
+			f.write(c, map[string]any{"_tag": "Exit", "requestId": id, "exit": map[string]any{"_tag": "Failure", "cause": []any{map[string]any{"_tag": "Fail", "error": map[string]any{"_tag": "ProjectConflictError", "projectId": p["projectId"], "workspaceRoot": p["workspaceRoot"], "conflictingProjectId": owner}}}}})
+			return
+		}
+		f.success(c, id, map[string]any{})
 	case "orchestration.launchThread":
 		cmd, _ := p["commandId"].(string)
 		f.mu.Lock()
@@ -887,5 +896,15 @@ func TestUnmatchedAnswerToChoiceQuestionIsDismissed(t *testing.T) {
 	}
 	if len(e.f.dispatches("runtime-request.respond")) != 0 || len(e.f.dispatches("thread.user-input.dismiss")) != 1 {
 		t.Fatal("an answer T3 would drop must dismiss the question instead")
+	}
+}
+
+func TestLaunchUsesProjectThatOwnsTheFolder(t *testing.T) {
+	e := newEnv(t)
+	e.f.folderOwner = "project-from-t3-app"
+	e.start(t, "")
+	launch := e.f.requestsOf("orchestration.launchThread")
+	if got := launch[len(launch)-1].Payload["projectId"]; got != "project-from-t3-app" {
+		t.Fatalf("launched in project %v", got)
 	}
 }

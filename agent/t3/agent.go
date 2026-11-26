@@ -745,7 +745,7 @@ func (s *Session) await(ctx context.Context, p *pending, id string) (json.RawMes
 	select {
 	case ch := <-p.ch:
 		if len(ch.Error) > 0 {
-			return nil, fmt.Errorf("t3: rpc failed: %s", errDetail(ch.Error))
+			return nil, &rpcError{detail: errDetail(ch.Error), raw: ch.Error}
 		}
 		if len(ch.Values) > 0 {
 			return ch.Values[0], nil
@@ -757,7 +757,7 @@ func (s *Session) await(ctx context.Context, p *pending, id string) (json.RawMes
 			}
 			if json.Unmarshal(ch.Exit, &exit) == nil {
 				if exit.Tag == "Failure" {
-					return nil, fmt.Errorf("t3: rpc failed: %s", errDetail(ch.Exit))
+					return nil, &rpcError{detail: errDetail(ch.Exit), raw: ch.Exit}
 				}
 				return exit.Value, nil
 			}
@@ -898,9 +898,14 @@ func (s *Session) consumeStream(p *pending, rid string, first chan<- error) {
 
 func (s *Session) createThread(ctx context.Context) error {
 	projectID := projectIDFor(s.agent.workDir)
-	// The project usually exists already; T3 then rejects the create, which is fine.
+	// The project usually exists already. When the folder was added in the T3
+	// app it belongs to that project, and threads must be launched there.
 	if _, err := s.call(ctx, "projects.mutate", map[string]any{"type": "project.create", "commandId": s.nextID(), "projectId": projectID, "title": "cc-connect", "workspaceRoot": s.agent.workDir}); err != nil {
-		slog.Debug("t3: create project", "error", err)
+		if owner := conflictingProject(err); owner != "" {
+			projectID = owner
+		} else {
+			slog.Debug("t3: create project", "error", err)
+		}
 	}
 	payload := map[string]any{"commandId": s.nextID(), "projectId": projectID, "title": "cc-connect", "modelSelection": s.agent.modelSelection(), "runtimeMode": "approval-required", "interactionMode": "default", "workspaceStrategy": map[string]any{"type": "root"}}
 	raw, e := s.call(ctx, "orchestration.launchThread", payload)
@@ -1083,4 +1088,39 @@ func questionAnswers(qs []t3Question, result core.PermissionResult) map[string]a
 		}
 	}
 	return out
+}
+
+// rpcError keeps T3's failure for callers that need a field from it; its text
+// is only T3's tag and message.
+type rpcError struct {
+	detail string
+	raw    json.RawMessage
+}
+
+func (e *rpcError) Error() string { return "t3: rpc failed: " + e.detail }
+
+// conflictingProject returns the project that already owns the workspace
+// folder, from T3's ProjectConflictError.
+func conflictingProject(err error) string {
+	var re *rpcError
+	if !errors.As(err, &re) {
+		return ""
+	}
+	var exit struct {
+		Cause []struct {
+			Error struct {
+				Tag      string `json:"_tag"`
+				Conflict string `json:"conflictingProjectId"`
+			} `json:"error"`
+		} `json:"cause"`
+	}
+	if json.Unmarshal(re.raw, &exit) != nil {
+		return ""
+	}
+	for _, c := range exit.Cause {
+		if c.Error.Tag == "ProjectConflictError" && c.Error.Conflict != "" {
+			return c.Error.Conflict
+		}
+	}
+	return ""
 }
