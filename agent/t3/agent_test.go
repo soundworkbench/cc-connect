@@ -40,7 +40,7 @@ func TestNewDefaultsAndCredentialFile(t *testing.T) {
 }
 
 func TestProjectIDForIsStableUUID(t *testing.T) {
-	first, second := projectIDFor("/srv/xiaoman/butler"), projectIDFor("/srv/xiaoman/butler")
+	first, second := projectIDFor("/home/user/project"), projectIDFor("/home/user/project")
 	if first != second || len(first) != 36 || strings.Count(first, "-") != 4 {
 		t.Fatalf("project id = %q", first)
 	}

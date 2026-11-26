@@ -351,7 +351,7 @@ func TestACPHumanOnlyRoutesAutomationToClaude(t *testing.T) {
 	}
 
 	s.(core.TurnOriginSetter).SetTurnHuman(true)
-	turn(t, s, "Jason message")
+	turn(t, s, "owner message")
 	if len(acp.startedWith()) != 1 {
 		t.Fatalf("human message should start ACP once: acp=%v", acp.startedWith())
 	}
@@ -379,7 +379,7 @@ func TestT3HumanOnlyRoutesAutomationToClaude(t *testing.T) {
 		t.Fatalf("automation starts: claude=%v t3=%v", cc.startedWith(), t3.startedWith())
 	}
 	s.(core.TurnOriginSetter).SetTurnHuman(true)
-	turn(t, s, "Jason message")
+	turn(t, s, "owner message")
 	if len(t3.startedWith()) != 1 {
 		t.Fatalf("human message should start T3 once: t3=%v", t3.startedWith())
 	}
@@ -429,7 +429,7 @@ func TestCloseDuringLazyStartClosesReturnedInner(t *testing.T) {
 	s := start(t, r, "")
 	s.(core.TurnOriginSetter).SetTurnHuman(true)
 	done := make(chan error, 1)
-	go func() { done <- s.Send("jason", "", nil, nil) }()
+	go func() { done <- s.Send("owner", "", nil, nil) }()
 	time.Sleep(100 * time.Millisecond)
 	_ = s.Close()
 	if err := <-done; err == nil {
