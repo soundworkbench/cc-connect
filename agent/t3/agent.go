@@ -123,9 +123,18 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			_ = s.Close()
 			return nil, err
 		}
-	} else if _, err := s.subscribe(ctx, sessionID); err != nil {
-		_ = s.Close()
-		return nil, err
+	} else if err := s.subscribe(ctx, sessionID, true); err != nil {
+		// The thread was deleted in T3 or its data was reset; start a new one
+		// rather than failing on the next message.
+		slog.Warn("t3: saved thread unavailable, starting a new one", "thread", sessionID, "error", err)
+		s.threadID.Store("")
+		s.seqMu.Lock()
+		s.sequence = 0
+		s.seqMu.Unlock()
+		if err := s.createThread(ctx); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
 	}
 	a.remember(s.CurrentSessionID())
 	a.mu.Lock()
@@ -186,23 +195,57 @@ type Session struct {
 	runID       string
 	itemMu      sync.Mutex
 	itemText    map[string]string
+	itemSeen    map[string]bool
+	questions   map[string][]t3Question
+	turnsDone   map[string]bool
+	failedNodes map[string]bool
+	subMu       sync.Mutex
+	subID       string
+	lastErr     atomic.Value
+}
+
+type t3Question struct {
+	ID          string `json:"id"`
+	Header      string `json:"header"`
+	Question    string `json:"question"`
+	MultiSelect bool   `json:"multiSelect"`
+	Options     []struct {
+		Label       string `json:"label"`
+		Description string `json:"description"`
+		Value       string `json:"value"`
+	} `json:"options"`
 }
 
 func newSession(parent context.Context, a *Agent, id string) (*Session, error) {
 	ctx, cancel := context.WithCancel(parent)
-	s := &Session{agent: a, ctx: ctx, cancel: cancel, pending: map[string]*pending{}, events: make(chan core.Event, 256), reconnect: make(chan struct{}, 1), permissions: map[string]bool{}, runID: randomID(), itemText: map[string]string{}}
+	s := &Session{agent: a, ctx: ctx, cancel: cancel, pending: map[string]*pending{}, events: make(chan core.Event, 256), reconnect: make(chan struct{}, 1), permissions: map[string]bool{}, runID: randomID(), itemText: map[string]string{}, itemSeen: map[string]bool{}, questions: map[string][]t3Question{}, turnsDone: map[string]bool{}, failedNodes: map[string]bool{}}
 	if id != "" {
 		s.threadID.Store(id)
 	}
 	go s.run()
 	select {
 	case <-time.After(15 * time.Second):
-		_ = s.Close()
+		s.closeAndWait()
+		if v, ok := s.lastErr.Load().(error); ok {
+			return nil, fmt.Errorf("t3: WebSocket connection timeout: %w", v)
+		}
 		return nil, errors.New("t3: WebSocket connection timeout")
 	case <-s.reconnect:
 		return s, nil
 	case <-ctx.Done():
+		s.closeAndWait()
+		if v, ok := s.lastErr.Load().(error); ok {
+			return nil, fmt.Errorf("t3: connect: %w (%v)", ctx.Err(), v)
+		}
 		return nil, ctx.Err()
+	}
+}
+
+// closeAndWait stops a session that never became ready and waits for its
+// connection loop to exit (run closes events last).
+func (s *Session) closeAndWait() {
+	_ = s.Close()
+	for range s.events {
 	}
 }
 func (s *Session) CurrentSessionID() string {
@@ -231,22 +274,26 @@ func (s *Session) dial() (*websocket.Conn, error) {
 	}
 	req, _ := http.NewRequestWithContext(s.ctx, http.MethodPost, ticketURL, nil)
 	req.Header = h
-	if resp, e := http.DefaultClient.Do(req); e == nil {
-		defer resp.Body.Close()
-		if resp.StatusCode/100 == 2 {
-			var body struct {
-				Ticket string `json:"ticket"`
-			}
-			if json.NewDecoder(resp.Body).Decode(&body) == nil && body.Ticket != "" {
-				u.Path = "/ws"
-				q := u.Query()
-				q.Set("orchestrationProtocol", "2")
-				q.Set("wsTicket", body.Ticket)
-				u.RawQuery = q.Encode()
-				h = http.Header{}
-			}
-		}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("t3: websocket ticket: %w", err)
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("t3: websocket ticket: server returned %s", resp.Status)
+	}
+	var body struct {
+		Ticket string `json:"ticket"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil || body.Ticket == "" {
+		return nil, errors.New("t3: websocket ticket: no ticket in response")
+	}
+	u.Path = "/ws"
+	q := u.Query()
+	q.Set("orchestrationProtocol", "2")
+	q.Set("wsTicket", body.Ticket)
+	u.RawQuery = q.Encode()
+	h = http.Header{}
 	if u.Scheme == "http" {
 		u.Scheme = "ws"
 	} else if u.Scheme == "https" {
@@ -274,7 +321,13 @@ func (s *Session) run() {
 	for s.ctx.Err() == nil {
 		c, err := s.dial()
 		if err != nil {
-			time.Sleep(backoff)
+			s.lastErr.Store(err)
+			slog.Debug("t3: connect failed", "error", err)
+			select {
+			case <-time.After(backoff):
+			case <-s.ctx.Done():
+				return
+			}
 			if backoff < 5*time.Second {
 				backoff *= 2
 			}
@@ -291,7 +344,9 @@ func (s *Session) run() {
 			default:
 			}
 		} else {
-			_ = s.resubscribe()
+			if err := s.resubscribe(); err != nil {
+				slog.Warn("t3: resubscribe after reconnect", "error", err)
+			}
 		}
 		err = s.readLoop(c)
 		_ = c.Close()
@@ -305,7 +360,7 @@ func (s *Session) run() {
 		if s.ctx.Err() != nil {
 			return
 		}
-		_ = err
+		slog.Info("t3: connection lost, reconnecting", "error", err)
 	}
 }
 func (s *Session) readLoop(c *websocket.Conn) error {
@@ -381,15 +436,38 @@ func (s *Session) handleEvent(b []byte) {
 	}
 	if e.Type == "provider-turn.updated" || e.Type == "provider_turn.updated" {
 		var p struct {
+			ID     string `json:"id"`
+			NodeID string `json:"nodeId"`
 			Status string `json:"status"`
 		}
 		_ = json.Unmarshal(e.Payload, &p)
-		if p.Status == "completed" || p.Status == "failed" || p.Status == "cancelled" || p.Status == "interrupted" {
-			s.turnMu.Lock()
-			s.turnOpen = false
-			s.turnMu.Unlock()
-			s.emit(core.Event{Type: core.EventResult, Done: true})
+		switch p.Status {
+		case "completed", "failed", "cancelled", "interrupted":
+		default:
+			return
 		}
+		// T3 may update a finished turn again (token usage); end each turn once.
+		s.turnMu.Lock()
+		if p.ID != "" && s.turnsDone[p.ID] {
+			s.turnMu.Unlock()
+			return
+		}
+		if p.ID != "" {
+			s.turnsDone[p.ID] = true
+		}
+		s.turnOpen = false
+		// An error item already ended this turn for the engine.
+		reported := p.NodeID != "" && s.failedNodes[p.NodeID]
+		delete(s.failedNodes, p.NodeID)
+		s.turnMu.Unlock()
+		if reported {
+			return
+		}
+		if p.Status == "failed" {
+			s.emit(core.Event{Type: core.EventError, Error: errors.New("t3: turn failed")})
+			return
+		}
+		s.emit(core.Event{Type: core.EventResult, Done: true})
 		return
 	}
 }
@@ -400,48 +478,127 @@ func (s *Session) emitItem(payload, item json.RawMessage) {
 	}
 	var v struct {
 		ID        string `json:"id"`
+		NodeID    string `json:"nodeId"`
 		Kind      string `json:"requestKind"`
 		Type      string `json:"type"`
+		Status    string `json:"status"`
 		Text      string `json:"text"`
 		ToolName  string `json:"toolName"`
 		RequestID string `json:"requestId"`
 		Failure   struct {
 			Message string `json:"message"`
 		} `json:"failure"`
-		Prompt    string `json:"prompt"`
-		Streaming bool   `json:"streaming"`
+		Retry     json.RawMessage `json:"retry"`
+		Prompt    string          `json:"prompt"`
+		Questions []t3Question    `json:"questions"`
+		Answer    json.RawMessage `json:"questionAnswer"`
 	}
 	if json.Unmarshal(raw, &v) != nil {
 		return
 	}
 	switch v.Type {
 	case "assistant_message":
-		// T3 sends the whole text on every update; the engine appends, so forward the new part.
-		s.itemMu.Lock()
-		delta := strings.TrimPrefix(v.Text, s.itemText[v.ID])
-		s.itemText[v.ID] = v.Text
-		s.itemMu.Unlock()
-		if delta != "" {
+		if delta := s.itemDelta(v.ID, v.Text); delta != "" {
 			s.emit(core.Event{Type: core.EventText, Content: delta})
 		}
 	case "reasoning":
-		s.emit(core.Event{Type: core.EventThinking, Content: v.Text})
-	case "command_execution":
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: "command", ToolInput: "execution"})
-	case "dynamic_tool":
-		s.emit(core.Event{Type: core.EventToolUse, ToolName: v.ToolName, ToolInput: "tool call"})
-	case "approval_request":
-		s.permMu.Lock()
-		seen := s.permissions[v.RequestID]
-		s.permissions[v.RequestID] = true
-		s.permMu.Unlock()
-		if !seen {
-			s.emit(core.Event{Type: core.EventPermissionRequest, RequestID: v.RequestID, ToolName: v.Kind, ToolInput: v.Prompt})
+		if delta := s.itemDelta(v.ID, v.Text); delta != "" {
+			s.emit(core.Event{Type: core.EventThinking, Content: delta})
 		}
+	case "command_execution":
+		if s.firstSight(v.ID) {
+			s.emit(core.Event{Type: core.EventToolUse, ProgressID: v.ID, ToolName: "command", ToolInput: "execution"})
+		}
+	case "dynamic_tool":
+		if s.firstSight(v.ID) {
+			s.emit(core.Event{Type: core.EventToolUse, ProgressID: v.ID, ToolName: v.ToolName, ToolInput: "tool call"})
+		}
+	case "approval_request":
+		if requestSettled(v.Status) || !s.firstRequest(v.RequestID) {
+			return
+		}
+		s.emit(core.Event{Type: core.EventPermissionRequest, RequestID: v.RequestID, ToolName: v.Kind, ToolInput: v.Prompt})
+	case "user_input_request":
+		if requestSettled(v.Status) || len(v.Answer) > 0 || len(v.Questions) == 0 || !s.firstRequest(v.RequestID) {
+			return
+		}
+		s.permMu.Lock()
+		s.questions[v.RequestID] = v.Questions
+		s.permMu.Unlock()
+		qs := make([]core.UserQuestion, 0, len(v.Questions))
+		for _, q := range v.Questions {
+			uq := core.UserQuestion{Question: q.Question, Header: q.Header, MultiSelect: q.MultiSelect}
+			for _, o := range q.Options {
+				uq.Options = append(uq.Options, core.UserQuestionOption{Label: o.Label, Description: o.Description})
+			}
+			qs = append(qs, uq)
+		}
+		s.emit(core.Event{Type: core.EventPermissionRequest, RequestID: v.RequestID, ToolName: "AskUserQuestion", ToolInput: qs[0].Question, Questions: qs})
 	case "error":
+		// A retried error is transient; T3 tries again within the same turn.
+		if len(v.Retry) > 0 && string(v.Retry) != "null" {
+			slog.Info("t3: provider error, retrying", "error", v.Failure.Message)
+			return
+		}
+		if !s.firstSight(v.ID) {
+			return
+		}
+		// Some failures (e.g. a rejected model) never start a provider turn, so
+		// the error ends the turn now and the turn's own failure is dropped.
+		if v.NodeID != "" {
+			s.turnMu.Lock()
+			s.failedNodes[v.NodeID] = true
+			s.turnMu.Unlock()
+		}
 		s.emit(core.Event{Type: core.EventError, Error: errors.New("t3: " + v.Failure.Message)})
 	}
 }
+
+// itemDelta returns the new part of an item's text: T3 resends the whole text
+// on every update while the engine appends.
+func (s *Session) itemDelta(id, text string) string {
+	s.itemMu.Lock()
+	defer s.itemMu.Unlock()
+	prev := s.itemText[id]
+	s.itemText[id] = text
+	if !strings.HasPrefix(text, prev) {
+		return text
+	}
+	return text[len(prev):]
+}
+
+// firstSight reports whether an item id is new, so updates of one tool call
+// show as one step.
+func (s *Session) firstSight(id string) bool {
+	s.itemMu.Lock()
+	defer s.itemMu.Unlock()
+	if id != "" && s.itemSeen[id] {
+		return false
+	}
+	if id != "" {
+		s.itemSeen[id] = true
+	}
+	return true
+}
+
+func (s *Session) firstRequest(id string) bool {
+	s.permMu.Lock()
+	defer s.permMu.Unlock()
+	if s.permissions[id] {
+		return false
+	}
+	s.permissions[id] = true
+	return true
+}
+
+func requestSettled(status string) bool {
+	switch status {
+	case "completed", "failed", "cancelled", "interrupted":
+		return true
+	}
+	return false
+}
+
 func (s *Session) emit(ev core.Event) {
 	select {
 	case s.events <- ev:
@@ -526,41 +683,106 @@ func (s *Session) resubscribe() error {
 	if id == "" {
 		return nil
 	}
-	_, err := s.subscribe(s.ctx, id)
-	return err
+	return s.subscribe(s.ctx, id, false)
 }
-func (s *Session) subscribe(ctx context.Context, id string) (*pending, error) {
-	s.pendingMu.Lock()
+
+// subscribe opens the thread's event stream from the last sequence seen. With
+// wait it blocks until T3 accepts or rejects the subscription, so a thread that
+// no longer exists is reported here rather than on the next message.
+func (s *Session) subscribe(ctx context.Context, id string, wait bool) error {
+	s.subMu.Lock()
 	if s.subscribed.Load() {
-		s.pendingMu.Unlock()
-		return nil, nil
+		s.subMu.Unlock()
+		return nil
 	}
-	s.pendingMu.Unlock()
-	p, rid, e := s.request(ctx, "orchestration.subscribeThread", map[string]any{"threadId": id, "afterSequence": s.sequence}, true)
+	s.seqMu.Lock()
+	after := s.sequence
+	s.seqMu.Unlock()
+	p, rid, e := s.request(ctx, "orchestration.subscribeThread", map[string]any{"threadId": id, "afterSequence": after}, true)
 	if e != nil {
-		return nil, e
+		s.subMu.Unlock()
+		return e
 	}
+	s.subID = rid
 	s.subscribed.Store(true)
-	go func() {
-		for {
-			select {
-			case ch := <-p.ch:
-				for _, v := range ch.Values {
-					s.handleEvent(v)
-				}
-				if ch.Tag == "Chunk" {
-					s.ack(rid)
-				}
-			case <-s.ctx.Done():
+	s.subMu.Unlock()
+	first := make(chan error, 1)
+	go s.consumeStream(p, rid, first)
+	if !wait {
+		return nil
+	}
+	select {
+	case err := <-first:
+		if err != nil {
+			return fmt.Errorf("orchestration.subscribeThread: %w", err)
+		}
+		return nil
+	case <-time.After(15 * time.Second):
+		return errors.New("t3: thread subscription timeout")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Session) consumeStream(p *pending, rid string, first chan<- error) {
+	report := func(err error) {
+		select {
+		case first <- err:
+		default:
+		}
+	}
+	end := func(err error) {
+		report(err)
+		s.pendingMu.Lock()
+		delete(s.pending, rid)
+		s.pendingMu.Unlock()
+		s.subMu.Lock()
+		if s.subID == rid {
+			s.subscribed.Store(false)
+			s.subID = ""
+		}
+		s.subMu.Unlock()
+	}
+	for {
+		select {
+		case ch := <-p.ch:
+			if len(ch.Error) > 0 {
+				end(fmt.Errorf("t3: rpc failed: %s", errDetail(ch.Error)))
 				return
 			}
+			if ch.Tag == "Exit" || len(ch.Exit) > 0 {
+				var exit struct {
+					Tag string `json:"_tag"`
+				}
+				_ = json.Unmarshal(ch.Exit, &exit)
+				if exit.Tag == "Failure" {
+					err := fmt.Errorf("t3: rpc failed: %s", errDetail(ch.Exit))
+					slog.Warn("t3: thread subscription ended", "error", err)
+					end(err)
+				} else {
+					end(errors.New("t3: thread subscription ended"))
+				}
+				return
+			}
+			report(nil)
+			for _, v := range ch.Values {
+				s.handleEvent(v)
+			}
+			if ch.Tag == "Chunk" {
+				s.ack(rid)
+			}
+		case <-s.ctx.Done():
+			return
 		}
-	}()
-	return p, nil
+	}
 }
+
 func (s *Session) createThread(ctx context.Context) error {
 	projectID := projectIDFor(s.agent.workDir)
-	_, _ = s.call(ctx, "projects.mutate", map[string]any{"type": "project.create", "commandId": s.nextID(), "projectId": projectID, "title": "cc-connect", "workspaceRoot": s.agent.workDir})
+	// The project usually exists already; T3 then rejects the create, which is fine.
+	if _, err := s.call(ctx, "projects.mutate", map[string]any{"type": "project.create", "commandId": s.nextID(), "projectId": projectID, "title": "cc-connect", "workspaceRoot": s.agent.workDir}); err != nil {
+		slog.Debug("t3: create project", "error", err)
+	}
 	model := s.agent.model
 	if model == "" {
 		model = "gemini-2.5-pro"
@@ -578,8 +800,8 @@ func (s *Session) createThread(ctx context.Context) error {
 	}
 	s.threadID.Store(out.ThreadID)
 	s.agent.remember(out.ThreadID)
-	_, e = s.subscribe(ctx, out.ThreadID)
-	return e
+	// Wait for the snapshot so the first message is sent on a live stream.
+	return s.subscribe(ctx, out.ThreadID, true)
 }
 
 func projectIDFor(workDir string) string {
@@ -600,6 +822,19 @@ func (s *Session) Send(prompt, messageID string, _ []core.ImageAttachment, _ []c
 }
 func (s *Session) RespondPermission(requestID string, result core.PermissionResult) error {
 	id := s.CurrentSessionID()
+	s.permMu.Lock()
+	qs, isQuestion := s.questions[requestID]
+	delete(s.questions, requestID)
+	s.permMu.Unlock()
+	if isQuestion {
+		answers := questionAnswers(qs, result)
+		payload := map[string]any{"type": "thread.user-input.dismiss", "commandId": s.nextID(), "threadId": id, "requestId": requestID}
+		if len(answers) > 0 {
+			payload = map[string]any{"type": "runtime-request.respond", "commandId": s.nextID(), "threadId": id, "requestId": requestID, "answers": answers}
+		}
+		_, e := s.call(s.ctx, "orchestration.dispatchCommand", payload)
+		return e
+	}
 	decision := "decline"
 	if result.Behavior == "allow" {
 		decision = "accept"
@@ -684,3 +919,39 @@ func (s *Session) ack(requestID string) {
 
 // SupportsPermissionApprovalAll hides "allow all": the relay only approves once.
 func (s *Session) SupportsPermissionApprovalAll() bool { return false }
+
+// questionAnswers turns the engine's answers (keyed by question text, labels
+// joined by ", " for multi-select) into T3's answers keyed by question id,
+// using each option's value when it has one.
+func questionAnswers(qs []t3Question, result core.PermissionResult) map[string]any {
+	if !strings.EqualFold(result.Behavior, "allow") {
+		return nil
+	}
+	given, _ := result.UpdatedInput["answers"].(map[string]any)
+	out := map[string]any{}
+	for _, q := range qs {
+		ans, _ := given[q.Question].(string)
+		ans = strings.TrimSpace(ans)
+		if ans == "" {
+			continue
+		}
+		valueOf := func(label string) string {
+			for _, o := range q.Options {
+				if o.Label == label && o.Value != "" {
+					return o.Value
+				}
+			}
+			return label
+		}
+		if q.MultiSelect {
+			var picked []string
+			for _, part := range strings.Split(ans, ", ") {
+				picked = append(picked, valueOf(part))
+			}
+			out[q.ID] = picked
+			continue
+		}
+		out[q.ID] = valueOf(ans)
+	}
+	return out
+}
