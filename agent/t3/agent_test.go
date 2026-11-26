@@ -249,11 +249,13 @@ func TestFakeT3ProtocolLifecycleAndPersistence(t *testing.T) {
 	f.emit(map[string]any{"type": "turn-item.updated", "payload": map[string]any{"type": "command_execution"}})
 	f.emit(map[string]any{"type": "provider-turn.updated", "payload": map[string]any{"status": "completed"}})
 	var gotText, gotResult bool
+	var text string
 	for !gotResult {
 		select {
 		case ev := <-s.Events():
-			if ev.Type == core.EventText && ev.Content == "hello" {
-				gotText = true
+			if ev.Type == core.EventText {
+				text += ev.Content
+				gotText = text == "hello"
 			}
 			if ev.Type == core.EventResult && ev.Done {
 				gotResult = true
@@ -267,7 +269,7 @@ func TestFakeT3ProtocolLifecycleAndPersistence(t *testing.T) {
 	}
 
 	f.permissionID = "request-1"
-	f.emit(map[string]any{"type": "runtime-request.updated", "payload": map[string]any{"id": f.permissionID, "kind": "shell", "status": "pending"}})
+	f.emit(map[string]any{"type": "turn-item.updated", "payload": map[string]any{"type": "approval_request", "requestId": f.permissionID, "requestKind": "command"}})
 	var permission core.Event
 	select {
 	case permission = <-s.Events():
@@ -277,7 +279,7 @@ func TestFakeT3ProtocolLifecycleAndPersistence(t *testing.T) {
 	if permission.Type != core.EventPermissionRequest || permission.RequestID != f.permissionID {
 		t.Fatalf("permission event = %+v", permission)
 	}
-	if _, ok := sess.(core.PermissionApprovalAll); ok {
+	if c, ok := sess.(core.PermissionApprovalAll); !ok || c.SupportsPermissionApprovalAll() {
 		t.Fatal("T3 must expose allow-once only")
 	}
 	if err := s.RespondPermission(f.permissionID, core.PermissionResult{Behavior: "allow"}); err != nil {

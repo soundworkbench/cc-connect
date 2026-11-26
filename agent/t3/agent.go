@@ -2,7 +2,9 @@ package t3
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -181,11 +183,14 @@ type Session struct {
 	permissions map[string]bool
 	turnMu      sync.Mutex
 	turnOpen    bool
+	runID       string
+	itemMu      sync.Mutex
+	itemText    map[string]string
 }
 
 func newSession(parent context.Context, a *Agent, id string) (*Session, error) {
 	ctx, cancel := context.WithCancel(parent)
-	s := &Session{agent: a, ctx: ctx, cancel: cancel, pending: map[string]*pending{}, events: make(chan core.Event, 256), reconnect: make(chan struct{}, 1), permissions: map[string]bool{}}
+	s := &Session{agent: a, ctx: ctx, cancel: cancel, pending: map[string]*pending{}, events: make(chan core.Event, 256), reconnect: make(chan struct{}, 1), permissions: map[string]bool{}, runID: randomID(), itemText: map[string]string{}}
 	if id != "" {
 		s.threadID.Store(id)
 	}
@@ -208,7 +213,7 @@ func (s *Session) CurrentSessionID() string {
 }
 func (s *Session) Events() <-chan core.Event { return s.events }
 func (s *Session) Alive() bool               { return !s.closed.Load() }
-func (s *Session) nextID() string            { n := s.next.Add(1); return fmt.Sprintf("cc-t3-%d", n) }
+func (s *Session) nextID() string            { n := s.next.Add(1); return fmt.Sprintf("cc-t3-%s-%d", s.runID, n) }
 func (s *Session) dial() (*websocket.Conn, error) {
 	server := s.agent.server
 	base := server
@@ -332,11 +337,18 @@ func (s *Session) handleEvent(b []byte) {
 	var env struct {
 		Kind     string          `json:"kind"`
 		Sequence uint64          `json:"sequence"`
+		Snapshot uint64          `json:"snapshotSequence"`
 		Event    json.RawMessage `json:"event"`
 		Type     string          `json:"type"`
 		Payload  json.RawMessage `json:"payload"`
 	}
 	if json.Unmarshal(b, &env) != nil {
+		return
+	}
+	if env.Kind == "snapshot" {
+		s.seqMu.Lock()
+		s.sequence = max(s.sequence, env.Snapshot)
+		s.seqMu.Unlock()
 		return
 	}
 	if env.Sequence > 0 {
@@ -380,17 +392,6 @@ func (s *Session) handleEvent(b []byte) {
 		}
 		return
 	}
-	if e.Type == "runtime-request.updated" {
-		var p struct {
-			ID     string `json:"id"`
-			Kind   string `json:"kind"`
-			Status string `json:"status"`
-		}
-		if json.Unmarshal(e.Payload, &p) == nil && p.Status == "pending" {
-			s.emit(core.Event{Type: core.EventPermissionRequest, RequestID: p.ID, ToolName: p.Kind})
-		}
-		return
-	}
 }
 func (s *Session) emitItem(payload, item json.RawMessage) {
 	raw := item
@@ -398,11 +399,15 @@ func (s *Session) emitItem(payload, item json.RawMessage) {
 		raw = payload
 	}
 	var v struct {
+		ID        string `json:"id"`
+		Kind      string `json:"requestKind"`
 		Type      string `json:"type"`
 		Text      string `json:"text"`
 		ToolName  string `json:"toolName"`
 		RequestID string `json:"requestId"`
-		Reason    string `json:"reason"`
+		Failure   struct {
+			Message string `json:"message"`
+		} `json:"failure"`
 		Prompt    string `json:"prompt"`
 		Streaming bool   `json:"streaming"`
 	}
@@ -411,7 +416,14 @@ func (s *Session) emitItem(payload, item json.RawMessage) {
 	}
 	switch v.Type {
 	case "assistant_message":
-		s.emit(core.Event{Type: core.EventText, Content: v.Text, Done: !v.Streaming})
+		// T3 sends the whole text on every update; the engine appends, so forward the new part.
+		s.itemMu.Lock()
+		delta := strings.TrimPrefix(v.Text, s.itemText[v.ID])
+		s.itemText[v.ID] = v.Text
+		s.itemMu.Unlock()
+		if delta != "" {
+			s.emit(core.Event{Type: core.EventText, Content: delta})
+		}
 	case "reasoning":
 		s.emit(core.Event{Type: core.EventThinking, Content: v.Text})
 	case "command_execution":
@@ -419,11 +431,15 @@ func (s *Session) emitItem(payload, item json.RawMessage) {
 	case "dynamic_tool":
 		s.emit(core.Event{Type: core.EventToolUse, ToolName: v.ToolName, ToolInput: "tool call"})
 	case "approval_request":
-		s.emit(core.Event{Type: core.EventPermissionRequest, RequestID: v.RequestID, ToolName: v.ToolName, Content: v.Prompt})
+		s.permMu.Lock()
+		seen := s.permissions[v.RequestID]
+		s.permissions[v.RequestID] = true
+		s.permMu.Unlock()
+		if !seen {
+			s.emit(core.Event{Type: core.EventPermissionRequest, RequestID: v.RequestID, ToolName: v.Kind, ToolInput: v.Prompt})
+		}
 	case "error":
-		s.emit(core.Event{Type: core.EventError, Error: errors.New(v.Reason)})
-	case "run_interrupt_result":
-		s.emit(core.Event{Type: core.EventResult, Content: v.Text, Done: true})
+		s.emit(core.Event{Type: core.EventError, Error: errors.New("t3: " + v.Failure.Message)})
 	}
 }
 func (s *Session) emit(ev core.Event) {
@@ -455,7 +471,7 @@ func (s *Session) request(ctx context.Context, tag string, payload any, stream b
 	s.pendingMu.Lock()
 	s.pending[id] = p
 	s.pendingMu.Unlock()
-	b, _ := json.Marshal(map[string]any{"_tag": "Request", "id": id, "tag": tag, "payload": payload})
+	b, _ := json.Marshal(map[string]any{"_tag": "Request", "id": id, "tag": tag, "payload": payload, "headers": []any{}})
 	s.writeMu.Lock()
 	err := c.WriteMessage(websocket.TextMessage, b)
 	s.writeMu.Unlock()
@@ -472,7 +488,7 @@ func (s *Session) await(ctx context.Context, p *pending, id string) (json.RawMes
 	select {
 	case ch := <-p.ch:
 		if len(ch.Error) > 0 {
-			return nil, fmt.Errorf("t3: rpc failed")
+			return nil, fmt.Errorf("t3: rpc failed: %s", errDetail(ch.Error))
 		}
 		if len(ch.Values) > 0 {
 			return ch.Values[0], nil
@@ -484,7 +500,7 @@ func (s *Session) await(ctx context.Context, p *pending, id string) (json.RawMes
 			}
 			if json.Unmarshal(ch.Exit, &exit) == nil {
 				if exit.Tag == "Failure" {
-					return nil, errors.New("t3: rpc failed")
+					return nil, fmt.Errorf("t3: rpc failed: %s", errDetail(ch.Exit))
 				}
 				return exit.Value, nil
 			}
@@ -499,7 +515,11 @@ func (s *Session) call(ctx context.Context, tag string, payload any) (json.RawMe
 	if e != nil {
 		return nil, e
 	}
-	return s.await(ctx, p, id)
+	out, err := s.await(ctx, p, id)
+	if err != nil {
+		err = fmt.Errorf("%s: %w", tag, err)
+	}
+	return out, err
 }
 func (s *Session) resubscribe() error {
 	id := s.CurrentSessionID()
@@ -528,12 +548,14 @@ func (s *Session) subscribe(ctx context.Context, id string) (*pending, error) {
 				for _, v := range ch.Values {
 					s.handleEvent(v)
 				}
+				if ch.Tag == "Chunk" {
+					s.ack(rid)
+				}
 			case <-s.ctx.Done():
 				return
 			}
 		}
 	}()
-	_ = rid
 	return p, nil
 }
 func (s *Session) createThread(ctx context.Context) error {
@@ -572,7 +594,7 @@ func (s *Session) Send(prompt, messageID string, _ []core.ImageAttachment, _ []c
 	s.turnMu.Lock()
 	s.turnOpen = true
 	s.turnMu.Unlock()
-	payload := map[string]any{"type": "message.dispatch", "commandId": s.nextID(), "threadId": id, "messageId": messageID, "text": prompt, "attachments": []any{}, "dispatchMode": map[string]any{"type": "queue_after_active"}}
+	payload := map[string]any{"type": "message.dispatch", "createdBy": "user", "creationSource": "web", "commandId": s.nextID(), "threadId": id, "messageId": messageID, "text": prompt, "attachments": []any{}, "dispatchMode": map[string]any{"type": "queue_after_active"}}
 	_, e := s.call(s.ctx, "orchestration.dispatchCommand", payload)
 	return e
 }
@@ -610,3 +632,55 @@ func (s *Session) Close() error {
 
 var _ core.AgentSession = (*Session)(nil)
 var _ core.AgentSessionCanceller = (*Session)(nil)
+
+// errDetail returns T3's error text only, never the whole payload.
+func errDetail(raw json.RawMessage) string {
+	var exit struct {
+		Cause []struct {
+			Defect any `json:"defect"`
+			Error  struct {
+				Tag     string `json:"_tag"`
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"cause"`
+	}
+	if json.Unmarshal(raw, &exit) == nil {
+		for _, c := range exit.Cause {
+			if c.Error.Tag != "" || c.Error.Message != "" {
+				return strings.TrimSpace(c.Error.Tag + " " + c.Error.Message)
+			}
+			if d, ok := c.Defect.(string); ok {
+				return d
+			}
+		}
+	}
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		return plain
+	}
+	return "no reason given"
+}
+
+func randomID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// ack releases the next chunk of a streamed RPC; the server waits for it.
+func (s *Session) ack(requestID string) {
+	s.connMu.RLock()
+	c := s.conn
+	s.connMu.RUnlock()
+	if c == nil {
+		return
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if err := c.WriteMessage(websocket.TextMessage, mustJSON(map[string]any{"_tag": "Ack", "requestId": requestID})); err != nil {
+		slog.Warn("t3: ack stream chunk", "error", err)
+	}
+}
+
+// SupportsPermissionApprovalAll hides "allow all": the relay only approves once.
+func (s *Session) SupportsPermissionApprovalAll() bool { return false }
