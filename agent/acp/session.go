@@ -38,8 +38,9 @@ type acpSession struct {
 
 	sendMu sync.Mutex
 
-	permMu   sync.Mutex
-	permByID map[string]permState
+	permMu          sync.Mutex
+	permByID        map[string]permState
+	preferAllowOnce bool
 
 	toolInputMu   sync.Mutex
 	toolInputByID map[string]string // toolCallId -> summarized tool input
@@ -69,11 +70,6 @@ type acpSession struct {
 	callbacks sessionCallbacks // may be nil (tests, integration harness)
 }
 
-// ACP permission options are per-request. A persistent approve-all choice
-// would bypass the server's allow_once/allow_always distinction, so the
-// bridge keeps asking for every request.
-func (*acpSession) SupportsPermissionApprovalAll() bool { return false }
-
 type permState struct {
 	RPCID   json.RawMessage
 	Options []permissionOption
@@ -99,6 +95,7 @@ type acpSessionConfig struct {
 	// initialThoughtLevel is applied the same way as initialModel, using the
 	// `thought_level` config option that some agents publish (CodeBuddy).
 	initialThoughtLevel string
+	preferAllowOnce     bool
 	callbacks           sessionCallbacks // may be nil
 }
 
@@ -117,14 +114,15 @@ func newACPSession(ctx context.Context, cfg acpSessionConfig) (*acpSession, erro
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &acpSession{
-		workDir:       absWorkDir,
-		events:        make(chan core.Event, 128),
-		ctx:           sessionCtx,
-		cancel:        cancel,
-		permByID:      make(map[string]permState),
-		toolInputByID: make(map[string]string),
-		acpSessID:     cfg.resumeSessionID,
-		callbacks:     cfg.callbacks,
+		workDir:         absWorkDir,
+		events:          make(chan core.Event, 128),
+		ctx:             sessionCtx,
+		cancel:          cancel,
+		permByID:        make(map[string]permState),
+		toolInputByID:   make(map[string]string),
+		acpSessID:       cfg.resumeSessionID,
+		callbacks:       cfg.callbacks,
+		preferAllowOnce: cfg.preferAllowOnce,
 	}
 	s.alive.Store(true)
 
@@ -1057,7 +1055,7 @@ func (s *acpSession) RespondPermission(requestID string, result core.PermissionR
 	}
 
 	allow := strings.EqualFold(result.Behavior, "allow")
-	optID := pickPermissionOptionID(allow, st.Options)
+	optID := pickPermissionOptionID(allow, st.Options, s.preferAllowOnce)
 	if allow && optID == "" {
 		slog.Warn("acp: allow requested but agent sent no options", "request_id", requestID)
 		return s.tr.respondError(st.RPCID, -32603, "no permission options from agent")

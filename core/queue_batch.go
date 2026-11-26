@@ -302,13 +302,21 @@ func (e *Engine) batchContent(messages []queuedMessage) string {
 	return b.String()
 }
 
-func (e *Engine) queuedBatchSize(messages []queuedMessage) int {
+func (e *Engine) queuedBatchSize(messages []queuedMessage, session AgentSession) int {
 	if !e.queueBatch.Enabled || !batchable(messages[0]) {
 		return 1
 	}
+	routeOrigins := false
+	if capability, ok := session.(TurnOriginRouter); ok {
+		routeOrigins = capability.RoutesByTurnOrigin()
+	}
+	human := isHumanQueuedTurn(messages[0])
 	n := 1
 	for n < len(messages) && n < e.queueBatch.MaxMessages {
 		if !batchable(messages[n]) {
+			break
+		}
+		if routeOrigins && isHumanQueuedTurn(messages[n]) != human {
 			break
 		}
 		if utf8.RuneCountInString(e.batchContent(messages[:n+1])) > e.queueBatch.MaxChars {

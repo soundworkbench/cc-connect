@@ -162,6 +162,10 @@ type fakeSession struct {
 
 func (s *fakeSession) Send(prompt, _ string, _ []core.ImageAttachment, _ []core.FileAttachment) error {
 	s.mu.Lock()
+	if !s.alive {
+		s.mu.Unlock()
+		return errors.New("session process is not running")
+	}
 	s.sent = append(s.sent, prompt)
 	s.mu.Unlock()
 	last := prompt
@@ -342,6 +346,65 @@ func TestACPHumanOnlyRoutesAutomationToClaude(t *testing.T) {
 	turn(t, s, "another scheduled task")
 	if len(cc.startedWith()) != 2 || len(acp.startedWith()) != 1 {
 		t.Fatalf("later automation starts: cc=%v acp=%v", cc.startedWith(), acp.startedWith())
+	}
+}
+
+func TestDeadInnerSendDoesNotRestartOrWriteClosedEvents(t *testing.T) {
+	r, cc, _ := newTestRouter(t, "claude-opus-5-5")
+	s := start(t, r, "")
+	_ = cc.lastSession().Close()
+	select {
+	case _, ok := <-s.Events():
+		if ok {
+			t.Fatal("session events stayed open after inner exit")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("session events did not close after inner exit")
+	}
+	if err := s.Send("queued", "", nil, nil); err == nil {
+		t.Fatal("send after inner exit unexpectedly succeeded")
+	}
+	if got := len(cc.startedWith()); got != 1 {
+		t.Fatalf("dead inner was restarted, starts=%v", cc.startedWith())
+	}
+}
+
+func TestCloseDuringLazyStartClosesReturnedInner(t *testing.T) {
+	r, _, acp := newTestRouter(t, "gemini-4-neon")
+	r.acpHumanOnly = true
+	acp.failStart = func(string) error {
+		time.Sleep(300 * time.Millisecond)
+		return nil
+	}
+	s := start(t, r, "")
+	s.(core.TurnOriginSetter).SetTurnHuman(true)
+	done := make(chan error, 1)
+	go func() { done <- s.Send("jason", "", nil, nil) }()
+	time.Sleep(100 * time.Millisecond)
+	_ = s.Close()
+	if err := <-done; err == nil {
+		t.Fatal("send succeeded after session close during lazy start")
+	}
+	if acp.lastSession().Alive() {
+		t.Fatal("lazy-started ACP session leaked after close")
+	}
+}
+
+func TestFirstAutomatedTurnDoesNotAnnounceShellSwitch(t *testing.T) {
+	r, _, _ := newTestRouter(t, "gemini-4-neon")
+	r.acpHumanOnly = true
+	s := start(t, r, "")
+	s.(core.TurnOriginSetter).SetTurnHuman(false)
+	if notices := turn(t, s, "cron job"); len(notices) != 0 {
+		t.Fatalf("automated turn announced a shell switch: %v", notices)
+	}
+}
+
+func TestNormalACPStillAllowsPersistentApproval(t *testing.T) {
+	r, _, _ := newTestRouter(t, "gemini-4-neon")
+	s := start(t, r, "")
+	if capability, ok := s.(core.PermissionApprovalAll); !ok || !capability.SupportsPermissionApprovalAll() {
+		t.Fatal("normal ACP model_router session lost persistent approval")
 	}
 }
 

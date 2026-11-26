@@ -211,7 +211,7 @@ func (e *Engine) popQueuedLocked(state *interactiveState, batch bool) (queuedMes
 	old := state.pendingMessages
 	n := 1
 	if batch {
-		n = e.queuedBatchSize(old)
+		n = e.queuedBatchSize(old, state.agentSession)
 	}
 	q := e.mergeQueuedMessages(old[:n])
 	state.pendingMessages = old[n:]

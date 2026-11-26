@@ -3,6 +3,7 @@ package modelrouter
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ type session struct {
 	once       sync.Once
 	outOnce    sync.Once
 	relayWG    sync.WaitGroup
+	relayStop  chan struct{}
 	startMu    sync.Mutex
 
 	mu            sync.Mutex
@@ -38,6 +40,7 @@ type session struct {
 	turnHumanSet  bool
 	preserveShell bool
 	closed        bool
+	ended         bool
 }
 
 func (r *Agent) wrap(inner core.AgentSession, th *thread, shell string, h *handoff, ctx context.Context) core.AgentSession {
@@ -72,6 +75,14 @@ func (s *session) setCompactCommand(shell string) {
 }
 
 func (s *session) startRelay(inner core.AgentSession) {
+	s.mu.Lock()
+	s.startRelayLocked(inner)
+	s.mu.Unlock()
+}
+
+func (s *session) startRelayLocked(inner core.AgentSession) {
+	stop := make(chan struct{})
+	s.relayStop = stop
 	s.relayWG.Add(1)
 	go func() {
 		defer s.relayWG.Done()
@@ -87,6 +98,9 @@ func (s *session) startRelay(inner core.AgentSession) {
 				if !ok {
 					s.mu.Lock()
 					current := s.inner == inner && !s.closed
+					if current {
+						s.ended = true
+					}
 					s.mu.Unlock()
 					if current {
 						s.closeOut()
@@ -98,6 +112,8 @@ func (s *session) startRelay(inner core.AgentSession) {
 			case ev := <-s.inject:
 				s.forward(ev)
 			case <-s.done:
+				return
+			case <-stop:
 				return
 			}
 		}
@@ -198,16 +214,25 @@ func (s *session) ensureInner(target string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("model_router: session is closed")
 	}
-	if s.inner != nil && s.shell == target && s.inner.Alive() {
+	if s.ended {
+		s.mu.Unlock()
+		return fmt.Errorf("model_router: shell session ended")
+	}
+	if s.inner != nil && s.shell == target {
 		s.mu.Unlock()
 		return nil
 	}
 	old := s.inner
+	oldRelayStop := s.relayStop
 	s.inner = nil
+	s.relayStop = nil
 	s.mu.Unlock()
+	if oldRelayStop != nil {
+		close(oldRelayStop)
+	}
 	if old != nil {
 		_ = old.Close()
-		s.relayWG.Wait()
+		s.waitRelay()
 	}
 
 	snap := s.r.store.snapshot(s.th)
@@ -232,14 +257,32 @@ func (s *session) ensureInner(target string) error {
 		return err
 	}
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = inner.Close()
+		return fmt.Errorf("model_router: session is closed")
+	}
 	s.inner = inner
 	s.shell = target
 	s.pending = h
 	s.setCompactCommand(target)
+	s.startRelayLocked(inner)
 	s.mu.Unlock()
 	s.noteID(inner.CurrentSessionID())
-	s.startRelay(inner)
 	return nil
+}
+
+func (s *session) waitRelay() {
+	done := make(chan struct{})
+	go func() {
+		s.relayWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		slog.Warn("model_router: relay did not stop before timeout")
+	}
 }
 
 func (s *session) SetTurnHuman(human bool) {
@@ -349,13 +392,18 @@ func (s *session) Close() error {
 		s.mu.Lock()
 		s.closed = true
 		inner := s.inner
+		relayStop := s.relayStop
 		s.inner = nil
+		s.relayStop = nil
 		s.mu.Unlock()
 		close(s.done)
+		if relayStop != nil {
+			close(relayStop)
+		}
 		if inner != nil {
 			err = inner.Close()
 		}
-		s.relayWG.Wait()
+		s.waitRelay()
 		s.closeOut()
 	})
 	return err
@@ -363,12 +411,33 @@ func (s *session) Close() error {
 
 func (s *session) SupportsPermissionApprovalAll() bool {
 	s.mu.Lock()
-	inner, shell := s.inner, s.shell
+	inner, shell, modelShell := s.inner, s.shell, s.modelShell
 	s.mu.Unlock()
+	if !s.r.acpHumanOnly || modelShell != shellACP {
+		return true
+	}
 	if capability, ok := inner.(core.PermissionApprovalAll); ok {
 		return capability.SupportsPermissionApprovalAll()
 	}
 	return shell != shellACP
+}
+
+func (s *session) RoutesByTurnOrigin() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.r.acpHumanOnly && s.modelShell == shellACP
+}
+
+func (s *session) HasBackgroundWork() bool {
+	r, ok := s.currentInner().(core.BackgroundWorkReporter)
+	return ok && r.HasBackgroundWork()
+}
+
+func (s *session) RunningTasks() int {
+	if r, ok := s.currentInner().(core.RunningTasksReporter); ok {
+		return r.RunningTasks()
+	}
+	return 0
 }
 
 type claudeShellSession struct{ *session }
@@ -399,16 +468,6 @@ func (c *claudeShellSession) SteerAsync(prompt, messageID string, images []core.
 	return receipt, err
 }
 
-func (c *claudeShellSession) HasBackgroundWork() bool {
-	r, ok := c.currentInner().(core.BackgroundWorkReporter)
-	return ok && r.HasBackgroundWork()
-}
-func (c *claudeShellSession) RunningTasks() int {
-	if r, ok := c.currentInner().(core.RunningTasksReporter); ok {
-		return r.RunningTasks()
-	}
-	return 0
-}
 func (c *claudeShellSession) StopTask(taskID string) error {
 	if t, ok := c.currentInner().(core.TaskStopper); ok {
 		return t.StopTask(taskID)
@@ -485,8 +544,8 @@ var (
 	_ core.AgentSession             = (*session)(nil)
 	_ core.AgentSessionSteerer      = (*claudeShellSession)(nil)
 	_ core.AgentSessionAsyncSteerer = (*claudeShellSession)(nil)
-	_ core.BackgroundWorkReporter   = (*claudeShellSession)(nil)
-	_ core.RunningTasksReporter     = (*claudeShellSession)(nil)
+	_ core.BackgroundWorkReporter   = (*session)(nil)
+	_ core.RunningTasksReporter     = (*session)(nil)
 	_ core.TaskStopper              = (*claudeShellSession)(nil)
 	_ core.InputFailureReporter     = (*claudeShellSession)(nil)
 	_ core.CarriedContextReporter   = (*claudeShellSession)(nil)
@@ -499,5 +558,6 @@ var (
 	_ core.LiveModeSwitcher         = (*acpShellSession)(nil)
 	_ core.TurnOriginSetter         = (*session)(nil)
 	_ core.TurnShellPreserver       = (*session)(nil)
+	_ core.TurnOriginRouter         = (*session)(nil)
 	_ core.PermissionApprovalAll    = (*session)(nil)
 )

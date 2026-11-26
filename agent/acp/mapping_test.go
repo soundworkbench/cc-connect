@@ -214,8 +214,18 @@ func TestPickPermissionOptionIDPrefersAllowOnce(t *testing.T) {
 		{OptionID: "always", Kind: "allow_always"},
 		{OptionID: "once", Kind: "allow_once"},
 	}
-	if got := pickPermissionOptionID(true, opts); got != "once" {
+	if got := pickPermissionOptionID(true, opts, true); got != "once" {
 		t.Fatalf("allow option = %q, want allow_once", got)
+	}
+}
+
+func TestPickPermissionOptionIDKeepsPersistentAllowByDefault(t *testing.T) {
+	opts := []permissionOption{
+		{OptionID: "always", Kind: "allow_always"},
+		{OptionID: "once", Kind: "allow_once"},
+	}
+	if got := pickPermissionOptionID(true, opts); got != "always" {
+		t.Fatalf("allow option = %q, want allow_always", got)
 	}
 }
 

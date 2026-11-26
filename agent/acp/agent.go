@@ -33,7 +33,8 @@ type Agent struct {
 	// mode is the pending permission mode to apply to new sessions.
 	// When set, StartSession applies it via session/set_mode right after
 	// session/new. Empty means "use whatever the agent selects by default".
-	mode string
+	mode            string
+	preferAllowOnce bool
 
 	// listUnsupported caches a negative result after we probe the agent
 	// for sessionCapabilities.list once. Eliminates spawn cost on
@@ -122,6 +123,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	}
 	mode, _ := opts["mode"].(string)
 	mode = strings.TrimSpace(mode)
+	preferAllowOnce, _ := opts["prefer_allow_once"].(bool)
 
 	// reasoning_effort reuses the option name the Claude Code adapter uses,
 	// so a project can switch between the two without rewriting config.
@@ -131,15 +133,16 @@ func New(opts map[string]any) (core.Agent, error) {
 	effort = strings.TrimSpace(effort)
 
 	return &Agent{
-		workDir:      workDir,
-		cmd:          cmdStr,
-		cliExtraArgs: cliExtraArgs,
-		args:         args,
-		staticEnv:    staticEnv,
-		extraEnv:     extra,
-		authMethod:   authMethod,
-		displayName:  displayName,
-		mode:         mode,
+		workDir:         workDir,
+		cmd:             cmdStr,
+		cliExtraArgs:    cliExtraArgs,
+		args:            args,
+		staticEnv:       staticEnv,
+		extraEnv:        extra,
+		authMethod:      authMethod,
+		displayName:     displayName,
+		mode:            mode,
+		preferAllowOnce: preferAllowOnce,
 
 		thoughtLevelOverride: effort,
 	}, nil
@@ -251,6 +254,9 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
 	if a.displayName != "" {
 		opts["display_name"] = a.displayName
 	}
+	if a.preferAllowOnce {
+		opts["prefer_allow_once"] = true
+	}
 	return opts
 }
 
@@ -289,6 +295,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		initialMode:         pendingMode,
 		initialModel:        pendingModel,
 		initialThoughtLevel: pendingThought,
+		preferAllowOnce:     a.preferAllowOnce,
 		callbacks:           a,
 	})
 }

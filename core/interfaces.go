@@ -463,6 +463,13 @@ type TurnShellPreserver interface {
 	SetTurnShellCurrent()
 }
 
+// TurnOriginRouter is an optional capability for sessions whose shell choice
+// must follow the source of each queued turn. Queue batching stops at a
+// human/automation boundary when it is enabled.
+type TurnOriginRouter interface {
+	RoutesByTurnOrigin() bool
+}
+
 // PermissionApprovalAll is an optional capability for sessions whose backend
 // does not support a persistent "allow all" permission decision.
 type PermissionApprovalAll interface {

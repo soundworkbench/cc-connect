@@ -43,6 +43,30 @@ func TestQueueBatch_QueuedMessagesSendOnceInOrder(t *testing.T) {
 	}
 }
 
+type originRoutingTestSession struct {
+	*queuedLifecycleSession
+	route bool
+}
+
+func (s *originRoutingTestSession) RoutesByTurnOrigin() bool { return s.route }
+
+func TestQueueBatch_RoutesOriginsAtBoundary(t *testing.T) {
+	e, p, _ := batchEngine(t)
+	messages := []queuedMessage{
+		{content: "scheduled", source: "cron", scheduledPrompt: true, platform: p},
+		{content: "human one", source: "human", userID: "user", platform: p},
+		{content: "human two", source: "human", userID: "user", platform: p},
+	}
+	s := &originRoutingTestSession{queuedLifecycleSession: queueTestSession(), route: true}
+	if got := e.queuedBatchSize(messages, s); got != 1 {
+		t.Fatalf("origin-aware batch size = %d, want 1", got)
+	}
+	s.route = false
+	if got := e.queuedBatchSize(messages, s); got != 3 {
+		t.Fatalf("ordinary batch size = %d, want 3", got)
+	}
+}
+
 type batchDelivery struct {
 	prompt, id string
 	images     []ImageAttachment

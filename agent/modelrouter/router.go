@@ -69,6 +69,7 @@ type Agent struct {
 //
 // work_dir, run_as_user and run_as_env apply to both shells.
 func New(opts map[string]any) (core.Agent, error) {
+	acpHumanOnly, _ := opts["acp_human_only"].(bool)
 	ccOpts, err := shellOpts(opts, shellClaude)
 	if err != nil {
 		return nil, err
@@ -76,6 +77,9 @@ func New(opts map[string]any) (core.Agent, error) {
 	acpOpts, err := shellOpts(opts, shellACP)
 	if err != nil {
 		return nil, err
+	}
+	if acpHumanOnly {
+		acpOpts["prefer_allow_once"] = true
 	}
 	if v, ok := opts["stream_partial_text"]; ok {
 		if _, set := ccOpts["stream_partial_text"]; !set {
@@ -100,7 +104,7 @@ func New(opts map[string]any) (core.Agent, error) {
 	r := newRouter(cc, acp, stringList(opts["claude_models"]), strings.TrimSpace(model), openStore(dir))
 	r.state = map[string]any{"cc_data_dir": dataDir, "cc_project": project}
 	r.handoffMax = intOpt(opts["handoff_max_chars"], defaultHandoffChars)
-	r.acpHumanOnly, _ = opts["acp_human_only"].(bool)
+	r.acpHumanOnly = acpHumanOnly
 	r.handoffToACP = true
 	if v, ok := opts["handoff_to_acp"].(bool); ok {
 		r.handoffToACP = v
@@ -261,14 +265,15 @@ func (r *Agent) claude() core.Agent { return r.shells[shellClaude] }
 func (r *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
 	th := r.store.threadFor(sessionID, r.ownerOf(ctx, sessionID))
 	target := r.currentShell()
-	if r.store.snapshot(th).Active == "" {
-		r.store.setActive(th, target)
-	}
 	snap := r.store.snapshot(th)
-	from := snap.Active
 	if r.acpHumanOnly {
 		return r.wrap(nil, th, target, nil, ctx), nil
 	}
+	if snap.Active == "" {
+		r.store.setActive(th, target)
+		snap = r.store.snapshot(th)
+	}
+	from := snap.Active
 
 	if from == target {
 		inner, err := r.shells[target].StartSession(ctx, snap.IDs[target])
