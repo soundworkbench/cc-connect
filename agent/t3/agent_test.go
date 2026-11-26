@@ -943,3 +943,34 @@ func TestLaunchUsesProjectThatOwnsTheFolder(t *testing.T) {
 		t.Fatalf("launched in project %v", got)
 	}
 }
+
+func TestRuntimeModeAppliesToNewAndResumedThreads(t *testing.T) {
+	e := newEnv(t)
+	e.opts["runtime_mode"] = "full-access"
+	s := e.start(t, "")
+	th := s.CurrentSessionID()
+	launch := e.f.requestsOf("orchestration.launchThread")
+	if len(launch) != 1 || launch[0].Payload["runtimeMode"] != "full-access" {
+		t.Fatalf("launch = %+v", launch)
+	}
+	if got := e.f.dispatches("thread.runtime-mode.set"); len(got) != 0 {
+		t.Fatalf("new thread got an extra mode change: %+v", got)
+	}
+	_ = s.Close()
+
+	e.start(t, th)
+	set := e.f.dispatches("thread.runtime-mode.set")
+	if len(set) != 1 || set[0]["threadId"] != th || set[0]["runtimeMode"] != "full-access" {
+		t.Fatalf("resume mode change = %+v", set)
+	}
+
+	e.opts["runtime_mode"] = "yolo"
+	if _, err := New(e.opts); err == nil {
+		t.Fatal("unknown runtime_mode accepted")
+	}
+	delete(e.opts, "runtime_mode")
+	a, _ := New(e.opts)
+	if m := a.(*Agent).runtimeMode; m != "approval-required" {
+		t.Fatalf("default runtime mode = %q", m)
+	}
+}

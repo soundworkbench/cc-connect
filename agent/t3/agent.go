@@ -26,6 +26,7 @@ func init() { core.RegisterAgent("t3", New) }
 
 type Agent struct {
 	server, credential, provider, model, workDir, dataDir string
+	runtimeMode                                           string
 	mu                                                    sync.Mutex
 	sessions                                              map[*Session]struct{}
 }
@@ -56,7 +57,14 @@ func (a *Agent) modelSelection() map[string]any {
 
 func New(opts map[string]any) (core.Agent, error) {
 	get := func(k string) string { v, _ := opts[k].(string); return strings.TrimSpace(v) }
-	a := &Agent{server: get("server"), provider: get("provider"), model: get("model"), workDir: get("work_dir"), dataDir: get("cc_data_dir"), sessions: map[*Session]struct{}{}}
+	a := &Agent{server: get("server"), provider: get("provider"), model: get("model"), workDir: get("work_dir"), dataDir: get("cc_data_dir"), runtimeMode: get("runtime_mode"), sessions: map[*Session]struct{}{}}
+	switch a.runtimeMode {
+	case "":
+		a.runtimeMode = "approval-required"
+	case "approval-required", "auto-accept-edits", "full-access":
+	default:
+		return nil, fmt.Errorf("t3: runtime_mode %q is not one of approval-required, auto-accept-edits, full-access", a.runtimeMode)
+	}
 	if a.server == "" {
 		a.server = "127.0.0.1:6768"
 	}
@@ -147,7 +155,14 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 			_ = s.Close()
 			return nil, err
 		}
-	} else if err := s.subscribe(ctx, sessionID, true); err != nil {
+	} else if err := s.subscribe(ctx, sessionID, true); err == nil {
+		// The thread may have been started under another runtime mode, by an
+		// older configuration or in the T3 app; bring it to the configured one.
+		if err := s.setRuntimeMode(ctx); err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+	} else {
 		if !errors.Is(err, errThreadMissing) {
 			_ = s.Close()
 			return nil, err
@@ -920,7 +935,7 @@ func (s *Session) createThread(ctx context.Context) error {
 			slog.Debug("t3: create project", "error", err)
 		}
 	}
-	payload := map[string]any{"commandId": s.nextID(), "projectId": projectID, "title": "cc-connect", "modelSelection": s.agent.modelSelection(), "runtimeMode": "approval-required", "interactionMode": "default", "workspaceStrategy": map[string]any{"type": "root"}}
+	payload := map[string]any{"commandId": s.nextID(), "projectId": projectID, "title": "cc-connect", "modelSelection": s.agent.modelSelection(), "runtimeMode": s.agent.runtimeMode, "interactionMode": "default", "workspaceStrategy": map[string]any{"type": "root"}}
 	raw, e := s.call(ctx, "orchestration.launchThread", payload)
 	if e != nil {
 		return e
@@ -987,6 +1002,13 @@ func (s *Session) CancelTurn() error {
 	payload := map[string]any{"type": "thread.stop", "commandId": s.nextID(), "threadId": id, "reason": "user"}
 	_, e := s.call(s.ctx, "orchestration.dispatchCommand", payload)
 	return e
+}
+func (s *Session) setRuntimeMode(ctx context.Context) error {
+	payload := map[string]any{"type": "thread.runtime-mode.set", "commandId": s.nextID(), "threadId": s.CurrentSessionID(), "runtimeMode": s.agent.runtimeMode}
+	if _, err := s.call(ctx, "orchestration.dispatchCommand", payload); err != nil {
+		return fmt.Errorf("t3: set runtime mode: %w", err)
+	}
+	return nil
 }
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
