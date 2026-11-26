@@ -60,7 +60,7 @@ func (r *Agent) wrap(inner core.AgentSession, th *thread, shell string, h *hando
 	if shell == shellClaude {
 		return &claudeShellSession{s}
 	}
-	if shell == shellACP {
+	if shell == shellACP || shell == shellT3 {
 		return &acpShellSession{s}
 	}
 	return s
@@ -197,11 +197,11 @@ func (s *session) requestedShell() string {
 		s.preserveShell = false
 		return s.shell
 	}
-	if !s.r.acpHumanOnly || s.modelShell != shellACP {
+	if !s.r.acpHumanOnly || s.modelShell != s.r.googleShell {
 		return s.shell
 	}
 	if s.turnHumanSet && s.turnHuman {
-		return shellACP
+		return s.r.googleShell
 	}
 	return shellClaude
 }
@@ -413,25 +413,25 @@ func (s *session) SupportsPermissionApprovalAll() bool {
 	s.mu.Lock()
 	inner, shell, modelShell := s.inner, s.shell, s.modelShell
 	s.mu.Unlock()
-	if !s.r.acpHumanOnly || modelShell != shellACP {
+	if !s.r.acpHumanOnly || modelShell != s.r.googleShell {
 		return true
 	}
 	if capability, ok := inner.(core.PermissionApprovalAll); ok {
 		return capability.SupportsPermissionApprovalAll()
 	}
-	return shell != shellACP
+	return shell != s.r.googleShell
 }
 
 // RoutesByTurnOrigin lets queue batching split human and automated turns
 // before any session exists.
 func (r *Agent) RoutesByTurnOrigin() bool {
-	return r.acpHumanOnly && r.currentShell() == shellACP
+	return r.acpHumanOnly && r.currentShell() == r.googleShell
 }
 
 func (s *session) RoutesByTurnOrigin() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.r.acpHumanOnly && s.modelShell == shellACP
+	return s.r.acpHumanOnly && s.modelShell == s.r.googleShell
 }
 
 func (s *session) HasBackgroundWork() bool {

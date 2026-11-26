@@ -24,6 +24,7 @@ import (
 const (
 	shellClaude = "claudecode"
 	shellACP    = "acp"
+	shellT3     = "t3"
 )
 
 func init() {
@@ -48,6 +49,7 @@ type Agent struct {
 	handoffMax   int            // size limit of a handoff, in characters
 	acpHumanOnly bool           // automated turns use Claude when the model is ACP
 	handoffToACP bool           // include handoff text when entering the ACP shell
+	googleShell  string         // shell for non-Claude models, defaults to ACP
 
 	mu        sync.Mutex
 	providers []core.ProviderConfig
@@ -74,12 +76,18 @@ func New(opts map[string]any) (core.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	acpOpts, err := shellOpts(opts, shellACP)
+	googleShell := shellACP
+	if v, ok := opts["google_shell"].(string); ok && strings.EqualFold(strings.TrimSpace(v), shellT3) {
+		googleShell = shellT3
+	}
+	googleOpts, err := shellOpts(opts, googleShell)
 	if err != nil {
 		return nil, err
 	}
 	if acpHumanOnly {
-		acpOpts["prefer_allow_once"] = true
+		if googleShell == shellACP {
+			googleOpts["prefer_allow_once"] = true
+		}
 	}
 	if v, ok := opts["stream_partial_text"]; ok {
 		if _, set := ccOpts["stream_partial_text"]; !set {
@@ -90,9 +98,9 @@ func New(opts map[string]any) (core.Agent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("model_router: claudecode: %w", err)
 	}
-	acp, err := core.CreateAgent(shellACP, acpOpts)
+	google, err := core.CreateAgent(googleShell, googleOpts)
 	if err != nil {
-		return nil, fmt.Errorf("model_router: acp: %w", err)
+		return nil, fmt.Errorf("model_router: %s: %w", googleShell, err)
 	}
 	dataDir, _ := opts["cc_data_dir"].(string)
 	project, _ := opts["cc_project"].(string)
@@ -101,7 +109,15 @@ func New(opts map[string]any) (core.Agent, error) {
 		dir = filepath.Join(dataDir, "model_router", safeName(project))
 	}
 	model, _ := opts["model"].(string)
-	r := newRouter(cc, acp, stringList(opts["claude_models"]), strings.TrimSpace(model), openStore(dir))
+	r := newRouter(cc, google, stringList(opts["claude_models"]), strings.TrimSpace(model), openStore(dir))
+	r.googleShell = googleShell
+	if googleShell == shellT3 {
+		r.shells[shellT3] = google
+		r.names[shellT3] = displayName(google, "T3 Code")
+	}
+	if googleShell != shellACP {
+		r.sync()
+	}
 	r.state = map[string]any{"cc_data_dir": dataDir, "cc_project": project}
 	r.handoffMax = intOpt(opts["handoff_max_chars"], defaultHandoffChars)
 	r.acpHumanOnly = acpHumanOnly
@@ -127,6 +143,7 @@ func newRouter(cc, acp core.Agent, patterns []string, model string, st *store) *
 		activeIdx:    -1,
 		handoffMax:   defaultHandoffChars,
 		handoffToACP: true,
+		googleShell:  shellACP,
 		lastModel:    map[string]string{},
 		applied:      map[string]string{},
 	}
@@ -237,11 +254,17 @@ func (r *Agent) shellFor(model string) string {
 			return shellClaude
 		}
 	}
+	if r.googleShell != "" {
+		return r.googleShell
+	}
 	return shellACP
 }
 
 func (r *Agent) other(shell string) string {
 	if shell == shellClaude {
+		if r.googleShell != "" {
+			return r.googleShell
+		}
 		return shellACP
 	}
 	return shellClaude
@@ -341,7 +364,7 @@ func (r *Agent) handoffFor(ctx context.Context, th *thread, from, to string, res
 		entries = append(r.historyOf(ctx, from, snap.IDs[from], snap.Left[to], resumed), entries...)
 	}
 	text := buildHandoff(r.names[from], entries, resumed, handoffBudget(r.windowOf(to), r.handoffMax))
-	if to == shellACP && !r.handoffToACP {
+	if to == r.googleShell && !r.handoffToACP {
 		text = ""
 	}
 	key := core.MsgShellSwitched
@@ -496,7 +519,7 @@ func (r *Agent) AvailableModels(ctx context.Context) []core.ModelOption {
 	if ms, ok := r.claude().(core.ModelSwitcher); ok {
 		models = append(models, ms.AvailableModels(ctx)...)
 	}
-	if ms, ok := r.shells[shellACP].(core.ModelSwitcher); ok {
+	if ms, ok := r.shells[r.googleShell].(core.ModelSwitcher); ok {
 		models = r.appendACPModels(models, ms.AvailableModels(ctx))
 	}
 	return models
@@ -511,7 +534,7 @@ func (r *Agent) ConfiguredModels() []core.ModelOption {
 	if len(models) > 0 {
 		return models
 	}
-	if ms, ok := r.shells[shellACP].(core.ModelSwitcher); ok {
+	if ms, ok := r.shells[r.googleShell].(core.ModelSwitcher); ok {
 		// The ACP agent only reports what its last handshake listed.
 		models = r.appendACPModels(models, ms.AvailableModels(context.Background()))
 	}
@@ -520,7 +543,7 @@ func (r *Agent) ConfiguredModels() []core.ModelOption {
 
 func (r *Agent) appendACPModels(models, acp []core.ModelOption) []core.ModelOption {
 	for _, m := range acp {
-		if r.shellFor(m.Name) != shellACP || hasModel(models, m.Name) {
+		if r.shellFor(m.Name) != r.googleShell || hasModel(models, m.Name) {
 			continue
 		}
 		models = append(models, m)
@@ -813,7 +836,7 @@ func (r *Agent) GetRunAsEnv() []string {
 func (r *Agent) ListSessions(ctx context.Context) ([]core.AgentSessionInfo, error) {
 	var all []core.AgentSessionInfo
 	var errs []error
-	for _, name := range []string{shellClaude, shellACP} {
+	for _, name := range []string{shellClaude, r.googleShell} {
 		list, err := r.shells[name].ListSessions(ctx)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
