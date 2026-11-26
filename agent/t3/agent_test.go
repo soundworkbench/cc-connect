@@ -70,11 +70,15 @@ type fakeT3 struct {
 	conns     []*websocket.Conn
 	writeMu   map[*websocket.Conn]*sync.Mutex
 	requests  []fakeRequest
-	threads   map[string][]fakeLogged // thread id -> event log
-	byCommand map[string]string       // launch commandId -> thread id
-	subs      map[string]*fakeSub     // requestId -> live subscription
+	threads   map[string][]fakeLogged      // thread id -> event log
+	byCommand map[string]string            // launch commandId -> thread id
+	subs      map[string]*fakeSub          // requestId -> live subscription
+	runs      map[string]map[string]string // thread id -> run id -> status
 	nThreads  int
 	ticketErr int
+	// snapshotOnResume answers a resubscribe with a snapshot instead of a
+	// replay, as T3 does when too many events were missed.
+	snapshotOnResume bool
 }
 
 type fakeRequest struct {
@@ -99,7 +103,7 @@ type fakeSub struct {
 
 func newFakeT3(t *testing.T, credential string) *fakeT3 {
 	t.Helper()
-	f := &fakeT3{t: t, credential: credential, writeMu: map[*websocket.Conn]*sync.Mutex{}, threads: map[string][]fakeLogged{}, byCommand: map[string]string{}, subs: map[string]*fakeSub{}}
+	f := &fakeT3{t: t, credential: credential, writeMu: map[*websocket.Conn]*sync.Mutex{}, threads: map[string][]fakeLogged{}, byCommand: map[string]string{}, subs: map[string]*fakeSub{}, runs: map[string]map[string]string{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth/websocket-ticket", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -225,21 +229,29 @@ func (f *fakeT3) handleRPC(c *websocket.Conn, rpc, id string, p map[string]any) 
 		f.success(c, id, map[string]any{"threadId": thread})
 	case "orchestration.subscribeThread":
 		thread, _ := p["threadId"].(string)
-		after := uint64(p["afterSequence"].(float64))
+		afterRaw, resume := p["afterSequence"].(float64)
+		after := uint64(afterRaw)
 		f.mu.Lock()
 		log, ok := f.threads[thread]
+		snapshot := !resume || f.snapshotOnResume
+		var runs []any
+		for rid, st := range f.runs[thread] {
+			runs = append(runs, map[string]any{"id": rid, "ordinal": len(runs) + 1, "status": st})
+		}
 		f.mu.Unlock()
-		if !ok {
+		// 0.1.12: a snapshot request for a missing thread fails; a resume from a
+		// sequence just waits silently.
+		if !ok && !resume {
 			f.failError(c, id, "OrchestrationV2GetThreadProjectionError", "No orchestration projection exists for thread "+thread+".")
 			return
 		}
 		sub := &fakeSub{conn: c, id: id, thread: thread, queue: make(chan any, 256), acks: make(chan struct{}, 256), done: make(chan struct{})}
-		if after == 0 {
+		if snapshot {
 			var top uint64
 			if len(log) > 0 {
 				top = log[len(log)-1].seq
 			}
-			sub.queue <- map[string]any{"kind": "snapshot", "snapshotSequence": top, "projection": map[string]any{}}
+			sub.queue <- map[string]any{"kind": "snapshot", "snapshotSequence": top, "projection": map[string]any{"runs": runs}}
 		} else {
 			for _, l := range log {
 				if l.seq > after {
@@ -293,6 +305,13 @@ func (f *fakeT3) emit(thread string, event map[string]any) {
 		seq = log[len(log)-1].seq + 1
 	}
 	f.threads[thread] = append(log, fakeLogged{seq: seq, event: event})
+	if event["type"] == "run.updated" {
+		r := event["payload"].(map[string]any)
+		if f.runs[thread] == nil {
+			f.runs[thread] = map[string]string{}
+		}
+		f.runs[thread][r["id"].(string)] = r["status"].(string)
+	}
 	var subs []*fakeSub
 	for _, s := range f.subs {
 		if s.thread == thread {
@@ -345,6 +364,19 @@ func item(v map[string]any) map[string]any {
 
 func turn(id, node, status string) map[string]any {
 	return map[string]any{"type": "provider-turn.updated", "payload": map[string]any{"id": id, "nodeId": node, "status": status}}
+}
+
+func runUpdate(id, status string) map[string]any {
+	return map[string]any{"type": "run.updated", "runId": id, "payload": map[string]any{"id": id, "status": status}}
+}
+
+func errItem(run, id, msg string, retry bool) map[string]any {
+	v := map[string]any{"id": id, "type": "error", "status": "failed", "failure": map[string]any{"message": msg}}
+	if retry {
+		v["retry"] = map[string]any{"attempt": 1}
+		v["status"] = "running"
+	}
+	return map[string]any{"type": "turn-item.updated", "runId": run, "payload": v}
 }
 
 func waitFor(t *testing.T, what string, fn func() bool) {
@@ -426,6 +458,7 @@ func TestStreamingTurnMatchesRealProtocol(t *testing.T) {
 		t.Fatalf("dispatch mode = %v", d["dispatchMode"])
 	}
 	// T3 resends the whole text each update and updates one tool item twice.
+	e.f.emit(th, runUpdate("r1", "running"))
 	e.f.emit(th, item(map[string]any{"id": "r1", "type": "reasoning", "text": "think"}))
 	e.f.emit(th, item(map[string]any{"id": "r1", "type": "reasoning", "text": "thinking"}))
 	e.f.emit(th, item(map[string]any{"id": "a1", "type": "assistant_message", "text": "hel", "streaming": true}))
@@ -433,7 +466,8 @@ func TestStreamingTurnMatchesRealProtocol(t *testing.T) {
 	e.f.emit(th, item(map[string]any{"id": "c1", "type": "command_execution", "status": "completed", "input": "rm -rf /secret"}))
 	e.f.emit(th, item(map[string]any{"id": "a1", "type": "assistant_message", "text": "hello", "streaming": false}))
 	e.f.emit(th, turn("pt1", "n1", "completed"))
-	e.f.emit(th, turn("pt1", "n1", "completed")) // token usage update after the end
+	e.f.emit(th, runUpdate("r1", "completed"))
+	e.f.emit(th, runUpdate("r1", "completed")) // a later update of the finished run
 
 	var text, thinking string
 	var tools, results int
@@ -562,10 +596,24 @@ func TestStopEndsTurnOnce(t *testing.T) {
 	}
 	noEvent(t, s)
 
+	// /stop while the run is still starting: T3 writes no provider turn,
+	// only the interrupt result and the run's final status.
+	_ = s.Send("early", "m0", nil, nil)
+	e.f.emit(th, runUpdate("r0", "starting"))
+	_ = s.CancelTurn()
+	e.f.emit(th, item(map[string]any{"id": "x0", "type": "run_interrupt_result", "message": "stopped"}))
+	e.f.emit(th, runUpdate("r0", "interrupted"))
+	if ev := nextEvent(t, s); ev.Type != core.EventResult {
+		t.Fatalf("early stop end = %+v", ev)
+	}
+	noEvent(t, s)
+
 	_ = s.Send("long job", "m1", nil, nil)
+	e.f.emit(th, runUpdate("r1", "running"))
 	e.f.emit(th, item(map[string]any{"id": "a1", "type": "assistant_message", "text": "working"}))
 	_ = s.CancelTurn()
 	e.f.emit(th, turn("pt1", "n1", "interrupted"))
+	e.f.emit(th, runUpdate("r1", "interrupted"))
 	var results int
 	for results == 0 {
 		if ev := nextEvent(t, s); ev.Type == core.EventResult {
@@ -577,7 +625,7 @@ func TestStopEndsTurnOnce(t *testing.T) {
 	// The next message gets its own reply, not a leftover result.
 	_ = s.Send("again", "m2", nil, nil)
 	e.f.emit(th, item(map[string]any{"id": "a2", "type": "assistant_message", "text": "fresh"}))
-	e.f.emit(th, turn("pt2", "n2", "completed"))
+	e.f.emit(th, runUpdate("r2", "completed"))
 	if ev := nextEvent(t, s); ev.Type != core.EventText || ev.Content != "fresh" {
 		t.Fatalf("next turn = %+v", ev)
 	}
@@ -591,28 +639,52 @@ func TestErrorsEndTurnOnceWithReason(t *testing.T) {
 	s := e.start(t, "")
 	th := s.CurrentSessionID()
 
-	// Retried errors are transient and invisible.
-	e.f.emit(th, item(map[string]any{"id": "e0", "nodeId": "n1", "type": "error", "failure": map[string]any{"message": "overloaded"}, "retry": map[string]any{"attempt": 1}}))
+	// Retried errors are transient; the run then completes normally.
+	e.f.emit(th, runUpdate("r1", "running"))
+	e.f.emit(th, errItem("r1", "e0", "overloaded", true))
 	noEvent(t, s)
+	e.f.emit(th, runUpdate("r1", "completed"))
+	if ev := nextEvent(t, s); ev.Type != core.EventResult {
+		t.Fatalf("after retry = %+v", ev)
+	}
 
-	// A final error ends the turn with T3's reason; the turn's own failure is dropped.
-	e.f.emit(th, item(map[string]any{"id": "e1", "nodeId": "n1", "type": "error", "failure": map[string]any{"message": "quota exhausted"}}))
-	e.f.emit(th, item(map[string]any{"id": "e1", "nodeId": "n1", "type": "error", "failure": map[string]any{"message": "quota exhausted"}}))
-	e.f.emit(th, turn("pt1", "n1", "failed"))
+	// Retries ran out: the error still carries retry, and its reason is shown once.
+	e.f.emit(th, runUpdate("r2", "running"))
+	e.f.emit(th, errItem("r2", "e1", "quota exhausted", true))
+	e.f.emit(th, turn("pt2", "n2", "failed"))
+	e.f.emit(th, runUpdate("r2", "failed"))
+	e.f.emit(th, runUpdate("r2", "failed"))
 	ev := nextEvent(t, s)
 	if ev.Type != core.EventError || !strings.Contains(ev.Error.Error(), "quota exhausted") {
 		t.Fatalf("error = %+v", ev)
 	}
 	noEvent(t, s)
 
-	// A rejected model fails before any provider turn exists.
-	e.f.emit(th, item(map[string]any{"id": "e2", "nodeId": "n2", "type": "error", "failure": map[string]any{"message": "The agent did not accept the model"}}))
+	// A rejected model fails before any provider turn; its error item may
+	// arrive after the run update.
+	e.f.emit(th, runUpdate("r3", "failed"))
+	e.f.emit(th, errItem("r3", "e2", "The agent did not accept the model", false))
 	if ev := nextEvent(t, s); ev.Type != core.EventError || !strings.Contains(ev.Error.Error(), "did not accept") {
 		t.Fatalf("model error = %+v", ev)
 	}
+	noEvent(t, s)
 
-	// A failed turn without an error item still ends with an error.
-	e.f.emit(th, turn("pt3", "n3", "failed"))
+	// agy exits mid-turn: provider turn interrupted, then the error, then the run fails.
+	e.f.emit(th, runUpdate("r4", "running"))
+	e.f.emit(th, item(map[string]any{"id": "a4", "type": "assistant_message", "text": "half"}))
+	e.f.emit(th, turn("pt4", "n4", "interrupted"))
+	e.f.emit(th, errItem("r4", "e4", "provider exited", false))
+	e.f.emit(th, runUpdate("r4", "failed"))
+	if ev := nextEvent(t, s); ev.Type != core.EventText {
+		t.Fatalf("partial text = %+v", ev)
+	}
+	if ev := nextEvent(t, s); ev.Type != core.EventError || !strings.Contains(ev.Error.Error(), "provider exited") {
+		t.Fatalf("crash = %+v", ev)
+	}
+	noEvent(t, s)
+
+	// A failed run with no error item still ends with an error.
+	e.f.emit(th, runUpdate("r5", "failed"))
 	if ev := nextEvent(t, s); ev.Type != core.EventError {
 		t.Fatalf("bare failure = %+v", ev)
 	}
@@ -644,7 +716,7 @@ func TestReconnectMidTurnReplaysWithoutDuplicates(t *testing.T) {
 	e.f.dropAll()
 	e.f.emit(th, item(map[string]any{"id": "a1", "type": "assistant_message", "text": "1 2 "}))
 	e.f.emit(th, item(map[string]any{"id": "a1", "type": "assistant_message", "text": "1 2 3"}))
-	e.f.emit(th, turn("pt1", "n1", "completed"))
+	e.f.emit(th, runUpdate("r1", "completed"))
 	var text string
 	for {
 		ev := nextEvent(t, s)
@@ -683,7 +755,7 @@ func TestDropBeforeFirstEventResumesFromSnapshot(t *testing.T) {
 	waitFor(t, "snapshot", func() bool { s.seqMu.Lock(); defer s.seqMu.Unlock(); return s.sequence == 3 })
 	e.f.dropAll()
 	e.f.emit(th, item(map[string]any{"id": "a9", "type": "assistant_message", "text": "answer"}))
-	e.f.emit(th, turn("pt9", "n9", "completed"))
+	e.f.emit(th, runUpdate("r9", "completed"))
 	if ev := nextEvent(t, s); ev.Type != core.EventText || ev.Content != "answer" {
 		t.Fatalf("after early drop = %+v", ev)
 	}
@@ -700,6 +772,10 @@ func TestResumeMissingThreadStartsNewOne(t *testing.T) {
 	}
 	if err := s.Send("hi", "m1", nil, nil); err != nil {
 		t.Fatalf("send on replacement thread: %v", err)
+	}
+	e.f.emit(s.CurrentSessionID(), runUpdate("r1", "completed"))
+	if ev := nextEvent(t, s); ev.Type != core.EventResult {
+		t.Fatalf("replacement thread is not subscribed: %+v", ev)
 	}
 	a, _ := New(e.opts)
 	ids, _ := a.ListSessions(context.Background())
@@ -729,5 +805,87 @@ func TestTicketRejectionIsReportedWithoutCredential(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRunEndedWhileDisconnectedSettlesFromSnapshot(t *testing.T) {
+	e := newEnv(t)
+	s := e.start(t, "")
+	th := s.CurrentSessionID()
+	_ = s.Send("job", "m1", nil, nil)
+	e.f.emit(th, runUpdate("r1", "running"))
+	waitFor(t, "run seen", func() bool { s.turnMu.Lock(); defer s.turnMu.Unlock(); return s.runsOpen["r1"] })
+	e.f.mu.Lock()
+	e.f.snapshotOnResume = true
+	e.f.mu.Unlock()
+	e.f.dropAll()
+	e.f.emit(th, runUpdate("r1", "completed"))
+	if ev := nextEvent(t, s); ev.Type != core.EventResult {
+		t.Fatalf("snapshot settle = %+v", ev)
+	}
+	noEvent(t, s)
+}
+
+func TestCloseDuringStreamDoesNotPanic(t *testing.T) {
+	e := newEnv(t)
+	for i := 0; i < 20; i++ {
+		s := e.start(t, "")
+		th := s.CurrentSessionID()
+		for j := 0; j < 40; j++ {
+			e.f.emit(th, item(map[string]any{"id": fmt.Sprintf("a%d", j), "type": "assistant_message", "text": "x"}))
+		}
+		_ = s.Close()
+		for range s.Events() {
+		}
+	}
+}
+
+func TestSelectedModelTravelsWithEachMessage(t *testing.T) {
+	e := newEnv(t)
+	a, err := New(e.opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := a.(core.ModelSwitcher)
+	ms.SetModel("gemini-first")
+	sess, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	launch := e.f.requestsOf("orchestration.launchThread")
+	if got := launch[len(launch)-1].Payload["modelSelection"].(map[string]any)["model"]; got != "gemini-first" {
+		t.Fatalf("launch model = %v", got)
+	}
+	ms.SetModel("gemini-second")
+	if err := sess.Send("hi", "", nil, nil); err != nil {
+		t.Fatalf("send with empty message id: %v", err)
+	}
+	d := e.f.dispatches("message.dispatch")
+	last := d[len(d)-1]
+	if last["modelSelection"].(map[string]any)["model"] != "gemini-second" || last["modelSelection"].(map[string]any)["instanceId"] != "antigravity" {
+		t.Fatalf("dispatch model = %v", last["modelSelection"])
+	}
+	if id, _ := last["messageId"].(string); id == "" {
+		t.Fatal("empty message id sent to T3")
+	}
+}
+
+func TestUnmatchedAnswerToChoiceQuestionIsDismissed(t *testing.T) {
+	e := newEnv(t)
+	s := e.start(t, "")
+	th := s.CurrentSessionID()
+	e.f.emit(th, item(map[string]any{"id": "u1", "type": "user_input_request", "requestId": "ask-1", "status": "waiting", "questions": []any{
+		map[string]any{"id": "q1", "header": "H", "question": "Pick one", "allowCustomAnswer": false, "options": []any{
+			map[string]any{"label": "A", "description": "a", "value": "opt-a"},
+		}},
+	}}))
+	_ = nextEvent(t, s)
+	answers := map[string]any{"Pick one": "something else"}
+	if err := s.RespondPermission("ask-1", core.PermissionResult{Behavior: "allow", UpdatedInput: map[string]any{"answers": answers}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.f.dispatches("runtime-request.respond")) != 0 || len(e.f.dispatches("thread.user-input.dismiss")) != 1 {
+		t.Fatal("an answer T3 would drop must dismiss the question instead")
 	}
 }
