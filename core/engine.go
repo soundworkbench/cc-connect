@@ -11061,6 +11061,13 @@ func (e *Engine) stopInteractiveSessionSilently(sessionKey string) bool {
 	return e.stopInteractiveSessionWithOptions(sessionKey, false)
 }
 
+func turnCancelSupported(session AgentSession) bool {
+	if r, ok := session.(TurnCancelReporter); ok {
+		return r.CanCancelTurn()
+	}
+	return true
+}
+
 func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueued bool) bool {
 	e.interactiveMu.Lock()
 	state, ok := e.interactiveStates[sessionKey]
@@ -11084,7 +11091,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 	// If the agent session supports graceful turn cancellation (e.g. ACP),
 	// send a cancel notification and keep the session alive for the next
 	// user message, rather than killing the process and destroying state.
-	if canceller, ok := agentSession.(AgentSessionCanceller); ok && agentSession != nil {
+	if canceller, ok := agentSession.(AgentSessionCanceller); ok && agentSession != nil && turnCancelSupported(agentSession) {
 		// Keep the state in the map so the next message reuses this session.
 		// Don't markStopped — the session is still usable.
 		// Don't delete from interactiveStates — keep it alive.
@@ -11118,7 +11125,9 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		if cancelErr != nil {
 			slog.Warn("agent session CancelTurn failed, falling back to Close",
 				"session_key", sessionKey, "error", cancelErr)
-			// Fall through to normal cleanup below.
+			// Fall through to normal cleanup below, which expects the
+			// interactive lock held (it was released above).
+			e.interactiveMu.Lock()
 			goto normalCleanup
 		}
 

@@ -2,6 +2,7 @@ package modelrouter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -446,33 +447,81 @@ func (s *session) RunningTasks() int {
 	return 0
 }
 
-type claudeShellSession struct{ *session }
+// Steering and turn cancellation follow the shell the session is on now, not
+// the one it started on: a session started on Claude Code may since have moved
+// to the Google shell, and the engine keeps the same wrapper.
 
-func (c *claudeShellSession) Steer(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (bool, error) {
-	st, ok := c.currentInner().(core.AgentSessionSteerer)
+// errCancelUnsupported makes the engine fall back to closing the session.
+var errCancelUnsupported = errors.New("model_router: cancel not supported")
+
+func (s *session) CancelTurn() error {
+	inner := s.currentInner()
+	if inner == nil {
+		return nil // nothing started yet, so nothing runs
+	}
+	if c, ok := inner.(core.AgentSessionCanceller); ok {
+		return c.CancelTurn()
+	}
+	return errCancelUnsupported
+}
+
+// CanCancelTurn reports whether /stop can cancel the turn and keep the
+// session: true before any shell started, else if the current shell can.
+func (s *session) CanCancelTurn() bool {
+	inner := s.currentInner()
+	if inner == nil {
+		return true
+	}
+	_, ok := inner.(core.AgentSessionCanceller)
+	return ok
+}
+
+func (s *session) Steer(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (bool, error) {
+	shell, inner := s.currentShellInner()
+	st, ok := inner.(core.AgentSessionSteerer)
 	if !ok {
 		return false, nil
 	}
 	at := time.Now()
 	accepted, err := st.Steer(prompt, messageID, images, files)
 	if accepted && err == nil {
-		c.recordUser(at, c.shell, prompt, len(images)+len(files))
+		s.recordUser(at, shell, prompt, len(images)+len(files))
 	}
 	return accepted, err
 }
 
-func (c *claudeShellSession) SteerAsync(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (*core.SteerReceipt, error) {
-	st, ok := c.currentInner().(core.AgentSessionAsyncSteerer)
-	if !ok {
-		return nil, fmt.Errorf("model_router: steering not supported")
-	}
+// SteerAsync uses the shell's asynchronous steering, else its synchronous one;
+// a shell with neither declines, so the message queues.
+func (s *session) SteerAsync(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (*core.SteerReceipt, error) {
+	shell, inner := s.currentShellInner()
 	at := time.Now()
-	receipt, err := st.SteerAsync(prompt, messageID, images, files)
-	if receipt != nil && err == nil {
-		c.recordUser(at, c.shell, prompt, len(images)+len(files))
+	if st, ok := inner.(core.AgentSessionAsyncSteerer); ok {
+		receipt, err := st.SteerAsync(prompt, messageID, images, files)
+		if receipt != nil && err == nil {
+			s.recordUser(at, shell, prompt, len(images)+len(files))
+		}
+		return receipt, err
 	}
-	return receipt, err
+	if st, ok := inner.(core.AgentSessionSteerer); ok {
+		accepted, err := st.Steer(prompt, messageID, images, files)
+		if err != nil || !accepted {
+			return nil, err
+		}
+		s.recordUser(at, shell, prompt, len(images)+len(files))
+		ack := make(chan struct{})
+		close(ack)
+		return &core.SteerReceipt{Ack: ack, End: s.done}, nil
+	}
+	return nil, nil
 }
+
+func (s *session) currentShellInner() (string, core.AgentSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shell, s.inner
+}
+
+type claudeShellSession struct{ *session }
 
 func (c *claudeShellSession) StopTask(taskID string) error {
 	if t, ok := c.currentInner().(core.TaskStopper); ok {
@@ -529,12 +578,6 @@ func (c *claudeShellSession) GetWorkDir() string {
 
 type acpShellSession struct{ *session }
 
-func (a *acpShellSession) CancelTurn() error {
-	if c, ok := a.currentInner().(core.AgentSessionCanceller); ok {
-		return c.CancelTurn()
-	}
-	return fmt.Errorf("model_router: cancel not supported")
-}
 func (a *acpShellSession) GetContextUsage() *core.ContextUsage {
 	if r, ok := a.currentInner().(core.ContextUsageReporter); ok {
 		return r.GetContextUsage()
@@ -548,8 +591,10 @@ func (a *acpShellSession) SetLiveMode(mode string) bool {
 
 var (
 	_ core.AgentSession             = (*session)(nil)
-	_ core.AgentSessionSteerer      = (*claudeShellSession)(nil)
-	_ core.AgentSessionAsyncSteerer = (*claudeShellSession)(nil)
+	_ core.AgentSessionSteerer      = (*session)(nil)
+	_ core.AgentSessionAsyncSteerer = (*session)(nil)
+	_ core.AgentSessionCanceller    = (*session)(nil)
+	_ core.TurnCancelReporter       = (*session)(nil)
 	_ core.BackgroundWorkReporter   = (*session)(nil)
 	_ core.RunningTasksReporter     = (*session)(nil)
 	_ core.TaskStopper              = (*claudeShellSession)(nil)
@@ -559,7 +604,6 @@ var (
 	_ core.UsageSourceReporter      = (*claudeShellSession)(nil)
 	_ core.StartupWarner            = (*claudeShellSession)(nil)
 	_ core.LiveModeSwitcher         = (*claudeShellSession)(nil)
-	_ core.AgentSessionCanceller    = (*acpShellSession)(nil)
 	_ core.ContextUsageReporter     = (*acpShellSession)(nil)
 	_ core.LiveModeSwitcher         = (*acpShellSession)(nil)
 	_ core.TurnOriginSetter         = (*session)(nil)

@@ -1002,3 +1002,111 @@ func TestToolStepsAreDescribedWithoutCommandLines(t *testing.T) {
 		t.Error("bare command step emitted")
 	}
 }
+
+func runUpdateFor(id, status, message string) map[string]any {
+	return map[string]any{"type": "run.updated", "runId": id, "payload": map[string]any{"id": id, "status": status, "userMessageId": message}}
+}
+
+func (e *t3Env) startWithGrace(t *testing.T, grace time.Duration) *Session {
+	t.Helper()
+	a, err := New(e.opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.(*Agent).steerGrace = grace
+	sess, err := a.StartSession(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+	return sess.(*Session)
+}
+
+func TestSteeredMessageEndsTurnAfterItsRun(t *testing.T) {
+	e := newEnv(t)
+	s := e.startWithGrace(t, time.Minute)
+	th := s.CurrentSessionID()
+	if r, err := s.SteerAsync("idle", "m0", nil, nil); r != nil || err != nil {
+		t.Fatalf("steer without a turn = %v, %v", r, err)
+	}
+	_ = s.Send("first", "m1", nil, nil)
+	e.f.emit(th, runUpdateFor("r1", "running", "m1"))
+	r, err := s.SteerAsync("also this", "m2", nil, nil)
+	if r == nil || err != nil {
+		t.Fatalf("steer = %v, %v", r, err)
+	}
+	var steer map[string]any
+	for _, d := range e.f.dispatches("message.dispatch") {
+		if d["messageId"] == "m2" {
+			steer = d
+		}
+	}
+	if steer == nil || steer["deliveryIntent"] != "steer" {
+		t.Fatalf("steer dispatch = %+v", steer)
+	}
+	// T3 queues the steered message as its own run behind the current one.
+	e.f.emit(th, runUpdateFor("r1", "completed", "m1"))
+	noEvent(t, s)
+	e.f.emit(th, runUpdateFor("r2", "queued", "m2"))
+	e.f.emit(th, runUpdateFor("r2", "running", "m2"))
+	e.f.emit(th, item(map[string]any{"id": "a2", "type": "assistant_message", "text": "both done"}))
+	e.f.emit(th, runUpdateFor("r2", "completed", "m2"))
+	if ev := nextEvent(t, s); ev.Type != core.EventText || ev.Content != "both done" {
+		t.Fatalf("follow-up text = %+v", ev)
+	}
+	if ev := nextEvent(t, s); ev.Type != core.EventResult {
+		t.Fatalf("end = %+v", ev)
+	}
+	noEvent(t, s)
+}
+
+func TestSteeredMessageTakenIntoRunEndsAfterGrace(t *testing.T) {
+	e := newEnv(t)
+	s := e.startWithGrace(t, 200*time.Millisecond)
+	th := s.CurrentSessionID()
+	_ = s.Send("first", "m1", nil, nil)
+	e.f.emit(th, runUpdateFor("r1", "running", "m1"))
+	if r, err := s.SteerAsync("also this", "m2", nil, nil); r == nil || err != nil {
+		t.Fatalf("steer = %v, %v", r, err)
+	}
+	e.f.emit(th, runUpdateFor("r1", "completed", "m1"))
+	if ev := nextEvent(t, s); ev.Type != core.EventResult {
+		t.Fatalf("end = %+v", ev)
+	}
+	noEvent(t, s)
+}
+
+func TestStopCancelsQueuedRuns(t *testing.T) {
+	e := newEnv(t)
+	s := e.start(t, "")
+	th := s.CurrentSessionID()
+	_ = s.Send("first", "m1", nil, nil)
+	e.f.emit(th, runUpdateFor("r1", "running", "m1"))
+	_, _ = s.SteerAsync("more", "m2", nil, nil)
+	e.f.emit(th, runUpdateFor("r2", "queued", "m2"))
+	waitFor(t, "queued run seen", func() bool { s.turnMu.Lock(); defer s.turnMu.Unlock(); return s.runStatus["r2"] == "queued" })
+	if err := s.CancelTurn(); err != nil {
+		t.Fatal(err)
+	}
+	c := e.f.dispatches("queued-run.cancel")
+	if len(c) != 1 || c[0]["runId"] != "r2" {
+		t.Fatalf("queued cancels = %+v", c)
+	}
+	e.f.emit(th, runUpdateFor("r1", "interrupted", "m1"))
+	e.f.emit(th, runUpdateFor("r2", "cancelled", "m2"))
+	if ev := nextEvent(t, s); ev.Type != core.EventResult {
+		t.Fatalf("end = %+v", ev)
+	}
+	noEvent(t, s)
+
+	// A run left queued before a restart is found in the opening snapshot.
+	e.f.emit(th, runUpdateFor("r3", "queued", "m3"))
+	_ = s.Close()
+	s2 := e.start(t, th)
+	if err := s2.CancelTurn(); err != nil {
+		t.Fatal(err)
+	}
+	if c := e.f.dispatches("queued-run.cancel"); len(c) != 2 || c[1]["runId"] != "r3" {
+		t.Fatalf("queued cancels after resume = %+v", c)
+	}
+}

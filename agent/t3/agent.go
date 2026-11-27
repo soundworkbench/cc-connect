@@ -27,8 +27,12 @@ func init() { core.RegisterAgent("t3", New) }
 type Agent struct {
 	server, credential, provider, model, workDir, dataDir string
 	runtimeMode                                           string
-	mu                                                    sync.Mutex
-	sessions                                              map[*Session]struct{}
+	// steerGrace is how long a turn whose run ended waits for the follow-up
+	// run of a steered message before ending anyway: the provider may have
+	// taken the message into the run it was in, and then no run follows.
+	steerGrace time.Duration
+	mu         sync.Mutex
+	sessions   map[*Session]struct{}
 }
 
 // SetModel takes the model picked in the chat menu; every message carries it,
@@ -57,7 +61,7 @@ func (a *Agent) modelSelection() map[string]any {
 
 func New(opts map[string]any) (core.Agent, error) {
 	get := func(k string) string { v, _ := opts[k].(string); return strings.TrimSpace(v) }
-	a := &Agent{server: get("server"), provider: get("provider"), model: get("model"), workDir: get("work_dir"), dataDir: get("cc_data_dir"), runtimeMode: get("runtime_mode"), sessions: map[*Session]struct{}{}}
+	a := &Agent{server: get("server"), provider: get("provider"), model: get("model"), workDir: get("work_dir"), dataDir: get("cc_data_dir"), runtimeMode: get("runtime_mode"), steerGrace: 15 * time.Second, sessions: map[*Session]struct{}{}}
 	switch a.runtimeMode {
 	case "":
 		a.runtimeMode = "approval-required"
@@ -193,6 +197,8 @@ func (a *Agent) CLIDisplayName() string { return "T3 Code" }
 var _ core.Agent = (*Agent)(nil)
 var _ core.AgentDoctorInfo = (*Agent)(nil)
 var _ core.ModelSwitcher = (*Agent)(nil)
+var _ core.AgentSessionCanceller = (*Session)(nil)
+var _ core.AgentSessionAsyncSteerer = (*Session)(nil)
 
 type rpcRequest struct {
 	Tag       string `json:"tag"`
@@ -245,6 +251,9 @@ type Session struct {
 	runsEnded   map[string]bool
 	baselined   bool // runs finished before this session are recorded as ended
 	runReason   map[string]string
+	runStatus   map[string]string // every run seen, for /stop to cancel queued ones
+	steering    map[string]bool   // steered message ids not yet taken up by a run
+	endGen      int               // bumps to drop a deferred turn end
 	evMu        sync.RWMutex
 	evClosed    bool
 	subMu       sync.Mutex
@@ -267,7 +276,7 @@ type t3Question struct {
 
 func newSession(parent context.Context, a *Agent, id string) (*Session, error) {
 	ctx, cancel := context.WithCancel(parent)
-	s := &Session{agent: a, ctx: ctx, cancel: cancel, pending: map[string]*pending{}, events: make(chan core.Event, 256), reconnect: make(chan struct{}, 1), permissions: map[string]bool{}, runID: randomID(), itemText: map[string]string{}, itemSeen: map[string]bool{}, questions: map[string][]t3Question{}, runsOpen: map[string]bool{}, runsEnded: map[string]bool{}, runReason: map[string]string{}}
+	s := &Session{agent: a, ctx: ctx, cancel: cancel, pending: map[string]*pending{}, events: make(chan core.Event, 256), reconnect: make(chan struct{}, 1), permissions: map[string]bool{}, runID: randomID(), itemText: map[string]string{}, itemSeen: map[string]bool{}, questions: map[string][]t3Question{}, runsOpen: map[string]bool{}, runsEnded: map[string]bool{}, runReason: map[string]string{}, runStatus: map[string]string{}, steering: map[string]bool{}}
 	if id != "" {
 		s.threadID.Store(id)
 	}
@@ -491,11 +500,12 @@ func (s *Session) handleEvent(b []byte) {
 	}
 	if e.Type == "run.updated" {
 		var r struct {
-			ID     string `json:"id"`
-			Status string `json:"status"`
+			ID      string `json:"id"`
+			Status  string `json:"status"`
+			Message string `json:"userMessageId"`
 		}
 		if json.Unmarshal(e.Payload, &r) == nil && r.ID != "" {
-			s.trackRun(r.ID, r.Status)
+			s.trackRun(r.ID, r.Status, r.Message)
 		}
 		return
 	}
@@ -512,20 +522,54 @@ func runTerminal(status string) bool {
 // trackRun ends the engine's turn once per T3 run. Every run, including one
 // stopped before the provider started or one whose model was rejected, ends
 // with a terminal run.updated; provider turns and error items do not cover
-// all of those cases and can arrive in either order.
-func (s *Session) trackRun(id, status string) {
+// all of those cases and can arrive in either order. A message steered into
+// the turn may get a run of its own; the turn then ends with the last of them.
+func (s *Session) trackRun(id, status, message string) {
 	s.turnMu.Lock()
+	if status != "" {
+		s.runStatus[id] = status
+	}
 	if s.runsEnded[id] {
 		s.turnMu.Unlock()
 		return
 	}
 	if !runTerminal(status) {
 		s.runsOpen[id] = true
+		if message != "" && s.steering[message] {
+			delete(s.steering, message)
+			s.endGen++ // a deferred end now waits for this run instead
+		}
 		s.turnMu.Unlock()
 		return
 	}
 	s.runsEnded[id] = true
 	delete(s.runsOpen, id)
+	if len(s.runsOpen) > 0 {
+		s.turnMu.Unlock()
+		return
+	}
+	if len(s.steering) > 0 {
+		s.endGen++
+		gen := s.endGen
+		s.turnMu.Unlock()
+		time.AfterFunc(s.agent.steerGrace, func() {
+			s.turnMu.Lock()
+			if s.endGen != gen || len(s.runsOpen) > 0 || s.ctx.Err() != nil {
+				s.turnMu.Unlock()
+				return
+			}
+			clear(s.steering)
+			s.turnMu.Unlock()
+			s.endTurn(id, status)
+		})
+		return
+	}
+	s.turnMu.Unlock()
+	s.endTurn(id, status)
+}
+
+func (s *Session) endTurn(id, status string) {
+	s.turnMu.Lock()
 	s.turnOpen = false
 	s.turnMu.Unlock()
 	if status != "failed" {
@@ -566,6 +610,9 @@ func (s *Session) settleFromSnapshot(b []byte) {
 		return
 	}
 	s.turnMu.Lock()
+	for _, r := range snap.Projection.Runs {
+		s.runStatus[r.ID] = r.Status
+	}
 	if !s.baselined {
 		// Runs already finished when this session first sees the thread
 		// belong to earlier turns, possibly of an earlier bridge process.
@@ -595,7 +642,7 @@ func (s *Session) settleFromSnapshot(b []byte) {
 	s.turnMu.Unlock()
 	for _, x := range settle {
 		id, status, _ := strings.Cut(x, "\x00")
-		s.trackRun(id, status)
+		s.trackRun(id, status, "")
 	}
 }
 
@@ -994,15 +1041,78 @@ func (s *Session) RespondPermission(requestID string, result core.PermissionResu
 	_, e := s.call(s.ctx, "orchestration.dispatchCommand", payload)
 	return e
 }
+
+// CancelTurn stops the running run and cancels runs queued behind it (a
+// steered message, or input sent while the run was busy): after a stop T3
+// holds its queue and would run them before the next message.
 func (s *Session) CancelTurn() error {
 	id := s.CurrentSessionID()
 	if id == "" {
 		return nil
 	}
+	s.turnMu.Lock()
+	clear(s.steering)
+	s.endGen++
+	var queued []string
+	for run, st := range s.runStatus {
+		if st == "queued" && !s.runsEnded[run] {
+			queued = append(queued, run)
+		}
+	}
+	s.turnMu.Unlock()
 	payload := map[string]any{"type": "thread.stop", "commandId": s.nextID(), "threadId": id, "reason": "user"}
-	_, e := s.call(s.ctx, "orchestration.dispatchCommand", payload)
-	return e
+	_, err := s.call(s.ctx, "orchestration.dispatchCommand", payload)
+	for _, run := range queued {
+		payload := map[string]any{"type": "queued-run.cancel", "commandId": s.nextID(), "threadId": id, "runId": run}
+		if _, e := s.call(s.ctx, "orchestration.dispatchCommand", payload); e != nil {
+			slog.Warn("t3: cancel queued run", "run", run, "error", e)
+		}
+	}
+	return err
 }
+
+// SteerAsync hands a message to T3 for the running turn. T3 gives it to the
+// provider mid-turn if it can, else runs it right after the current run; the
+// engine's turn ends after that run either way (see trackRun).
+func (s *Session) SteerAsync(prompt, messageID string, _ []core.ImageAttachment, _ []core.FileAttachment) (*core.SteerReceipt, error) {
+	id := s.CurrentSessionID()
+	s.turnMu.Lock()
+	open := s.turnOpen
+	s.turnMu.Unlock()
+	if id == "" || !open {
+		return nil, nil
+	}
+	if strings.TrimSpace(messageID) == "" {
+		messageID = s.nextID()
+	}
+	s.turnMu.Lock()
+	s.steering[messageID] = true
+	s.turnMu.Unlock()
+	payload := map[string]any{"type": "message.dispatch", "createdBy": "user", "creationSource": "web", "commandId": s.nextID(), "threadId": id, "messageId": messageID, "text": prompt, "attachments": []any{}, "dispatchMode": map[string]any{"type": "queue_after_active"}, "deliveryIntent": "steer", "modelSelection": s.agent.modelSelection()}
+	ctx, cancel := context.WithTimeout(s.ctx, steerAckTimeout)
+	defer cancel()
+	p, rid, err := s.request(ctx, "orchestration.dispatchCommand", payload, false)
+	if err == nil {
+		_, err = s.await(ctx, p, rid)
+	}
+	if err != nil {
+		s.turnMu.Lock()
+		delete(s.steering, messageID)
+		s.turnMu.Unlock()
+		var re *rpcError
+		if p == nil || errors.As(err, &re) {
+			// Not written, or T3 refused it: nothing was queued there.
+			return nil, fmt.Errorf("t3: steer: %v: %w", err, core.ErrSteerNotWritten)
+		}
+		return nil, fmt.Errorf("t3: steer: %v: %w", err, core.ErrSteerWriteUncertain)
+	}
+	ack := make(chan struct{})
+	close(ack)
+	return &core.SteerReceipt{Ack: ack, End: s.ctx.Done()}, nil
+}
+
+const steerAckTimeout = 5 * time.Second
+
 func (s *Session) setRuntimeMode(ctx context.Context) error {
 	payload := map[string]any{"type": "thread.runtime-mode.set", "commandId": s.nextID(), "threadId": s.CurrentSessionID(), "runtimeMode": s.agent.runtimeMode}
 	if _, err := s.call(ctx, "orchestration.dispatchCommand", payload); err != nil {

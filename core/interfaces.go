@@ -672,6 +672,13 @@ type AgentSessionCanceller interface {
 	CancelTurn() error
 }
 
+// TurnCancelReporter is optional for an AgentSessionCanceller whose support
+// depends on what runs behind it now (a session that routes between agents).
+// False makes /stop close the session as for agents without CancelTurn.
+type TurnCancelReporter interface {
+	CanCancelTurn() bool
+}
+
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files (e.g. .claude/commands/*.md). The engine scans the
 // returned directories for *.md files and registers them as slash commands.

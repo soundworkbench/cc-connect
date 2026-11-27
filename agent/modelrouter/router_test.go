@@ -306,8 +306,8 @@ func TestSessionsRouteByModel(t *testing.T) {
 	if _, ok := s.(core.AgentSessionSteerer); !ok {
 		t.Fatal("claude session should keep steering")
 	}
-	if _, ok := s.(core.AgentSessionCanceller); ok {
-		t.Fatal("claude session must not gain CancelTurn")
+	if tc, ok := s.(core.TurnCancelReporter); !ok || tc.CanCancelTurn() {
+		t.Fatal("/stop on a Claude Code session must still close it")
 	}
 	if len(cc.startedWith()) != 1 || len(acp.startedWith()) != 0 {
 		t.Fatalf("starts: cc=%v acp=%v", cc.startedWith(), acp.startedWith())
@@ -324,11 +324,11 @@ func TestSessionsRouteByModel(t *testing.T) {
 		t.Fatalf("claude must keep its model, got %q", cc.GetModel())
 	}
 	s2 := start(t, r, "")
-	if _, ok := s2.(core.AgentSessionCanceller); !ok {
+	if tc, ok := s2.(core.TurnCancelReporter); !ok || !tc.CanCancelTurn() {
 		t.Fatal("acp session should keep CancelTurn")
 	}
-	if _, ok := s2.(core.AgentSessionSteerer); ok {
-		t.Fatal("acp session must not gain steering")
+	if rc, err := s2.(core.AgentSessionAsyncSteerer).SteerAsync("more", "m1", nil, nil); rc != nil || err != nil {
+		t.Fatalf("acp session must decline steering so the message queues: %v, %v", rc, err)
 	}
 }
 
@@ -979,4 +979,31 @@ type effortClaudeShell struct {
 type effortACPShell struct {
 	*fakeACP
 	*effortShell
+}
+
+// A session keeps its wrapper when it moves between shells, so /stop and
+// steering must follow the shell it is on now.
+func TestStopAndSteerFollowTheCurrentShell(t *testing.T) {
+	r, _, _ := newT3TestRouter(t, "gemini-4-neon")
+	s := start(t, r, "")
+	tc, ok := s.(core.TurnCancelReporter)
+	if !ok || !tc.CanCancelTurn() {
+		t.Fatal("a session with no shell yet has nothing to stop and must keep itself")
+	}
+	s.(core.TurnOriginSetter).SetTurnHuman(false)
+	turn(t, s, "scheduled task")
+	if tc.CanCancelTurn() {
+		t.Fatal("Claude Code turns must still stop by closing the session")
+	}
+	if rc, err := s.(core.AgentSessionAsyncSteerer).SteerAsync("more", "m1", nil, nil); rc == nil || err != nil {
+		t.Fatalf("Claude Code steering = %v, %v", rc, err)
+	}
+	s.(core.TurnOriginSetter).SetTurnHuman(true)
+	turn(t, s, "owner message")
+	if !tc.CanCancelTurn() || s.(core.AgentSessionCanceller).CancelTurn() != nil {
+		t.Fatal("the T3 shell's turn must be cancellable")
+	}
+	if rc, err := s.(core.AgentSessionAsyncSteerer).SteerAsync("more", "m2", nil, nil); rc != nil || err != nil {
+		t.Fatalf("a shell without steering must decline: %v, %v", rc, err)
+	}
 }
