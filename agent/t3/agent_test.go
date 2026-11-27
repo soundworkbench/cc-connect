@@ -1,10 +1,14 @@
 package t3
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -80,7 +84,16 @@ type fakeT3 struct {
 	// replay, as T3 does when too many events were missed.
 	snapshotOnResume bool
 	// folderOwner is the project that already owns the workspace folder.
-	folderOwner string
+	folderOwner  string
+	uploads      []fakeUpload
+	nUploads     int
+	uploadStatus int
+}
+
+type fakeUpload struct {
+	Path   string
+	Method string
+	Body   []byte
 }
 
 type fakeRequest struct {
@@ -120,6 +133,18 @@ func newFakeT3(t *testing.T, credential string) *fakeT3 {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"ticket": "ticket-test"})
+	})
+	mux.HandleFunc("/api/attachments/upload/", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.uploads = append(f.uploads, fakeUpload{Path: r.URL.Path, Body: body, Method: r.Method})
+		status := f.uploadStatus
+		f.mu.Unlock()
+		if status != 0 {
+			http.Error(w, "rejected", status)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/ws", f.handleWS)
 	f.server = httptest.NewServer(mux)
@@ -272,6 +297,12 @@ func (f *fakeT3) handleRPC(c *websocket.Conn, rpc, id string, p map[string]any) 
 		f.subs[id] = sub
 		f.mu.Unlock()
 		go f.pump(sub)
+	case "attachments.createUploadUrl":
+		f.mu.Lock()
+		f.nUploads++
+		n := f.nUploads
+		f.mu.Unlock()
+		f.success(c, id, map[string]any{"attachmentId": fmt.Sprintf("pending-%d", n), "relativeUrl": fmt.Sprintf("/api/attachments/upload/tok%d.sig", n), "expiresAt": 1})
 	case "orchestration.dispatchCommand":
 		if p["type"] == "message.dispatch" && (p["createdBy"] == nil || p["creationSource"] == nil) {
 			f.failDefect(c, id, "Missing key\n  at [\"createdBy\"]")
@@ -1108,5 +1139,127 @@ func TestStopCancelsQueuedRuns(t *testing.T) {
 	}
 	if c := e.f.dispatches("queued-run.cancel"); len(c) != 2 || c[1]["runId"] != "r3" {
 		t.Fatalf("queued cancels after resume = %+v", c)
+	}
+}
+
+func testPNG(t *testing.T) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	if err := png.Encode(&b, image.NewRGBA(image.Rect(0, 0, 4, 4))); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+func lastDispatch(t *testing.T, e *t3Env) map[string]any {
+	t.Helper()
+	d := e.f.dispatches("message.dispatch")
+	if len(d) == 0 {
+		t.Fatal("no message.dispatch")
+	}
+	return d[len(d)-1]
+}
+
+func TestImageOnlyMessageIsUploadedAndAttached(t *testing.T) {
+	e := newEnv(t)
+	sess := e.start(t, "")
+	img := testPNG(t)
+	// Feishu images carry no extension and may be mislabelled.
+	if err := sess.Send("", "m1", []core.ImageAttachment{{MimeType: "image/jpeg", Data: img, FileName: "shot.jpg"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	reqs := e.f.requestsOf("attachments.createUploadUrl")
+	if len(reqs) != 1 || reqs[0].Payload["type"] != "image" || reqs[0].Payload["mimeType"] != "image/png" || reqs[0].Payload["name"] != "shot.png" || reqs[0].Payload["sizeBytes"] != float64(len(img)) {
+		t.Fatalf("createUploadUrl = %+v", reqs)
+	}
+	e.f.mu.Lock()
+	ups := append([]fakeUpload(nil), e.f.uploads...)
+	e.f.mu.Unlock()
+	if len(ups) != 1 || ups[0].Method != http.MethodPost || !bytes.Equal(ups[0].Body, img) || ups[0].Path != "/api/attachments/upload/tok1.sig" {
+		t.Fatalf("uploads = %+v", ups)
+	}
+	d := lastDispatch(t, e)
+	atts, _ := d["attachments"].([]any)
+	if len(atts) != 1 {
+		t.Fatalf("attachments = %v", d["attachments"])
+	}
+	a := atts[0].(map[string]any)
+	if a["type"] != "image" || a["id"] != "pending-1" || a["mimeType"] != "image/png" || a["name"] != "shot.png" || a["sizeBytes"] != float64(len(img)) {
+		t.Fatalf("attachment = %v", a)
+	}
+	if d["text"] != "" {
+		t.Fatalf("text = %q", d["text"])
+	}
+}
+
+func TestFileIsUploadedAsFile(t *testing.T) {
+	e := newEnv(t)
+	sess := e.start(t, "")
+	if err := sess.Send("read it", "m1", nil, []core.FileAttachment{{MimeType: "text/plain; charset=utf-8", Data: []byte("hello"), FileName: "/tmp/x/notes.txt"}}); err != nil {
+		t.Fatal(err)
+	}
+	a := lastDispatch(t, e)["attachments"].([]any)[0].(map[string]any)
+	if a["type"] != "file" || a["name"] != "notes.txt" || a["mimeType"] != "text/plain" || a["sizeBytes"] != float64(5) {
+		t.Fatalf("attachment = %v", a)
+	}
+}
+
+func TestUnsupportedOrOversizedAttachmentsAreNotedInText(t *testing.T) {
+	e := newEnv(t)
+	sess := e.start(t, "")
+	big := make([]byte, maxImageBytes+1)
+	copy(big, testPNG(t))
+	err := sess.Send("", "m1", []core.ImageAttachment{{Data: []byte("BM-not-supported-bitmap-data-here"), FileName: "a.bmp"}, {Data: big, FileName: "big.png"}}, []core.FileAttachment{{Data: make([]byte, maxFileBytes+1), FileName: "huge.bin"}})
+	if err != nil {
+		t.Fatalf("turn must still start: %v", err)
+	}
+	d := lastDispatch(t, e)
+	if atts, _ := d["attachments"].([]any); len(atts) != 0 {
+		t.Fatalf("attachments = %v", atts)
+	}
+	text, _ := d["text"].(string)
+	for _, want := range []string{"a", "big.png", "huge.bin"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("text %q lacks %q", text, want)
+		}
+	}
+	if len(e.f.requestsOf("attachments.createUploadUrl")) != 0 {
+		t.Fatal("nothing should have been uploaded")
+	}
+}
+
+func TestFailedUploadDoesNotFailTheTurn(t *testing.T) {
+	e := newEnv(t)
+	sess := e.start(t, "")
+	e.f.mu.Lock()
+	e.f.uploadStatus = http.StatusBadRequest
+	e.f.mu.Unlock()
+	if err := sess.Send("look", "m1", []core.ImageAttachment{{Data: testPNG(t), FileName: "p.png"}}, nil); err != nil {
+		t.Fatalf("turn must still start: %v", err)
+	}
+	d := lastDispatch(t, e)
+	if atts, _ := d["attachments"].([]any); len(atts) != 0 {
+		t.Fatalf("attachments = %v", atts)
+	}
+	if text, _ := d["text"].(string); !strings.HasPrefix(text, "look") || !strings.Contains(text, "p.png") {
+		t.Fatalf("text = %q", text)
+	}
+}
+
+func TestSteeredMessageCarriesImages(t *testing.T) {
+	e := newEnv(t)
+	sess := e.start(t, "")
+	if err := sess.Send("first", "m1", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.SteerAsync("", "m2", []core.ImageAttachment{{Data: testPNG(t)}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	d := lastDispatch(t, e)
+	if d["deliveryIntent"] != "steer" {
+		t.Fatalf("dispatch = %v", d)
+	}
+	if atts, _ := d["attachments"].([]any); len(atts) != 1 || atts[0].(map[string]any)["name"] != "image-1.png" {
+		t.Fatalf("attachments = %v", d["attachments"])
 	}
 }

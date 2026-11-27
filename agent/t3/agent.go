@@ -1003,7 +1003,7 @@ func projectIDFor(workDir string) string {
 	h := sha256.Sum256([]byte(workDir))
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", h[:4], h[4:6], (uint16(h[6])<<8|uint16(h[7]))&0x0fff|0x4000, (uint16(h[8])<<8|uint16(h[9]))&0x3fff|0x8000, h[10:16])
 }
-func (s *Session) Send(prompt, messageID string, _ []core.ImageAttachment, _ []core.FileAttachment) error {
+func (s *Session) Send(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) error {
 	id := s.CurrentSessionID()
 	if id == "" {
 		return errors.New("t3: no thread")
@@ -1011,10 +1011,11 @@ func (s *Session) Send(prompt, messageID string, _ []core.ImageAttachment, _ []c
 	if strings.TrimSpace(messageID) == "" {
 		messageID = s.nextID() // T3 rejects an empty message id
 	}
+	prompt, attachments := s.prepareAttachments(s.ctx, prompt, images, files)
 	s.turnMu.Lock()
 	s.turnOpen = true
 	s.turnMu.Unlock()
-	payload := map[string]any{"type": "message.dispatch", "createdBy": "user", "creationSource": "web", "commandId": s.nextID(), "threadId": id, "messageId": messageID, "text": prompt, "attachments": []any{}, "dispatchMode": map[string]any{"type": "queue_after_active"}, "modelSelection": s.agent.modelSelection()}
+	payload := map[string]any{"type": "message.dispatch", "createdBy": "user", "creationSource": "web", "commandId": s.nextID(), "threadId": id, "messageId": messageID, "text": prompt, "attachments": attachments, "dispatchMode": map[string]any{"type": "queue_after_active"}, "modelSelection": s.agent.modelSelection()}
 	_, e := s.call(s.ctx, "orchestration.dispatchCommand", payload)
 	return e
 }
@@ -1074,7 +1075,7 @@ func (s *Session) CancelTurn() error {
 // SteerAsync hands a message to T3 for the running turn. T3 gives it to the
 // provider mid-turn if it can, else runs it right after the current run; the
 // engine's turn ends after that run either way (see trackRun).
-func (s *Session) SteerAsync(prompt, messageID string, _ []core.ImageAttachment, _ []core.FileAttachment) (*core.SteerReceipt, error) {
+func (s *Session) SteerAsync(prompt, messageID string, images []core.ImageAttachment, files []core.FileAttachment) (*core.SteerReceipt, error) {
 	id := s.CurrentSessionID()
 	s.turnMu.Lock()
 	open := s.turnOpen
@@ -1085,10 +1086,11 @@ func (s *Session) SteerAsync(prompt, messageID string, _ []core.ImageAttachment,
 	if strings.TrimSpace(messageID) == "" {
 		messageID = s.nextID()
 	}
+	prompt, attachments := s.prepareAttachments(s.ctx, prompt, images, files)
 	s.turnMu.Lock()
 	s.steering[messageID] = true
 	s.turnMu.Unlock()
-	payload := map[string]any{"type": "message.dispatch", "createdBy": "user", "creationSource": "web", "commandId": s.nextID(), "threadId": id, "messageId": messageID, "text": prompt, "attachments": []any{}, "dispatchMode": map[string]any{"type": "queue_after_active"}, "deliveryIntent": "steer", "modelSelection": s.agent.modelSelection()}
+	payload := map[string]any{"type": "message.dispatch", "createdBy": "user", "creationSource": "web", "commandId": s.nextID(), "threadId": id, "messageId": messageID, "text": prompt, "attachments": attachments, "dispatchMode": map[string]any{"type": "queue_after_active"}, "deliveryIntent": "steer", "modelSelection": s.agent.modelSelection()}
 	ctx, cancel := context.WithTimeout(s.ctx, steerAckTimeout)
 	defer cancel()
 	p, rid, err := s.request(ctx, "orchestration.dispatchCommand", payload, false)
