@@ -10,7 +10,7 @@ CPUS=${CPUS:-4}
 GO_IMAGE=${GO_IMAGE:-golang:1.25}
 OUT=${OUT:-dist}
 TAGS=no_web,goolm
-PKGS=(./agent/claudecode/ ./agent/codex/ ./agent/opencode/ ./core/ ./platform/feishu/ ./config/ ./cmd/cc-connect/)
+PKGS=(./agent/claudecode/ ./agent/codex/ ./agent/opencode/ ./agent/orca/ ./agent/t3/ ./agent/modelrouter/ ./core/ ./platform/feishu/ ./config/ ./cmd/cc-connect/)
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 [[ "$CPUS" =~ ^[1-9][0-9]*$ ]] || { echo 'CPUS must be a positive integer' >&2; exit 1; }
 SOURCE=$(git rev-parse --verify "$REF^{object}")
