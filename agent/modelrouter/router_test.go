@@ -1007,3 +1007,31 @@ func TestStopAndSteerFollowTheCurrentShell(t *testing.T) {
 		t.Fatalf("a shell without steering must decline: %v, %v", rc, err)
 	}
 }
+
+// The ACP shell cancels a turn in place but cannot take steering, so a
+// message sent mid-turn must decline and wait in the queue.
+func TestStopAndSteerFollowTheCurrentShellACP(t *testing.T) {
+	r, _, _ := newTestRouter(t, "gemini-4-neon")
+	r.acpHumanOnly = true
+	s := start(t, r, "")
+	tc, ok := s.(core.TurnCancelReporter)
+	if !ok || !tc.CanCancelTurn() {
+		t.Fatal("a session with no shell yet has nothing to stop and must keep itself")
+	}
+	s.(core.TurnOriginSetter).SetTurnHuman(false)
+	turn(t, s, "scheduled task")
+	if tc.CanCancelTurn() {
+		t.Fatal("Claude Code turns must still stop by closing the session")
+	}
+	s.(core.TurnOriginSetter).SetTurnHuman(true)
+	turn(t, s, "owner message")
+	if !tc.CanCancelTurn() || s.(core.AgentSessionCanceller).CancelTurn() != nil {
+		t.Fatal("the ACP shell's turn must be cancellable")
+	}
+	if rc, err := s.(core.AgentSessionAsyncSteerer).SteerAsync("more", "m1", nil, nil); rc != nil || err != nil {
+		t.Fatalf("a shell without steering must decline: %v, %v", rc, err)
+	}
+	if ok, err := s.(core.AgentSessionSteerer).Steer("more", "m2", nil, nil); ok || err != nil {
+		t.Fatalf("a shell without steering must decline: %v, %v", ok, err)
+	}
+}
