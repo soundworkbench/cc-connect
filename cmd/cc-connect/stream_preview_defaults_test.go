@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
@@ -113,6 +114,46 @@ func TestStreamPreviewSpinnerImage(t *testing.T) {
 	for name, path := range map[string]string{"unset": "", "missing": filepath.Join(dir, "none.gif"), "not a gif": bad} {
 		if got := decodeStreamPreview(t, "[stream_preview]\nspinner_image = '"+path+"'\n").SpinnerGIF; got != nil {
 			t.Fatalf("%s: want built-in spinner, got %q", name, got)
+		}
+	}
+}
+
+func TestProductDefaultsOutOfTheBox(t *testing.T) {
+	// Empty config enables quiet Feishu experience, step-list streaming card, and decision cards.
+	var cfg config.Config
+	mode, tm, tool, _, _, showCtx, replyFooter, hideAgentFooter := config.EffectiveDisplay(&cfg, &config.ProjectConfig{})
+	if mode != config.DisplayModeQuiet || !tm || tool || showCtx || replyFooter || !hideAgentFooter {
+		t.Fatalf("display defaults mismatch: mode=%q tm=%v tool=%v showCtx=%v replyFooter=%v hideAgentFooter=%v",
+			mode, tm, tool, showCtx, replyFooter, hideAgentFooter)
+	}
+	sp := buildStreamPreviewCfg(cfg.StreamPreview)
+	if !sp.Enabled || !sp.Segmented || !sp.StepList || sp.EndMode != "settle" || sp.RevealCps != 90 || sp.PrintStrategy != "delay" || sp.NotifyAfterMs != 60000 {
+		t.Fatalf("stream_preview defaults mismatch: %+v", sp)
+	}
+	if !cfg.Decision.EffectiveEnabled() || cfg.Decision.EffectiveDefaultHours() != 12 {
+		t.Fatalf("decision defaults mismatch: enabled=%v hours=%d", cfg.Decision.EffectiveEnabled(), cfg.Decision.EffectiveDefaultHours())
+	}
+
+	// bootstrapConfig writes valid TOML pointing to soundworkbench/cc-connect and listing orca.
+	outPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := bootstrapConfig(outPath); err != nil {
+		t.Fatalf("bootstrapConfig failed: %v", err)
+	}
+	loaded, err := config.Load(outPath)
+	if err != nil {
+		t.Fatalf("bootstrapConfig output invalid: %v", err)
+	}
+	if !loaded.Decision.EffectiveEnabled() {
+		t.Fatal("bootstrapConfig should keep decision cards enabled by default")
+	}
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{"soundworkbench/cc-connect", `"orca"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("bootstrapConfig missing %q", want)
 		}
 	}
 }

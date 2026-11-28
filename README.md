@@ -8,7 +8,7 @@
 
 ## 飞书中的表现
 
-开启步骤列表卡后（见[配置](#配置)）：
+开箱即用，以下飞书体验已设为默认（无需手动配置 `[display]`、`[stream_preview]` 或 `[decision]`）：
 
 - **先给表情。** 机器人收到消息后，立即给你的消息加一个表情回应，然后才出现卡片。
 - **每个回合一张进度卡。** 卡片开头只有一行：一个转圈动画和“思考中…”。上下没有空行。
@@ -20,29 +20,15 @@
 - **排队消息。** 排在回合后面的消息按顺序合并成一个回合发给 Agent，每条标注来源和时间。
 - **静默回复。** Agent 可以回答 `NO_REPLY`，表示不发任何内容。这个标记不会显示出来，不论在卡片里还是作为消息；重复出现（`NO_REPLYNO_REPLY`）或后面跟着页脚时也一样。
 - **自动回合。** 定时提示、其他机器人转来的消息和本地助手 API 的消息不开进度卡。它们在结束时发一条消息；回复为 `NO_REPLY` 则不发。被静音的定时任务只隐藏开始通知，回复和附件照常送达。
-- **决策卡**（可选，`[decision] enabled = true`）。Agent 可以发一张带按钮的卡片（`cc-connect send --decision card.json`）。你的点选，或截止时间到后的默认选项，会作为消息回到会话。
+- **决策卡**（默认开启，可在 `[decision]` 设 `enabled = false` 关闭）。Agent 可以发一张带按钮的卡片（`cc-connect send --decision card.json`）。你的点选，或截止时间到后的默认选项，会作为消息回到会话。
 
-其他改动：私聊中每个话题一个会话（可选）、交互卡片和合并转发按文本读取、排队消息在重启后保留、`/stop` 只结束当前回合、`/usage` 显示用量窗口、按模型区分的推理强度、本地助手 API、Codex 后台任务唤醒。完整清单及配置项和源文件，见 [soundworkbench/README.md](soundworkbench/README.md)。
+其他改动：私聊中每个话题一个会话（可选）、交互卡片和合并转发按文本读取、排队消息在重启后保留、`/stop` 只结束当前回合、`/usage` 显示用量窗口、按模型区分的推理强度、本地助手 API、Codex 后台任务唤醒、Orca Bot 适配器（`type = "orca"`）。完整清单及配置项和源文件，见 [soundworkbench/README.md](soundworkbench/README.md)。
 
 ## 配置
 
-步骤列表卡默认关闭。下面的设置可得到上述表现。
+步骤列表卡、安静显示模式（隐藏独立工具消息与页脚）以及决策卡均已**默认开启**，最小配置即可直接获得完整体验：
 
 ```toml
-[display]
-mode = "quiet"
-thinking_messages = true
-tool_messages = false
-
-[stream_preview]
-enabled = true
-segmented = true          # streaming card (Feishu CardKit)
-step_list = true          # step rows with spinner and check icons
-end_mode = "settle"       # never recall the card; "recall" is the default
-notify_after_ms = 60000   # turns at least this long send the reply as a new message
-reveal_cps = 90           # type the reply at about this many characters per second; 0 = off
-print_strategy = "delay"  # "fast" (default) or "delay"
-
 [[projects]]
 name = "my-project"
 
@@ -50,17 +36,40 @@ name = "my-project"
 type = "claudecode"
 
 [projects.agent.options]
-stream_partial_text = true   # stream Claude text deltas into the card
+work_dir = "/path/to/your/project"
 
 [[projects.platforms]]
 type = "feishu"
 
 [projects.platforms.options]
-# app_id / app_secret as in upstream
-reaction_emoji = "OnIt"         # reaction on new messages; "none" turns it off
-keep_preview_on_finish = false
-p2p_thread_isolation = true     # optional: one session per thread in direct chats
+app_id = "your-feishu-app-id"
+app_secret = "your-feishu-app-secret"
+# p2p_thread_isolation = true     # optional: one session per thread in direct chats
 ```
+
+如需接入 **Orca Bot**，将 `[projects.agent]` 设为 `type = "orca"`：
+
+```toml
+[[projects]]
+name = "my-orca-bot"
+
+[projects.agent]
+type = "orca"
+
+[projects.agent.options]
+bot_id = "your-orca-bot-id"
+# orca_bin = ""   # 可选；默认优先查找 <orca_home 或 $HOME>/.config/orca/cli/bin/orca，否则从 PATH 查找
+# orca_home = ""  # 可选；留空继承当前进程 HOME
+
+[[projects.platforms]]
+type = "feishu"
+
+[projects.platforms.options]
+app_id = "your-feishu-app-id"
+app_secret = "your-feishu-app-secret"
+```
+
+如需关闭或调整默认行为，可在顶层显式覆盖 `[display]`（如 `mode = "full"`、`tool_messages = true`、`reply_footer = true`）、`[stream_preview]`（如 `step_list = false`、`end_mode = "recall"`）或 `[decision]`（`enabled = false`）。
 
 队列合并默认开启，在顶层的 `[queue_batch]` 段设置。全部配置项和默认值见 [soundworkbench/README.md](soundworkbench/README.md#配置项参考)，带注释的示例见 `config.example.toml`。
 

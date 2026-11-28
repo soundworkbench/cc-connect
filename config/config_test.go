@@ -209,6 +209,7 @@ func TestRunAsEnv_RejectsDangerousVars(t *testing.T) {
 
 func TestEffectiveDisplayQuiet(t *testing.T) {
 	tru, fal := true, false
+	full := DisplayModeFull
 	compact := DisplayModeCompact
 	quiet := DisplayModeQuiet
 	tests := []struct {
@@ -223,12 +224,20 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 			name:     "defaults no quiet",
 			cfg:      Config{},
 			proj:     ProjectConfig{},
+			wantMode: "quiet",
+			wantTM:   true,
+			wantTool: false,
+		},
+		{
+			name:     "explicit mode full",
+			cfg:      Config{Display: DisplayConfig{Mode: &full}},
+			proj:     ProjectConfig{},
 			wantMode: "full",
 			wantTM:   true,
 			wantTool: true,
 		},
 		{
-			name:     "global quiet maps to quiet mode",
+			name:     "global quiet maps to quiet mode with thinking off",
 			cfg:      Config{Quiet: &tru},
 			proj:     ProjectConfig{},
 			wantMode: "quiet",
@@ -236,7 +245,7 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 			wantTool: false,
 		},
 		{
-			name:     "project quiet maps to quiet mode",
+			name:     "project quiet maps to quiet mode with thinking off",
 			cfg:      Config{},
 			proj:     ProjectConfig{Quiet: &tru},
 			wantMode: "quiet",
@@ -258,9 +267,9 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 			name:     "project quiet false overrides global quiet",
 			cfg:      Config{Quiet: &tru},
 			proj:     ProjectConfig{Quiet: &fal},
-			wantMode: "full",
+			wantMode: "quiet",
 			wantTM:   true,
-			wantTool: true,
+			wantTool: false,
 		},
 		{
 			name:     "explicit mode compact",
@@ -289,11 +298,11 @@ func TestEffectiveDisplayQuiet(t *testing.T) {
 		{
 			name: "explicit mode quiet with thinking override",
 			cfg: Config{
-				Display: DisplayConfig{Mode: &quiet, ThinkingMessages: &tru},
+				Display: DisplayConfig{Mode: &quiet, ThinkingMessages: &fal},
 			},
 			proj:     ProjectConfig{},
 			wantMode: "quiet",
-			wantTM:   true,
+			wantTM:   false,
 			wantTool: false,
 		},
 	}
@@ -359,7 +368,7 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 				Display: &DisplayConfig{},
 			},
 			wantTM:         true,
-			wantTool:       true,
+			wantTool:       false,
 			wantThinkLen:   300,
 			wantToolMaxLen: 500,
 		},
@@ -372,7 +381,7 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 				Display: &DisplayConfig{ThinkingMaxLen: &maxB, ToolMaxLen: &maxB},
 			},
 			wantTM:         true,
-			wantTool:       true,
+			wantTool:       false,
 			wantThinkLen:   200,
 			wantToolMaxLen: 200,
 		},
@@ -405,7 +414,7 @@ func TestEffectiveDisplay_ProjectOverride(t *testing.T) {
 			},
 			proj:           ProjectConfig{},
 			wantTM:         false,
-			wantTool:       true,
+			wantTool:       false,
 			wantThinkLen:   300,
 			wantToolMaxLen: 500,
 		},
@@ -492,16 +501,16 @@ func TestEffectiveDisplayHideAgentFooter(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "default false",
+			name: "default true",
 			cfg:  Config{},
 			proj: ProjectConfig{},
-			want: false,
+			want: true,
 		},
 		{
-			name: "global true",
-			cfg:  Config{Display: DisplayConfig{HideAgentFooter: &tru}},
+			name: "global false",
+			cfg:  Config{Display: DisplayConfig{HideAgentFooter: &fal}},
 			proj: ProjectConfig{},
-			want: true,
+			want: false,
 		},
 		{
 			name: "project overrides global",
@@ -518,6 +527,64 @@ func TestEffectiveDisplayHideAgentFooter(t *testing.T) {
 				t.Fatalf("hideAgentFooter = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestProductDefaultsOutOfTheBox(t *testing.T) {
+	// Empty config gets quiet Feishu experience + decision cards enabled out of the box.
+	var emptyCfg Config
+	mode, tm, tool, _, _, showCtx, replyFooter, hideAgentFooter := EffectiveDisplay(&emptyCfg, &ProjectConfig{})
+	if mode != DisplayModeQuiet || !tm || tool || showCtx || replyFooter || !hideAgentFooter {
+		t.Fatalf("empty config display defaults = (mode=%q tm=%v tool=%v showCtx=%v replyFooter=%v hideAgentFooter=%v), want (quiet, true, false, false, false, true)",
+			mode, tm, tool, showCtx, replyFooter, hideAgentFooter)
+	}
+	if !emptyCfg.Decision.EffectiveEnabled() || emptyCfg.Decision.EffectiveDefaultHours() != 12 {
+		t.Fatalf("empty config decision defaults = (enabled=%v hours=%d), want (true, 12)",
+			emptyCfg.Decision.EffectiveEnabled(), emptyCfg.Decision.EffectiveDefaultHours())
+	}
+
+	// Explicit config values override every default.
+	var explicitCfg Config
+	const explicitTOML = `
+[display]
+mode = "full"
+thinking_messages = false
+tool_messages = true
+show_context_indicator = true
+reply_footer = true
+hide_agent_footer = false
+
+[decision]
+enabled = false
+default_hours = 24
+`
+	if _, err := toml.Decode(explicitTOML, &explicitCfg); err != nil {
+		t.Fatalf("decode explicit config: %v", err)
+	}
+	mode, tm, tool, _, _, showCtx, replyFooter, hideAgentFooter = EffectiveDisplay(&explicitCfg, &ProjectConfig{})
+	if mode != DisplayModeFull || tm || !tool || !showCtx || !replyFooter || hideAgentFooter {
+		t.Fatalf("explicit config display = (mode=%q tm=%v tool=%v showCtx=%v replyFooter=%v hideAgentFooter=%v), want (full, false, true, true, true, false)",
+			mode, tm, tool, showCtx, replyFooter, hideAgentFooter)
+	}
+	if explicitCfg.Decision.EffectiveEnabled() || explicitCfg.Decision.EffectiveDefaultHours() != 24 {
+		t.Fatalf("explicit config decision = (enabled=%v hours=%d), want (false, 24)",
+			explicitCfg.Decision.EffectiveEnabled(), explicitCfg.Decision.EffectiveDefaultHours())
+	}
+
+	// Per-project overrides still win over global defaults.
+	tru, fal := true, false
+	proj := ProjectConfig{
+		ShowContextIndicator: &tru,
+		ReplyFooter:          &tru,
+		Display: &DisplayConfig{
+			ToolMessages:    &tru,
+			HideAgentFooter: &fal,
+		},
+	}
+	mode, tm, tool, _, _, showCtx, replyFooter, hideAgentFooter = EffectiveDisplay(&emptyCfg, &proj)
+	if mode != DisplayModeQuiet || !tm || !tool || !showCtx || !replyFooter || hideAgentFooter {
+		t.Fatalf("project override display = (mode=%q tm=%v tool=%v showCtx=%v replyFooter=%v hideAgentFooter=%v), want (quiet, true, true, true, true, false)",
+			mode, tm, tool, showCtx, replyFooter, hideAgentFooter)
 	}
 }
 

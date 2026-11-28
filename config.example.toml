@@ -141,25 +141,25 @@ level = "info" # debug, info, warn, error
 # Tool rows: 0 disables; 1–3 caps recent mode only. Append keeps all within safety budget.
 # Defaults to enabled in quiet mode; full mode retains its existing behavior.
 # tool_progress_lines = 3
-# mode = "full"             # Display mode: "full" (default), "compact", or "quiet"
+# mode = "quiet"            # Display mode: "quiet" (default), "full", or "compact"
 # card_mode = "legacy"      # Card rendering: "legacy" (default) or "rich" (Feishu Card 2.0)
+#                           # quiet (default): progress in card, hide separate tool messages
+#                           #                  进度收进卡片，隐藏独立工具消息（默认）
 #                           # full: show thinking + tool messages as separate messages
 #                           #       显示思考和工具消息，每条单独发送
 #                           # compact: hide thinking/tool, each text segment sent separately
 #                           #          隐藏思考和工具消息，每段文本独立发送
-#                           # quiet: hide thinking/tool, all text in one card, done emoji at end
-#                           #        隐藏思考和工具消息，所有文本合并到同一张卡片，完成后发送 done emoji
 # thinking_messages = true  # Show/hide thinking messages (default: true) / 是否显示思考消息（默认 true）
 # thinking_max_len = 300    # Max chars for thinking messages (default: 300) / 思考消息最大字符数（默认 300）
 # tool_max_len = 500        # Max chars for tool use messages (default: 500) / 工具调用消息最大字符数（默认 500）
 # history_max_len = 1000    # Max chars per /history entry (default: 1000; 0 = no truncation) / 每条历史记录最大字符数（默认 1000；0 表示不截断）
-# tool_messages = true      # Show/hide tool progress messages (default: true) / 是否显示工具进度消息（默认 true）
-# show_context_indicator = true  # Show "[ctx: ~N%]" suffix on assistant replies (default: true)
-#                                # 在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 true 显示）
-# reply_footer = true            # Show Codex-like footer on assistant replies (default: true)
-#                                # 在助手回复底部显示类似 Codex 的状态行（默认 true 显示）
-# hide_agent_footer = false      # Strip standalone model/token footer lines emitted by agents (default: false)
-#                                # 过滤 agent 自己混入正文的模型/token 统计 footer 行（默认 false 不过滤）
+# tool_messages = false     # Show/hide separate tool progress messages (default: false in quiet, true in full) / 是否发送独立工具进度消息（quiet 默认 false，full 默认 true）
+# show_context_indicator = false # Show "[ctx: ~N%]" suffix on assistant replies (default: false)
+#                                # 在助手回复末尾显示「[ctx: ~N%]」上下文占用提示（默认 false 隐藏）
+# reply_footer = false           # Show Codex-like footer on assistant replies (default: false)
+#                                # 在助手回复底部显示类似 Codex 的状态行（默认 false 隐藏）
+# hide_agent_footer = true       # Strip standalone model/token footer lines emitted by agents (default: true)
+#                                # 过滤 agent 自己混入正文的模型/token 统计 footer 行（默认 true 过滤）
 
 # Per-project override: each [[projects]] entry may have its own [projects.display]
 # block that overrides individual fields of the global [display] block above.
@@ -274,18 +274,18 @@ level = "info" # debug, info, warn, error
 
 # [stream_preview]
 # enabled = true            # Enable/disable streaming preview (default: true) / 启用/禁用流式预览（默认 true）
-# interval_ms = 1500        # Min ms between updates (default: 1500) / 更新最小间隔毫秒数（默认 1500）
-# min_delta_chars = 30      # Min new chars before sending update (default: 30) / 发送更新前最少新增字符数（默认 30）
-# max_chars = 2000          # Max preview length (default: 2000) / 预览最大长度（默认 2000）
-# segmented = false         # Opt-in Feishu thinking heartbeat, typed body, and collapsed process
-# step_list = false         # With segmented: step list (done/running + elapsed), live text and a footer
-# push_interval_ms = 200    # CardKit push cadence in segmented mode
-# typing_interval_ms = 40   # Client typing tick in segmented mode
-# typing_step = 6           # Characters per client tick in segmented mode
-# end_mode = "recall"       # With step_list: "settle" never recalls; short turns finish in the card, long ones collapse to "done" and send the reply as a new message
-# notify_after_ms = 60000   # Settle mode: turns at least this long send the reply as a new message
-# reveal_cps = 0            # Reveal the reply at about this many characters per second; 0 = off
-# print_strategy = "fast"   # "fast" flushes buffered text on new text; "delay" finishes typing it first
+# interval_ms = 1500        # Min ms between updates (default: 700 on Feishu, 1500 elsewhere) / 更新最小间隔毫秒数（飞书默认 700，其他平台 1500）
+# min_delta_chars = 30      # Min new chars before sending update (default: 12 on Feishu, 30 elsewhere) / 发送更新前最少新增字符数
+# max_chars = 2000          # Max preview length (default: 4000 on Feishu, 2000 elsewhere) / 预览最大长度
+# segmented = true          # Feishu segmented streaming card (default: true) / 飞书分段流式卡片（默认 true）
+# step_list = true          # With segmented: step list (done/running + elapsed), live text and a footer (default: true) / 步骤列表卡（默认 true）
+# push_interval_ms = 150    # CardKit push cadence in segmented mode (default: 150)
+# typing_interval_ms = 40   # Client typing tick in segmented mode (default: 40)
+# typing_step = 4           # Characters per client tick in segmented mode (default: 4)
+# end_mode = "settle"       # With step_list: "settle" (default, never recalls) or "recall"
+# notify_after_ms = 60000   # Settle mode: turns at least this long send the reply as a new message (default: 60000)
+# reveal_cps = 90           # Reveal the reply at about this many characters per second; 0 = off (default: 90)
+# print_strategy = "delay"  # "delay" (default) finishes typing buffered text first; "fast" flushes immediately
 # trace_file = ""           # Append per-event streaming timings (JSON lines) to this file
 
 # =============================================================================
@@ -407,6 +407,17 @@ level = "info" # debug, info, warn, error
 #                            # 静默模式：不发送定时任务开始执行的通知消息（默认 false）
 # session_mode = "reuse"     # Default session mode for all cron jobs: "reuse" (default) or "new_per_run"
 #                            # 定时任务默认会话模式："reuse"（复用活跃会话）或 "new_per_run"（每次新建会话）
+
+# =============================================================================
+# Decision Cards / 决策卡片
+# =============================================================================
+# Non-blocking interactive choice cards (`cc-connect send --decision card.json`
+# and AskUserQuestion). Enabled by default; set enabled = false to turn off.
+# 非阻塞交互决策卡，默认开启；设为 enabled = false 可关闭。
+#
+# [decision]
+# enabled = true             # Enable/disable decision cards (default: true) / 是否启用决策卡（默认 true）
+# default_hours = 12         # Default deadline in hours when a card omits one (default: 12) / 默认截止小时数（默认 12）
 
 # =============================================================================
 # Webhook / 外部 Webhook 端点
@@ -2163,6 +2174,36 @@ app_secret = "your-feishu-app-secret"
 # [projects.platforms.options]
 # app_id = "your-app-id"
 # app_secret = "your-app-secret"
+
+# =============================================================================
+# Project: Orca Bot adapter / 接入 Orca Bot
+# =============================================================================
+# Bridges an Orca Bot via the official `orca` CLI to Feishu or other platforms,
+# supporting step-list streaming progress, local attachment handoff, background
+# worker task cards, and Needs-You decision cards out of the box.
+# 通过官方 `orca` CLI 将 Orca Bot 接入飞书等平台，开箱支持步骤列表流式进度卡、
+# 附件本地落盘传递、后台 worker 任务卡与 Needs-You 决策卡。
+#
+# [[projects]]
+# name = "my-orca-bot"
+#
+# [projects.agent]
+# type = "orca"
+#
+# [projects.agent.options]
+# bot_id = "your-orca-bot-id"             # Required: Orca Bot ID or name / 必填：Orca Bot ID 或名称
+# # orca_bin = ""                         # Optional: default checks <orca_home or $HOME>/.config/orca/cli/bin/orca then PATH
+# # orca_home = ""                        # Optional: override HOME when invoking `orca` (empty keeps current process HOME)
+# # sender_id = "feishu-bridge-orca"      # Optional: --from identifier in `orca orchestration send`
+# # poll_interval_ms = 600                # Optional: transcript poll interval (ms)
+# # turn_timeout_sec = 1800               # Optional: max turn wait time (seconds)
+# # sync_needs_you = true                 # Optional: bridge Orca Needs-You items to decision cards (default: true)
+#
+# [[projects.platforms]]
+# type = "feishu"
+# [projects.platforms.options]
+# app_id = "your-feishu-app-id"
+# app_secret = "your-feishu-app-secret"
 
 # =============================================================================
 # Project: ACP (Agent Client Protocol) agent / 使用 ACP 子进程

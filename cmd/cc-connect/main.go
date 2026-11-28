@@ -1011,13 +1011,13 @@ func main() {
 		}
 	}
 
-	// Decision cards (opt-in)
-	if cfg.Decision.Enabled != nil && *cfg.Decision.Enabled {
+	// Decision cards (enabled by default; set [decision] enabled = false to disable)
+	if cfg.Decision.EffectiveEnabled() {
 		if decStore, err := core.NewDecisionStore(cfg.DataDir); err != nil {
 			slog.Warn("decision store unavailable", "error", err)
 		} else {
 			for _, e := range engines {
-				e.SetDecisionStore(decStore, cfg.Decision.DefaultHours)
+				e.SetDecisionStore(decStore, cfg.Decision.EffectiveDefaultHours())
 			}
 		}
 	}
@@ -1631,7 +1631,14 @@ func bootstrapConfig(path string) error {
 	}
 
 	const tmpl = `# cc-connect configuration
-# Docs: https://github.com/chenhg5/cc-connect
+# Docs: https://github.com/soundworkbench/cc-connect
+#
+# Out-of-the-box Feishu defaults are already enabled:
+# - [display]: mode = "quiet", thinking_messages = true, tool_messages = false,
+#              hide_agent_footer = true, show_context_indicator = false, reply_footer = false
+# - [stream_preview]: enabled = true, segmented = true, step_list = true, end_mode = "settle"
+# - [decision]: enabled = true, default_hours = 12
+# Override any of those sections below only if you want different behavior.
 
 [log]
 level = "info"
@@ -1640,7 +1647,7 @@ level = "info"
 name = "my-project"
 
 [projects.agent]
-type = "claudecode"   # "claudecode", "codex", "cursor", "gemini", "qoder", "opencode", or "iflow"
+type = "claudecode"   # "claudecode", "codex", "orca", "model_router", "t3", "cursor", "gemini", "qoder", "opencode", or "iflow"
 
 [projects.agent.options]
 work_dir = "/path/to/your/project"
@@ -1657,8 +1664,8 @@ type = "feishu"
 app_id = "your-feishu-app-id"
 app_secret = "your-feishu-app-secret"
 
-# For more platforms (DingTalk, Telegram, Slack, Discord, LINE, WeChat Work)
-# see: https://github.com/chenhg5/cc-connect/blob/main/config.example.toml
+# For more agents (including Orca Bot: type = "orca") and platforms
+# see: https://github.com/soundworkbench/cc-connect/blob/local/config.example.toml
 `
 	return os.WriteFile(path, []byte(tmpl), 0o644)
 }

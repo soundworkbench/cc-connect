@@ -148,8 +148,24 @@ type CronConfig struct {
 
 // DecisionConfig controls decision cards (cc-connect send --decision).
 type DecisionConfig struct {
-	Enabled      *bool `toml:"enabled"`       // default false
+	Enabled      *bool `toml:"enabled"`       // default true
 	DefaultHours int   `toml:"default_hours"` // deadline when a card sets none; default 12
+}
+
+// EffectiveEnabled reports whether decision cards are enabled (default true).
+func (c DecisionConfig) EffectiveEnabled() bool {
+	if c.Enabled != nil {
+		return *c.Enabled
+	}
+	return true
+}
+
+// EffectiveDefaultHours returns the default deadline in hours (default 12).
+func (c DecisionConfig) EffectiveDefaultHours() int {
+	if c.DefaultHours > 0 {
+		return c.DefaultHours
+	}
+	return 12
 }
 
 // QueueBatchConfig controls consecutive sends and idle automation waiting.
@@ -258,14 +274,14 @@ type ManagementConfig struct {
 
 // Display mode constants.
 const (
-	DisplayModeFull    = "full"    // show thinking + tool messages as separate messages (default)
+	DisplayModeFull    = "full"    // show thinking + tool messages as separate messages
 	DisplayModeCompact = "compact" // hide thinking/tool, each text segment is a separate card
-	DisplayModeQuiet   = "quiet"   // hide thinking/tool, all text appends to one card
+	DisplayModeQuiet   = "quiet"   // keep progress in the card, hide separate tool messages (default)
 )
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
+	Mode                 *string `toml:"mode"`                   // "quiet" (default), "full", or "compact"
 	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
 	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
 	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
@@ -273,11 +289,11 @@ type DisplayConfig struct {
 	ProgressHistory      *string `toml:"progress_history"`       // quiet default append; append or recent
 	KeepProgressCard     *bool   `toml:"keep_progress_card"`     // default false
 	ToolProgressLines    *int    `toml:"tool_progress_lines"`    // quiet enabled; 0 disables; 1–3 caps recent mode only
-	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
+	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default false in quiet, true in full
 	HistoryMaxLen        *int    `toml:"history_max_len"`        // max chars per /history entry; 0 = no truncation; default 1000
-	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
-	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
-	HideAgentFooter      *bool   `toml:"hide_agent_footer"`      // strip agent-emitted model/token footer lines; default false
+	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default false
+	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default false
+	HideAgentFooter      *bool   `toml:"hide_agent_footer"`      // strip agent-emitted model/token footer lines; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -983,18 +999,19 @@ func projectQuietEffective(cfg *Config, proj *ProjectConfig) bool {
 }
 
 // EffectiveDisplay resolves the per-project [projects.display] override on top
-// of the global [display] block, falling back to built-in defaults.
+// of the global [display] block, falling back to built-in product defaults.
 //
 // Resolution order for mode (thinking/tool visibility):
 //  1. Explicit [projects.display].mode wins.
 //  2. Explicit [display].mode wins.
-//  3. Legacy quiet = true (without display.mode) → "quiet".
-//  4. Default → "full".
+//  3. Legacy quiet = true (without display.mode) → "quiet" (with thinking/tool off).
+//  4. Default → "quiet" (with thinking_messages=true, tool_messages=false).
 //
 // Resolution order for thinking_messages / tool_messages:
 //  1. project-level [projects.display].<field> (highest precedence)
 //  2. global [display].<field>
-//  3. mode-derived default (compact/quiet → false, full → true)
+//  3. mode-derived default (full → true/true, compact → false/false,
+//     quiet → true/false unless legacy quiet=true forces thinking=false)
 func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMessages, toolMessages bool, thinkingMaxLen, toolMaxLen int, showContextIndicator, replyFooter, hideAgentFooter bool) {
 	var projDisp *DisplayConfig
 	if proj != nil {
@@ -1002,11 +1019,14 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 	}
 
 	// Resolve mode.
-	mode = DisplayModeFull
+	mode = DisplayModeQuiet
+	explicitMode := false
 	if projDisp != nil && projDisp.Mode != nil {
 		mode = *projDisp.Mode
+		explicitMode = true
 	} else if cfg.Display.Mode != nil {
 		mode = *cfg.Display.Mode
+		explicitMode = true
 	} else if projectQuietEffective(cfg, proj) {
 		mode = DisplayModeQuiet
 	}
@@ -1014,8 +1034,13 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 	// Mode-derived defaults.
 	thinkingDefault, toolDefault := true, true
 	switch mode {
-	case DisplayModeCompact, DisplayModeQuiet:
+	case DisplayModeCompact:
 		thinkingDefault, toolDefault = false, false
+	case DisplayModeQuiet:
+		thinkingDefault, toolDefault = true, false
+		if !explicitMode && projectQuietEffective(cfg, proj) {
+			thinkingDefault = false
+		}
 	}
 
 	pickBool := func(projVal, globalVal *bool, dflt bool) bool {
@@ -1071,7 +1096,7 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 		500,
 	)
 
-	// ShowContextIndicator precedence: proj.ShowContextIndicator > proj.Display.ShowContextIndicator > cfg.Display.ShowContextIndicator > default true
+	// ShowContextIndicator precedence: proj.ShowContextIndicator > proj.Display.ShowContextIndicator > cfg.Display.ShowContextIndicator > default false
 	if proj != nil && proj.ShowContextIndicator != nil {
 		showContextIndicator = *proj.ShowContextIndicator
 	} else if projDisp != nil && projDisp.ShowContextIndicator != nil {
@@ -1079,10 +1104,10 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 	} else if cfg.Display.ShowContextIndicator != nil {
 		showContextIndicator = *cfg.Display.ShowContextIndicator
 	} else {
-		showContextIndicator = true
+		showContextIndicator = false
 	}
 
-	// ReplyFooter precedence: proj.ReplyFooter > proj.Display.ReplyFooter > cfg.Display.ReplyFooter > default true
+	// ReplyFooter precedence: proj.ReplyFooter > proj.Display.ReplyFooter > cfg.Display.ReplyFooter > default false
 	if proj != nil && proj.ReplyFooter != nil {
 		replyFooter = *proj.ReplyFooter
 	} else if projDisp != nil && projDisp.ReplyFooter != nil {
@@ -1090,13 +1115,13 @@ func EffectiveDisplay(cfg *Config, proj *ProjectConfig) (mode string, thinkingMe
 	} else if cfg.Display.ReplyFooter != nil {
 		replyFooter = *cfg.Display.ReplyFooter
 	} else {
-		replyFooter = true
+		replyFooter = false
 	}
 
 	hideAgentFooter = pickBool(
 		getProjBool(func(d *DisplayConfig) *bool { return d.HideAgentFooter }),
 		cfg.Display.HideAgentFooter,
-		false,
+		true,
 	)
 
 	return
